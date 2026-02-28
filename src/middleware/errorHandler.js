@@ -1,20 +1,20 @@
 import { logger } from "../logger/index.js";
 
 // AppError is the base class for all known, intentional errors.
-// Any error thrown with new AppError(...) gets a clean JSON response.
-// Anything else (unexpected errors) gets a generic 500.
+// throw new AppError('Not found', 404) → clean JSON response with that status.
+// Anything else (unexpected) → generic 500.
 export class AppError extends Error {
 	constructor(message, statusCode = 500) {
 		super(message);
 		this.statusCode = statusCode;
-		this.isOperational = true; // marks this as a known, handled error
+		this.isOperational = true;
 	}
 }
 
 // Must have exactly 4 parameters for Express to recognise it as an error handler.
 // eslint-disable-next-line no-unused-vars
 export const errorHandler = (err, req, res, next) => {
-	// Zod validation errors — thrown by our validate() middleware
+	// Zod v4 validation errors — err.issues replaces err.errors from v3
 	if (err.name === "ZodError") {
 		return res.status(400).json({
 			status: "error",
@@ -73,8 +73,8 @@ export const errorHandler = (err, req, res, next) => {
 		});
 	}
 
-	// Unknown / unexpected errors — log the full error, return generic message.
-	// Never expose internal error details in production.
+	// Unknown / unexpected — log full error, return generic message.
+	// Never expose stack traces in production.
 	logger.error({ err, req: { method: req.method, url: req.url } }, "Unhandled error");
 
 	return res.status(500).json({
