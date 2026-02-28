@@ -5,6 +5,10 @@ import { config } from "../config/env.js";
 import { AppError } from "./errorHandler.js";
 import { findUserById } from "../db/utils/auth.js";
 
+// Defined at module scope so the Set is allocated once for the lifetime of the
+// process rather than on every authenticated request.
+const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
+
 // Verifies the Bearer token, loads the user from DB, and attaches req.user.
 // Any failure — missing header, bad token, expired, user not found, bad status —
 // is a 401. The global error handler covers JsonWebTokenError and TokenExpiredError
@@ -32,8 +36,7 @@ export const authenticate = async (req, res, next) => {
 			return next(new AppError("User not found", 401));
 		}
 
-		const inactiveStatuses = new Set(["suspended", "banned", "deactivated"]);
-		if (inactiveStatuses.has(user.account_status)) {
+		if (INACTIVE_STATUSES.has(user.account_status)) {
 			return next(new AppError(`Account is ${user.account_status}`, 401));
 		}
 
