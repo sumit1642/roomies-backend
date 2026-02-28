@@ -47,12 +47,14 @@ const start = async () => {
 					logger.error({ err: poolErr }, "Error closing PostgreSQL pool");
 				}
 
-				// Disconnect Redis — sends QUIT to the server so it can clean up
-				// the connection immediately rather than waiting for a TCP timeout.
-				// Use quit() rather than disconnect() so any pending commands that
-				// were queued before the signal arrived are flushed first.
+				// Disconnect Redis using close(), which is the correct method in
+				// node-redis v5. The Redis QUIT command was deprecated in Redis 7.2,
+				// so quit() is now deprecated in node-redis v5 as well. close()
+				// performs a graceful shutdown — it flushes any pending or in-flight
+				// commands before tearing down the network connection, giving the
+				// same safety guarantee that quit() was previously used for.
 				try {
-					await redis.quit();
+					await redis.close();
 					logger.info("Redis connection closed");
 				} catch (redisErr) {
 					logger.error({ err: redisErr }, "Error closing Redis connection");
