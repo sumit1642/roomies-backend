@@ -1,18 +1,22 @@
 // validate() wraps a Zod schema and returns an Express middleware.
-// Usage on a route: router.post('/register', validate(registerSchema), authController.register)
+// Usage: router.post('/register', validate(registerSchema), authController.register)
 //
-// It validates req.body, req.query, and req.params in one pass.
-// On failure it calls next(err) with the ZodError — the global errorHandler converts it to a 400.
+// Validates req.body, req.query, and req.params in one pass.
+// On failure, calls next(err) with the ZodError — errorHandler converts it to a 400.
+//
+// Zod v4 note: error.errors is now error.issues — updated throughout.
 
 export const validate = (schema) => (req, res, next) => {
-	try {
-		schema.parse({
-			body: req.body,
-			query: req.query,
-			params: req.params,
-		});
-		next();
-	} catch (err) {
-		next(err);
+	const result = schema.safeParse({
+		body: req.body,
+		query: req.query,
+		params: req.params,
+	});
+
+	if (!result.success) {
+		// Pass the ZodError to the global error handler
+		return next(result.error);
 	}
+
+	next();
 };
