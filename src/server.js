@@ -4,7 +4,7 @@ import "./config/env.js";
 
 import { app } from "./app.js";
 import { pool } from "./db/client.js";
-import { connectRedis } from "./cache/client.js";
+import { redis, connectRedis } from "./cache/client.js";
 import { logger } from "./logger/index.js";
 import { config } from "./config/env.js";
 
@@ -23,8 +23,12 @@ const start = async () => {
 		// ─── Graceful shutdown ──────────────────────────────────────────────────
 		// Captures the server instance and tears down cleanly on SIGINT / SIGTERM.
 		// Stops accepting new connections, waits for in-flight requests to finish,
-		// then closes the DB pool and exits. Without this, Ctrl+C in dev cuts off
-		// active requests mid-flight and leaks pg pool connections.
+		// then closes the DB pool and Redis connection before exiting.
+		//
+		// Redis must be explicitly disconnected — Azure Cache for Redis tracks
+		// open connections per instance, and in rolling restarts or scale-in events
+		// leaving connections open can exhaust the connection limit on the new
+		// instance before the old one's TCP connections time out on their own.
 		const shutdown = (signal) => async () => {
 			logger.info(`${signal} received — shutting down gracefully`);
 
@@ -34,11 +38,24 @@ const start = async () => {
 					process.exit(1);
 				}
 
+				// Close PostgreSQL pool — waits for in-flight queries to complete
+				// then releases all connections back to the server.
 				try {
 					await pool.end();
 					logger.info("PostgreSQL pool closed");
 				} catch (poolErr) {
 					logger.error({ err: poolErr }, "Error closing PostgreSQL pool");
+				}
+
+				// Disconnect Redis — sends QUIT to the server so it can clean up
+				// the connection immediately rather than waiting for a TCP timeout.
+				// Use quit() rather than disconnect() so any pending commands that
+				// were queued before the signal arrived are flushed first.
+				try {
+					await redis.quit();
+					logger.info("Redis connection closed");
+				} catch (redisErr) {
+					logger.error({ err: redisErr }, "Error closing Redis connection");
 				}
 
 				logger.info("Shutdown complete");
