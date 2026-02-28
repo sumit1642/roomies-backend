@@ -1,23 +1,24 @@
+// src/config/env.js
+
 import { z } from "zod";
 import dotenv from "dotenv";
 
-// Load .env.local first, fall back to .env.
-// This means you never accidentally use production values locally.
-dotenv.config({ path: ".env.local" });
-dotenv.config({ path: ".env" });
-
-// Zod v4 note: string format validators moved to top-level functions.
-// z.string().email() → z.email()
-// z.string().url()   → z.url()
-// z.string().uuid()  → z.uuid()
-// The old chained methods still work but are deprecated.
+// ENV_FILE is set by the npm script before Node starts.
+// npm run dev       → ENV_FILE=.env.local
+// npm run dev:azure → ENV_FILE=.env.azure
+// If run directly without npm script, falls back to .env.local then .env.
+const envFile = process.env.ENV_FILE;
+if (envFile) {
+	dotenv.config({ path: envFile });
+} else {
+	dotenv.config({ path: ".env.local" });
+	dotenv.config({ path: ".env" });
+}
 
 const envSchema = z.object({
 	NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
 	PORT: z.coerce.number().int().positive().default(3000),
 
-	// z.url() in Zod v4 uses the native URL() constructor which accepts
-	// postgresql:// and redis:// — they are valid URIs, just not HTTP.
 	DATABASE_URL: z.url({ error: "DATABASE_URL must be a valid PostgreSQL connection URL" }),
 	REDIS_URL: z.url({ error: "REDIS_URL must be a valid Redis connection URL" }),
 
@@ -40,17 +41,26 @@ const envSchema = z.object({
 
 	// Storage
 	STORAGE_ADAPTER: z.enum(["local", "azure"]).default("local"),
+
+	// CORS — comma-separated list of allowed origins in production
+	// e.g. "https://roomies.in,https://www.roomies.in"
+	// Not required in development (origin:true is used instead)
+	ALLOWED_ORIGINS: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
-	console.error("❌  Invalid environment variables — server cannot start\n");
+	console.error(`❌  Invalid environment variables in ${envFile ?? ".env.local"} — server cannot start\n`);
 	parsed.error.issues.forEach((issue) => {
 		console.error(`   ${issue.path.join(".")}: ${issue.message}`);
 	});
-	console.error("\nCheck your .env.local file against .env.example\n");
+	console.error("\nCheck your env file against .env.example\n");
 	process.exit(1);
 }
 
-export const config = parsed.data;
+// Parse ALLOWED_ORIGINS into an array once at startup so app.js never touches process.env directly
+export const config = {
+	...parsed.data,
+	ALLOWED_ORIGINS: parsed.data.ALLOWED_ORIGINS ? parsed.data.ALLOWED_ORIGINS.split(",").map((o) => o.trim()) : [],
+};
