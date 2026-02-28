@@ -62,6 +62,7 @@ npm run start:azure  # ENV_FILE=.env.azure — production start on Azure
 - Development: `origin: true` (reflects incoming Origin, works with credentials)
 - Production: `origin: config.ALLOWED_ORIGINS` (whitelist array parsed from `ALLOWED_ORIGINS` env var)
 - `credentials: true` always set — never use `origin: '*'` with credentials
+- **Production guard:** if `NODE_ENV !== "development"` and `ALLOWED_ORIGINS` is empty, the server refuses to start with a fatal log — misconfiguration is caught at boot, not at the first credentialed request
 
 ### Validation Middleware
 `validate(schema)` from `src/middleware/validate.js` wraps any Zod schema and returns Express middleware. After successful parse, `result.data` is written back to `req.body`, `req.query`, and `req.params` — downstream handlers always see coerced types and Zod defaults.
@@ -98,16 +99,22 @@ const registerSchema = z.object({
 `z.url()` in v4 uses the native `URL()` constructor and accepts `postgresql://` and `redis://` — no custom refine needed.
 
 ### Health Check
-`GET /api/v1/health` — returns `200` with both services `ok`, or `503` with `degraded` status and the specific error message per service. Each probe has a 3-second timeout via `Promise.race`. Always keep this endpoint passing before merging any branch.
+`GET /api/v1/health` — returns `200` with both services `ok`, or `503` with `degraded` status and the specific error message per service. Each probe has a 3-second timeout via `Promise.race`. The `withTimeout` helper captures its `setTimeout` handle and calls `clearTimeout` in a `.finally()` block so timer handles never accumulate under load-balancer probe traffic. Always keep this endpoint passing before merging any branch.
 
 ### Graceful Shutdown
-`server.js` handles `SIGINT` and `SIGTERM` — stops accepting connections, drains in-flight requests via `server.close()`, closes the pg pool via `pool.end()`, and force-exits after 10 seconds. This is already in place; future phases do not need to touch `server.js` unless adding new cleanup targets (e.g. Redis disconnect, BullMQ worker shutdown).
+`server.js` handles `SIGINT` and `SIGTERM` — stops accepting connections, drains in-flight requests via `server.close()`, closes the pg pool via `pool.end()`, closes the Redis connection via `redis.close()`, and force-exits after 10 seconds. `redis.close()` is the correct method in node-redis v5 (`quit()` and `disconnect()` are deprecated as of Redis 7.2). This is already in place; future phases do not need to touch `server.js` unless adding new cleanup targets (e.g. BullMQ worker shutdown).
 
 ### Database Queries
 - Import `pool` from `src/db/client.js` for one-shot queries: `pool.query(text, params)`
 - For transactions, check out a client: `const client = await pool.connect()` then `BEGIN / COMMIT / ROLLBACK` manually, always `client.release()` in a `finally` block
 - Stable, reused queries go in `src/db/utils/` — one file per concern
 - One-off or evolving queries live inline in the service file with a comment
+- The `pool.on("error", ...)` handler only calls `process.exit(1)` for `ECONNREFUSED` and `ENOTFOUND` — all other idle-client errors are logged and the pool self-heals
+
+### Redis Client
+- Import `redis` from `src/cache/client.js` — the client is already connected when imported
+- The client is configured with exponential backoff reconnect strategy (100ms base, 3s cap, 10 attempt max) and a 5-second `connectTimeout` — transient blips are retried, permanent failures surface quickly
+- For graceful shutdown, call `await redis.close()` — not `quit()` or `disconnect()`
 
 ### Logging
 Import `logger` from `src/logger/index.js`. Use structured logging: `logger.info({ userId, listingId }, 'Interest request created')`. Never `console.log` in application code.
@@ -133,13 +140,19 @@ Import `logger` from `src/logger/index.js`. Use structured logging: `logger.info
 ```
 src/
   server.js             — entry point: DB connect → Redis connect → listen → graceful shutdown
-  app.js                — Express app, all global middleware in order
+                          (pg pool, Redis via redis.close(), 10s force-exit)
+  app.js                — Express app, all global middleware in order;
+                          production guard exits at boot if ALLOWED_ORIGINS is empty
   config/
-    env.js              — Zod v4 env validation at startup, ENV_FILE support, config export
+    env.js              — Zod v4 env validation at startup, ENV_FILE support, config export;
+                          two-call dotenv pattern intentional (.env.local takes precedence over .env)
   db/
-    client.js           — pg.Pool singleton (max 20, idle 30s, connect timeout 5s)
+    client.js           — pg.Pool singleton (max 20, idle 30s, connect timeout 5s);
+                          pool error handler distinguishes fatal (ECONNREFUSED/ENOTFOUND) from recoverable errors
   cache/
-    client.js           — Redis client singleton via official redis package
+    client.js           — Redis client singleton via official redis package;
+                          configured with exponential backoff reconnect (100ms→3s, max 10 attempts),
+                          5s connectTimeout, 5s keepAlive
   logger/
     index.js            — Pino logger, pino-pretty in dev, raw JSON in prod
   middleware/
@@ -147,7 +160,8 @@ src/
     validate.js         — Zod validation middleware factory, writes result.data back to req
   routes/
     index.js            — rootRouter mounted at /api/v1
-    health.js           — GET /api/v1/health with 3s timeout probes per service
+    health.js           — GET /api/v1/health with 3s timeout probes per service;
+                          withTimeout clears its setTimeout handle via .finally() to prevent timer accumulation
 .env.example            — all required variables documented, safe to commit
 .gitignore              — covers .env.local, .env.azure, uploads/, logs/
 package.json            — final dependency list, env-aware npm scripts
@@ -158,11 +172,23 @@ package.json            — final dependency list, env-aware npm scripts
 - Missing env variable at startup → process exits with clear Zod error naming the exact variable
 - `GET /` → `404` JSON (correct — no root route)
 - `npm run dev` loads `.env.local`, `npm run dev:azure` loads `.env.azure`
+- Production start with empty `ALLOWED_ORIGINS` → process exits with fatal log at boot (never reaches listen)
+- Graceful shutdown closes HTTP server, pg pool, and Redis connection cleanly before exit
+
+**Post-merge hardening applied to this level (all changes are in the merged code):**
+
+1. **Production CORS guard** (`src/app.js`) — `process.exit(1)` at boot if `ALLOWED_ORIGINS` is empty in any non-development environment
+2. **Redis reconnect strategy** (`src/cache/client.js`) — explicit exponential backoff, 10-attempt cap, 5s connect timeout, 5s keepAlive
+3. **Selective pool exit** (`src/db/client.js`) — `process.exit(1)` only on `ECONNREFUSED`/`ENOTFOUND`; other idle-client errors are logged and pool self-heals
+4. **Timer leak fix** (`src/routes/health.js`) — `withTimeout` clears its `setTimeout` handle via `.finally()` on the primary promise
+5. **Redis graceful shutdown** (`src/server.js`) — `redis.close()` added after `pool.end()` in the shutdown sequence
+6. **`redis.close()` over deprecated `redis.quit()`** (`src/server.js`) — `QUIT` command deprecated in Redis 7.2; node-redis v5 deprecates `quit()` and `disconnect()` in favour of `close()`
+7. **dotenv comment** (`src/config/env.js`) — documents the intentional two-call pattern and non-overwriting behaviour
 
 **What the next branch (`phase1/auth`) inherits from this:**
 - `config` object with all validated env vars
 - `pool` for all database queries
-- `redis` client for OTP TTL storage
+- `redis` client for OTP TTL storage (already connected, exponential backoff configured)
 - `logger` for structured logging
 - `AppError` for throwing known errors
 - `validate(schema)` for request validation on every route
@@ -312,4 +338,4 @@ Admin-only router at `/api/v1/admin`, `authorize('admin')` on every route. Verif
 
 ---
 
-*— Last updated: phase1/foundation merged —*
+*— Last updated: phase1/foundation merged (post-review hardening applied) —*
