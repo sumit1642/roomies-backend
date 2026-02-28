@@ -37,6 +37,9 @@ export const sendOtpEmail = async (to, otp) => {
 	if (!otp || typeof otp !== "string") {
 		throw new AppError("OTP is required", 400);
 	}
+	if (!/^[0-9]{6}$/.test(otp)) {
+		throw new AppError("Invalid OTP format", 400);
+	}
 
 	const maskedTo = maskEmail(to);
 
