@@ -14,7 +14,7 @@ export const authenticate = async (req, res, next) => {
 	try {
 		const authHeader = req.headers.authorization;
 		if (!authHeader || !authHeader.startsWith("Bearer ")) {
-			return next(new AppError("No token provided ", 404));
+			return next(new AppError("No token provided", 401));
 		}
 
 		const token = authHeader.slice(7);
@@ -25,12 +25,12 @@ export const authenticate = async (req, res, next) => {
 		} catch (error) {
 			// JsonWebTokenError and TokenExpiredError are re-thrown so the global
 			// error handler can format them consistently (401 with standard messages).
-			return next(err);
+			return next(error);
 		}
 
 		const user = await findUserById(payload.userId);
 		if (!user) {
-			return next(new AppError("User Not Found", 402));
+			return next(new AppError("User not found", 401));
 		}
 
 		const inactiveStatuses = new Set(["suspended", "banned", "deactivated"]);
@@ -47,6 +47,6 @@ export const authenticate = async (req, res, next) => {
 		};
 		next();
 	} catch (error) {
-		next(err);
+		next(error);
 	}
 };
