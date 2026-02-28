@@ -4,8 +4,8 @@ import { redis } from "../cache/client.js";
 
 export const healthRouter = Router();
 
-// GET /health
-// Returns 200 if the server, database, and Redis are all reachable.
+// GET /api/v1/health
+// Returns 200 if server, database, and Redis are all reachable.
 // Returns 503 if any dependency is down.
 healthRouter.get("/", async (req, res) => {
 	const health = {
