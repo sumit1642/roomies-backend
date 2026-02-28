@@ -11,7 +11,10 @@ import { AppError } from "../middleware/errorHandler.js";
 const maskEmail = (email) => {
 	const [local, domain] = email.split("@");
 	if (!domain) return "****";
-	return `${local[0]}****@${domain}`;
+	// Guard against an empty local part (e.g. "@domain.com") — local[0] would
+	// be undefined and produce "undefined****@domain.com" in log output.
+	const prefix = local && local.length > 0 ? local[0] : "*";
+	return `${prefix}****@${domain}`;
 };
 
 // Transport created once at module level — not on every send call.
