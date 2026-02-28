@@ -1,2 +1,23 @@
+# Dependencies
 node_modules/
+
+# Environment files — never commit any .env variant
 .env
+.env.local
+.env.azure
+.env.*.local
+
+# Local file uploads — stored on disk in dev, Azure Blob in prod
+uploads/
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
