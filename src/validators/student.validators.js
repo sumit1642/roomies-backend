@@ -2,6 +2,15 @@
 
 import { z } from "zod";
 
+// Params-only schema for the GET route — validates the userId param is a UUID
+// before the controller runs, so invalid IDs are rejected at the edge with a
+// clean 400 rather than causing a PostgreSQL error or returning a misleading 404.
+export const getStudentParamsSchema = z.object({
+	params: z.object({
+		userId: z.uuid({ error: "Invalid user ID" }),
+	}),
+});
+
 export const updateStudentSchema = z.object({
 	params: z.object({
 		userId: z.uuid({ error: "Invalid user ID" }),

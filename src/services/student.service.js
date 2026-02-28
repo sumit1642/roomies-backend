@@ -7,7 +7,7 @@ export const getStudentProfile = async (userId) => {
 	const { rows } = await pool.query(
 		`
 		SELECT
-			sp.profile_id,
+		sp.profile_id,
 			sp.user_id,
 			sp.full_name,
 			sp.date_of_birth,
@@ -26,8 +26,8 @@ export const getStudentProfile = async (userId) => {
 		FROM student_profiles sp
 		JOIN users u ON u.user_id = sp.user_id
 		WHERE sp.user_id = $1
-			AND sp.deleted_at IS NULL
-			AND u.deleted_at IS NULL`,
+		AND sp.deleted_at IS NULL
+		AND u.deleted_at IS NULL`,
 		[userId],
 	);
 
@@ -40,13 +40,6 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 	if (requestingUserId !== targetUserId) {
 		throw new AppError("Forbidden", 403);
 	}
-
-	// Verify the profile exists
-	const { rows: existing } = await pool.query(
-		`SELECT profile_id FROM student_profiles WHERE user_id = $1 AND deleted_at IS NULL`,
-		[targetUserId],
-	);
-	if (!existing.length) throw new AppError("Student profile not found", 404);
 
 	// Build the SET clause dynamically from only the fields that were provided.
 	// Using a map from camelCase request body to snake_case column names.
@@ -77,15 +70,22 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 
 	values.push(targetUserId); // for the WHERE clause
 
+	// Single UPDATE with RETURNING — atomic: if the profile was soft-deleted
+	// between the ownership check and here, rows will be empty and we surface a
+	// clean 404 rather than returning undefined to the caller.
 	const { rows } = await pool.query(
 		`
 		UPDATE student_profiles
-			SET ${setClauses.join(", ")}
-			WHERE user_id = $${paramIndex}
-			AND deleted_at IS NULL
-			RETURNING *`,
+		SET ${setClauses.join(", ")}
+		WHERE user_id = $${paramIndex}
+		AND deleted_at IS NULL
+		RETURNING *`,
 		values,
 	);
+
+	if (!rows.length) {
+		throw new AppError("Student profile not found", 404);
+	}
 
 	return rows[0];
 };
