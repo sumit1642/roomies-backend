@@ -12,28 +12,25 @@ import { findUserByEmail } from "../db/utils/auth.js";
 import { sendOtpEmail } from "./email.service.js";
 
 // ─── Token helpers ───────────────────────────────────────────────────────────
-const issueAccessToken = (userId, email, roles) => {
+
+const issueAccessToken = (userId, email, roles) =>
 	jwt.sign({ userId, email, roles }, config.JWT_SECRET, {
 		expiresIn: config.JWT_EXPIRES_IN,
 	});
-};
 
-const issueRefreshToken = (userId) => {
+const issueRefreshToken = (userId) =>
 	jwt.sign({ userId }, config.JWT_REFRESH_SECRET, {
 		expiresIn: config.JWT_REFRESH_EXPIRES_IN,
 	});
-};
 
 // Derives the Redis TTL in seconds from the JWT expiry string (e.g. "7d", "24h").
 // Used so Redis auto-expires the refresh token at the same time the JWT becomes invalid.
 const parseTtlSeconds = (expiresIn) => {
 	const match = expiresIn.match(/^(\d+)([smhd])$/);
-	if (!match) {
-		return 7 * 24 * 60 * 60; // fallback : 7days
-	}
+	if (!match) return 7 * 24 * 60 * 60; // fallback: 7 days
 	const [, amount, unit] = match;
-	const multupliers = { s: 1, m: 60, h: 3600, d: 84600 };
-	return parseInt(amount, 10) * multupliers[unit];
+	const multipliers = { s: 1, m: 60, h: 3600, d: 86400 };
+	return parseInt(amount, 10) * multipliers[unit];
 };
 
 const REFRESH_TTL = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN);
@@ -49,18 +46,19 @@ const storeRefreshToken = async (userId, refreshToken) => {
 };
 
 // ─── OTP helpers ─────────────────────────────────────────────────────────────
-const OTP_TTL = 600; // 10min
+
+const OTP_TTL = 600; // 10 minutes in seconds
 const OTP_MAX_ATTEMPTS = 5;
 
-const generateOtp = () => {
+const generateOtp = () =>
 	// crypto.randomInt is cryptographically secure — Math.random() is not
 	String(crypto.randomInt(100000, 999999));
-};
 
 // ─── Service methods ─────────────────────────────────────────────────────────
-export const register = async ({ email, password, role, fullName, buisnessName }) => {
+
+export const register = async ({ email, password, role, fullName, businessName }) => {
 	// Cross-field validation: pg_owner must provide businessName
-	if (role === "pg_owner" && !buisnessName?.trim()) {
+	if (role === "pg_owner" && !businessName?.trim()) {
 		throw new AppError("Business name is required for PG owner registration", 400);
 	}
 
@@ -73,56 +71,51 @@ export const register = async ({ email, password, role, fullName, buisnessName }
 	const passwordHash = await bcrypt.hash(password, 10);
 
 	const client = await pool.connect();
-
 	try {
 		await client.query("BEGIN");
 
 		// Insert into users
 		const { rows: userRows } = await client.query(
-			`
-			INSERT INTO users (email, password_hash)
-			VALUES ($1, $2)
-			RETURNING user_id, email, is_email_verified`,
+			`INSERT INTO users (email, password_hash)
+       VALUES ($1, $2)
+       RETURNING user_id, email, is_email_verified`,
 			[email, passwordHash],
 		);
-
 		const user = userRows[0];
 
 		// Insert role-specific profile
 		if (role === "student") {
 			await client.query(
-				`
-				INSERT INTO student_profiles (user_id, full_name)
-				VALUES ($1, $2)`,
+				`INSERT INTO student_profiles (user_id, full_name)
+         VALUES ($1, $2)`,
 				[user.user_id, fullName],
 			);
 		} else {
 			await client.query(
-				`
-				INSERT INTO pg_owner_profiles (user_id, owner_full_name, business_name)
-				VALUES ($1, $2, $3)`,
+				`INSERT INTO pg_owner_profiles (user_id, owner_full_name, business_name)
+         VALUES ($1, $2, $3)`,
 				[user.user_id, fullName, businessName],
 			);
 		}
 
 		// Insert role
 		await client.query(
-			`
-			INSERT INTO user_roles (user_id, role_name)
-			VALUES ($1, $2)`,
+			`INSERT INTO user_roles (user_id, role_name)
+       VALUES ($1, $2)`,
 			[user.user_id, role],
 		);
+
 		await client.query("COMMIT");
 
-		logger.info({ userId: user.user_id, role }, "User Registered");
+		logger.info({ userId: user.user_id, role }, "User registered");
 
 		const roles = [role];
 		const tokens = buildTokenResponse(user.user_id, user.email, roles, user.is_email_verified);
 		await storeRefreshToken(user.user_id, tokens.refreshToken);
 		return tokens;
-	} catch (error) {
+	} catch (err) {
 		await client.query("ROLLBACK");
-		throw error;
+		throw err;
 	} finally {
 		client.release();
 	}
