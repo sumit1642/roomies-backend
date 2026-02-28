@@ -24,8 +24,8 @@ export const getPgOwnerProfile = async (userId) => {
 		FROM pg_owner_profiles pop
 		JOIN users u ON u.user_id = pop.user_id
 		WHERE pop.user_id = $1
-			AND pop.deleted_at IS NULL
-			AND u.deleted_at IS NULL`,
+		AND pop.deleted_at IS NULL
+		AND u.deleted_at IS NULL`,
 		[userId],
 	);
 
@@ -37,12 +37,6 @@ export const updatePgOwnerProfile = async (requestingUserId, targetUserId, updat
 	if (requestingUserId !== targetUserId) {
 		throw new AppError("Forbidden", 403);
 	}
-
-	const { rows: existing } = await pool.query(
-		`SELECT profile_id FROM pg_owner_profiles WHERE user_id = $1 AND deleted_at IS NULL`,
-		[targetUserId],
-	);
-	if (!existing.length) throw new AppError("PG owner profile not found", 404);
 
 	const columnMap = {
 		businessName: "business_name",
@@ -70,15 +64,21 @@ export const updatePgOwnerProfile = async (requestingUserId, targetUserId, updat
 
 	values.push(targetUserId);
 
+	// Single UPDATE with RETURNING — atomic: soft-deletes between the ownership
+	// check and here surface as a clean 404 rather than returning undefined.
 	const { rows } = await pool.query(
 		`
 		UPDATE pg_owner_profiles
-			SET ${setClauses.join(", ")}
-			WHERE user_id = $${paramIndex}
+		SET ${setClauses.join(", ")}
+		WHERE user_id = $${paramIndex}
 			AND deleted_at IS NULL
-			RETURNING *`,
+		RETURNING *`,
 		values,
 	);
+
+	if (!rows.length) {
+		throw new AppError("PG owner profile not found", 404);
+	}
 
 	return rows[0];
 };
