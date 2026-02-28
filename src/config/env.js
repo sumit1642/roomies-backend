@@ -11,6 +11,18 @@ const envFile = process.env.ENV_FILE;
 if (envFile) {
 	dotenv.config({ path: envFile });
 } else {
+	// Two separate dotenv.config() calls are intentional here — do not collapse
+	// them into one. dotenv.config() never overwrites variables that are already
+	// set in process.env, so the call order establishes a clear priority chain:
+	//
+	//   1. .env.local is loaded first — any variable defined here wins.
+	//   2. .env is loaded second — only fills in variables NOT already set by
+	//      .env.local, acting as a project-wide fallback (e.g. for CI pipelines
+	//      or bare `node src/server.js` invocations without an npm script).
+	//
+	// This means .env.local always takes precedence over .env for local dev,
+	// and a missing .env.local falls back gracefully to .env rather than crashing
+	// before Zod gets to validate the environment and emit a clear error.
 	dotenv.config({ path: ".env.local" });
 	dotenv.config({ path: ".env" });
 }
