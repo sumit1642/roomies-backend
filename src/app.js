@@ -1,3 +1,5 @@
+// src/app.js
+
 import express from "express";
 import helmet from "helmet";
 import cors from "cors";
@@ -14,10 +16,14 @@ export const app = express();
 app.use(helmet());
 
 // ─── CORS ──────────────────────────────────────────────────────────────────
-// In development, allow any origin. Lock this down in production.
+// origin: '*' with credentials: true is a browser spec violation — browsers
+// block credentialed requests to wildcard origins.
+// Development: origin: true reflects the incoming Origin header back, which
+// works with credentials and allows any local origin.
+// Production: explicit whitelist from config, parsed at startup by Zod.
 app.use(
 	cors({
-		origin: config.NODE_ENV === "development" ? "*" : process.env.ALLOWED_ORIGINS?.split(","),
+		origin: config.NODE_ENV === "development" ? true : config.ALLOWED_ORIGINS,
 		credentials: true,
 	}),
 );
@@ -31,8 +37,6 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // ─── Static files (local uploads in dev) ───────────────────────────────────
-// Only active when STORAGE_ADAPTER=local.
-// In production, files are served directly from Azure Blob Storage URLs.
 if (config.STORAGE_ADAPTER === "local") {
 	app.use("/uploads", express.static("uploads"));
 }
@@ -41,7 +45,6 @@ if (config.STORAGE_ADAPTER === "local") {
 app.use("/api/v1", rootRouter);
 
 // ─── 404 handler ───────────────────────────────────────────────────────────
-// Catches any request that didn't match a route above.
 app.use((req, res) => {
 	res.status(404).json({
 		status: "error",
@@ -50,5 +53,4 @@ app.use((req, res) => {
 });
 
 // ─── Global error handler ──────────────────────────────────────────────────
-// Must be last. Catches everything passed to next(err) from any route.
 app.use(errorHandler);
