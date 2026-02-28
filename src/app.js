@@ -21,6 +21,22 @@ app.use(helmet());
 // Development: origin: true reflects the incoming Origin header back, which
 // works with credentials and allows any local origin.
 // Production: explicit whitelist from config, parsed at startup by Zod.
+//
+// Guard: if we are running in production and ALLOWED_ORIGINS is empty, every
+// credentialed cross-origin request will be silently rejected by the browser.
+// This is almost certainly a misconfiguration, not intentional — so we crash
+// loudly at boot rather than serving a broken API for hours before anyone
+// notices. It is far better to fail a deployment than to silently open a
+// security gap or leave the frontend unable to authenticate.
+if (config.NODE_ENV !== "development" && config.ALLOWED_ORIGINS.length === 0) {
+	logger.fatal(
+		"ALLOWED_ORIGINS is empty in a non-development environment. " +
+			"Set ALLOWED_ORIGINS to a comma-separated list of allowed origins " +
+			"(e.g. https://roomies.in,https://www.roomies.in) in your env file.",
+	);
+	process.exit(1);
+}
+
 app.use(
 	cors({
 		origin: config.NODE_ENV === "development" ? true : config.ALLOWED_ORIGINS,
