@@ -12,7 +12,10 @@ export const authorize = (role) => (req, res, next) => {
 		return next(new AppError("authenticate middleware must run before authorize", 500));
 	}
 
-	if (!req.user.roles.includes(role)) {
+	// Defensive guard: findUserById always returns COALESCE(..., '{}') so roles
+	// is always an array, but guard here anyway to prevent a future refactor from
+	// causing a silent TypeError instead of a clear 403.
+	if (!Array.isArray(req.user.roles) || !req.user.roles.includes(role)) {
 		return next(new AppError("Forbidden", 403));
 	}
 
