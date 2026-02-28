@@ -13,6 +13,107 @@ The rule for moving between phases is simple: every endpoint built in a phase mu
 
 ---
 
+## Branching Strategy
+
+Each phase is broken into sub-branches that merge sequentially into the phase branch before anything goes to `main`:
+
+```
+main
+ └── Phase1
+      ├── phase1/foundation   ✅ MERGED
+      ├── phase1/auth         (next — depends on foundation merged)
+      ├── phase1/institutions (depends on auth merged)
+      └── phase1/verification (depends on institutions merged)
+```
+
+**Rule:** Each branch depends on the previous being merged into `Phase1` first. No parallel work — each imports from what the previous produced.
+
+---
+
+## Established Conventions (Set in phase1/foundation — must be followed in all future phases)
+
+These decisions were made during `phase1/foundation` and apply to every file written from this point forward.
+
+### File Path Comment
+Every file must have its relative path as the first comment line:
+```js
+// src/routes/auth.js
+```
+
+### Environment Files
+- `.env.local` — local development (PostgreSQL + Redis on host)
+- `.env.azure` — Azure connectivity check only, never for day-to-day dev
+- `ENV_FILE` environment variable controls which file is loaded, set by npm scripts
+- `src/config/env.js` reads `process.env.ENV_FILE` first, falls back to `.env.local` then `.env`
+- **All new env variables must be added to the Zod schema in `src/config/env.js` before use** — the server refuses to start if any required variable is missing
+
+### npm Scripts
+```bash
+npm run dev          # ENV_FILE=.env.local — daily development
+npm run dev:azure    # ENV_FILE=.env.azure — Azure connectivity check only
+npm start            # ENV_FILE=.env.local — production start
+npm run start:azure  # ENV_FILE=.env.azure — production start on Azure
+```
+
+### Config Object
+`config` is the single source of truth for all environment variables. **Never read `process.env` directly in application code** — always import `config` from `src/config/env.js`. `ALLOWED_ORIGINS` is pre-parsed into an array at startup.
+
+### CORS
+- Development: `origin: true` (reflects incoming Origin, works with credentials)
+- Production: `origin: config.ALLOWED_ORIGINS` (whitelist array parsed from `ALLOWED_ORIGINS` env var)
+- `credentials: true` always set — never use `origin: '*'` with credentials
+
+### Validation Middleware
+`validate(schema)` from `src/middleware/validate.js` wraps any Zod schema and returns Express middleware. After successful parse, `result.data` is written back to `req.body`, `req.query`, and `req.params` — downstream handlers always see coerced types and Zod defaults.
+
+Usage on every route:
+```js
+router.post('/register', validate(registerSchema), authController.register)
+```
+
+Schema structure:
+```js
+const registerSchema = z.object({
+  body: z.object({ ... }),
+  query: z.object({ ... }).optional(),
+  params: z.object({ ... }).optional(),
+})
+```
+
+### Error Handling
+- Throw `new AppError(message, statusCode)` for all known, intentional errors — imported from `src/middleware/errorHandler.js`
+- Pass unknown errors to `next(err)` — the global handler covers Zod, AppError, PostgreSQL constraint errors (`23505`, `23503`, `23514`), and JWT errors
+- `res.headersSent` is checked at the top of the error handler — never causes a double-response crash
+- **Never expose stack traces or raw error objects in responses**
+
+### Zod v4 API (used throughout — not v3)
+| Feature | Correct (v4) | Deprecated (v3) |
+|---|---|---|
+| Email validation | `z.email()` | `z.string().email()` |
+| URL validation | `z.url()` | `z.string().url()` |
+| UUID validation | `z.uuid()` | `z.string().uuid()` |
+| Error list property | `error.issues` | `error.errors` |
+| Error message param | `{ error: '...' }` | `{ message: '...' }` |
+
+`z.url()` in v4 uses the native `URL()` constructor and accepts `postgresql://` and `redis://` — no custom refine needed.
+
+### Health Check
+`GET /api/v1/health` — returns `200` with both services `ok`, or `503` with `degraded` status and the specific error message per service. Each probe has a 3-second timeout via `Promise.race`. Always keep this endpoint passing before merging any branch.
+
+### Graceful Shutdown
+`server.js` handles `SIGINT` and `SIGTERM` — stops accepting connections, drains in-flight requests via `server.close()`, closes the pg pool via `pool.end()`, and force-exits after 10 seconds. This is already in place; future phases do not need to touch `server.js` unless adding new cleanup targets (e.g. Redis disconnect, BullMQ worker shutdown).
+
+### Database Queries
+- Import `pool` from `src/db/client.js` for one-shot queries: `pool.query(text, params)`
+- For transactions, check out a client: `const client = await pool.connect()` then `BEGIN / COMMIT / ROLLBACK` manually, always `client.release()` in a `finally` block
+- Stable, reused queries go in `src/db/utils/` — one file per concern
+- One-off or evolving queries live inline in the service file with a comment
+
+### Logging
+Import `logger` from `src/logger/index.js`. Use structured logging: `logger.info({ userId, listingId }, 'Interest request created')`. Never `console.log` in application code.
+
+---
+
 ## Phase 1 — Foundation & Identity
 
 **Build order levels covered:** 0, 1, 2
@@ -21,19 +122,90 @@ The rule for moving between phases is simple: every endpoint built in a phase mu
 
 **Goal:** A person can register as a student or PG owner, log in with email/password or Google OAuth, receive an OTP, and the server correctly identifies who they are on every subsequent request. Institution auto-verification works. PG owner document upload creates a `verification_requests` row. An admin can see the verification queue.
 
+---
+
+### Level 0 — Foundation `phase1/foundation` ✅ COMPLETE
+
+**Branch:** `phase1/foundation` → merged into `Phase1`
+
+**What was built:**
+
+```
+src/
+  server.js             — entry point: DB connect → Redis connect → listen → graceful shutdown
+  app.js                — Express app, all global middleware in order
+  config/
+    env.js              — Zod v4 env validation at startup, ENV_FILE support, config export
+  db/
+    client.js           — pg.Pool singleton (max 20, idle 30s, connect timeout 5s)
+  cache/
+    client.js           — Redis client singleton via official redis package
+  logger/
+    index.js            — Pino logger, pino-pretty in dev, raw JSON in prod
+  middleware/
+    errorHandler.js     — AppError class + global error handler (Zod, PG constraints, JWT)
+    validate.js         — Zod validation middleware factory, writes result.data back to req
+  routes/
+    index.js            — rootRouter mounted at /api/v1
+    health.js           — GET /api/v1/health with 3s timeout probes per service
+.env.example            — all required variables documented, safe to commit
+.gitignore              — covers .env.local, .env.azure, uploads/, logs/
+package.json            — final dependency list, env-aware npm scripts
+```
+
+**Verified:**
+- `GET /api/v1/health` → `200` with PostgreSQL and Redis both `ok`
+- Missing env variable at startup → process exits with clear Zod error naming the exact variable
+- `GET /` → `404` JSON (correct — no root route)
+- `npm run dev` loads `.env.local`, `npm run dev:azure` loads `.env.azure`
+
+**What the next branch (`phase1/auth`) inherits from this:**
+- `config` object with all validated env vars
+- `pool` for all database queries
+- `redis` client for OTP TTL storage
+- `logger` for structured logging
+- `AppError` for throwing known errors
+- `validate(schema)` for request validation on every route
+- `rootRouter` — import and mount auth routes here
+
+---
+
+### Level 1 — Auth + Identity `phase1/auth` (not started)
+
+**Blocked by:** `phase1/foundation` merged into `Phase1` ✅
+
 **What gets built:**
 
-The foundation layer (`Level 0`) is everything the rest of the project stands on. This means the Express app with all global middleware wired in the correct order — Helmet, CORS, `express.json()`, Pino HTTP logger, global error handler — and critically, the Zod environment validation that runs at startup before the server binds to a port. The `pg.Pool` singleton (`src/db/client.js`) is created here. The Redis client singleton is created here. The base router is mounted. Nothing domain-specific exists yet — this level is purely infrastructure.
+The `authenticate` middleware reads the JWT from the Authorization header, verifies it, queries the user by ID from `src/db/utils/auth.js`, and attaches a `req.user` object with `{ userId, email, roles }`. The `authorize(role)` middleware reads `req.user.roles` and rejects with `403` if the required role is not present. These two functions are the gate for every protected route in every future phase.
 
-The auth layer (`Level 1`) produces the two middleware functions that every protected route in every future phase will depend on. The `authenticate` middleware reads the JWT from the Authorization header, verifies it, runs `findUserByEmail()` or a user-by-id query from `src/db/utils/auth.js`, and attaches a `req.user` object. The `authorize(role)` middleware reads `req.user` and checks the roles array. These two functions are the gate for everything above Level 1. Beyond middleware, this level also produces: password hashing with bcryptjs on registration, OTP generation stored in Redis with a TTL, the Ethereal Mail transport for OTP emails, the Google OAuth callback that exchanges a Google ID token for a local user record, token refresh, and the CRUD endpoints for reading and updating student and pg_owner profiles.
+Beyond middleware: password hashing with `bcryptjs` on registration, OTP generation stored in Redis with a TTL (`redis.setEx(key, ttlSeconds, otp)`), the Ethereal Mail transport for OTP emails via `nodemailer`, the Google OAuth callback using `google-auth-library` that exchanges a Google ID token for a local user record, access + refresh token issuance and refresh endpoint, and the CRUD endpoints for reading and updating student and pg_owner profiles.
 
-The institution and verification layer (`Level 2`) adds `src/db/utils/institutions.js` with `findInstitutionByDomain()` — a stable named function because it is called at every single student registration and will never change shape. The registration flow is completed here: domain extraction, institution lookup, conditional auto-verification. The PG owner document upload endpoint is built here, writing rows to `verification_requests`. The admin verification queue endpoint — protected by `authorize('admin')` — is built here, returning pending requests sorted oldest-first using the composite index.
+`src/db/utils/auth.js` is created here with:
+- `findUserById(id, client?)` — used by `authenticate` middleware on every request
+- `findUserByEmail(email, client?)` — used by login and registration
+- `findUserByGoogleId(googleId, client?)` — used by OAuth callback
 
-**What you can test when Phase 1 is done:**
+**What you can test when this level is done:**
 
-You can register a student with a college email and see `is_email_verified` flip to `TRUE` automatically. You can register a student with a non-college email and see it stay `FALSE`. You can register a PG owner, upload a document, and see the `verification_requests` row appear. You can log in and receive a JWT. You can hit a protected endpoint with and without a valid token and see correct 401 responses. You can hit a pg_owner-only endpoint as a student and receive a correct 403.
+Register with email/password, receive a JWT, hit a protected endpoint with and without the token (expect `200` vs `401`). Hit a pg_owner-only endpoint as a student (expect `403`). Register with a Google ID token, receive a JWT. Request an OTP, verify it, see `is_email_verified` flip to `TRUE`.
 
-**Phase 1 is the most important phase to get completely right.** Every single subsequent feature depends on the token, the user shape, and the role system being airtight. A subtle bug here — a missing role check, a token that doesn't expire, a user query that returns the wrong shape — will silently corrupt every feature built on top of it.
+---
+
+### Level 2 — Institution + Verification `phase1/institutions` (not started)
+
+**Blocked by:** `phase1/auth` merged into `Phase1`
+
+**What gets built:**
+
+`src/db/utils/institutions.js` with `findInstitutionByDomain(domain, client?)` — called at every student registration. The registration flow is completed here: extract domain from email, call `findInstitutionByDomain()`, on match set `is_email_verified = TRUE` and write `institution_id` to `student_profiles` in the same transaction as the user insert.
+
+The PG owner document upload endpoint writes rows to `verification_requests` with `status = pending` and `document_type` from the upload. The admin verification queue endpoint — protected by `authorize('admin')` — returns pending requests sorted oldest-first using the `(status, submitted_at)` composite index.
+
+**What you can test when this level is done:**
+
+Register a student with a college email domain — `is_email_verified` is `TRUE` automatically and `institution_id` is populated. Register a student with a non-college email — `is_email_verified` stays `FALSE`. Upload a document as a PG owner — `verification_requests` row appears. Hit the admin queue as a non-admin — `403`. Hit it as an admin — pending requests appear oldest-first.
+
+**Phase 1 is the most important phase to get completely right.** Every subsequent feature depends on the token, the user shape, and the role system being airtight. A subtle bug here — a missing role check, a token that doesn't expire, a user query that returns the wrong shape — will silently corrupt every feature built on top of it.
 
 ---
 
@@ -49,15 +221,13 @@ You can register a student with a college email and see `is_email_verified` flip
 
 The listings layer (`Level 3`) is the largest single build level in the project. It starts with amenity seeding — inserting the master amenity list into the database so that listings can reference them. Property CRUD comes next, gated behind `authorize('pg_owner')` and a secondary ownership check (a PG owner cannot edit another owner's property). Listing CRUD follows, with the student versus PG owner branching logic: when `property_id` is provided, the listing belongs to a property; when it is `NULL`, the listing is a student room posting.
 
-The search endpoint is the most technically complex piece of this level because it combines two different query types that must be merged. The dynamic parameterised `WHERE` clause handles city, rent range, room type, gender preference, available_from, listing_type, and amenity filters — all of which are optional, meaning the query builder must compose only the clauses for filters that were actually provided. The PostGIS proximity component is a separate call to `findListingsNearPoint(lat, lng, radiusMeters, client)` in `src/db/utils/spatial.js`, which returns a list of listing IDs within the radius using `ST_DWithin`. Those IDs are merged with the filter results to produce the final result set. On top of that, `scoreListingsForUser(userId, listingIds, client)` in `src/db/utils/compatibility.js` appends a compatibility percentage to each listing card by JOINing `listing_preferences` against `user_preferences`. All search parameters are Zod-validated before the first query runs.
+The search endpoint combines two query types that must be merged. The dynamic parameterised `WHERE` clause handles city, rent range, room type, gender preference, available_from, listing_type, and amenity filters — all optional. The PostGIS proximity component calls `findListingsNearPoint(lat, lng, radiusMeters, client)` in `src/db/utils/spatial.js`, returning listing IDs within the radius using `ST_DWithin`. Those IDs are merged with the filter results. `scoreListingsForUser(userId, listingIds, client)` in `src/db/utils/compatibility.js` appends a compatibility percentage to each listing card by JOINing `listing_preferences` against `user_preferences`. All search parameters are Zod-validated before the first query runs.
 
-Saved listings — the bookmark feature — is a simple toggle on `saved_listings` but it is part of this level because it depends on listings existing.
-
-The media layer (`Level 4`) refactors the photo upload path. Until now, photos are uploaded synchronously — the HTTP request waits while the file is written to disk. Level 4 introduces the `StorageService` interface with two implementations: `LocalDiskAdapter` for development (writes to `/uploads/` and serves via Express static middleware) and `AzureBlobStorageAdapter` for production (writes to Azure Blob Storage). The Sharp compression pipeline moves into the `media-processing-queue` BullMQ worker — the HTTP response returns immediately with a temporary URL, and the compressed WebP version replaces it asynchronously. The `NODE_ENV` environment variable controls which adapter is active.
+The media layer (`Level 4`) introduces the `StorageService` interface with two implementations: `LocalDiskAdapter` for development (writes to `/uploads/`, served via Express static middleware already wired in `app.js`) and `AzureBlobStorageAdapter` for production. The Sharp compression pipeline moves into the `media-processing-queue` BullMQ worker — HTTP response returns immediately, compressed WebP replaces the original asynchronously. `STORAGE_ADAPTER` env var (already in Zod schema) controls which adapter is active.
 
 **What you can test when Phase 2 is done:**
 
-A PG owner can create a property with lat/lng and see the `location` geometry column populated automatically by the trigger. A PG owner can attach a listing to that property. A student can search by city and receive active listings. A student can search with a lat/lng and receive listings sorted by proximity. A student with preferences set receives compatibility scores on listings. A photo uploads and the compressed WebP version appears at the expected URL.
+A PG owner can create a property with lat/lng and see the `location` geometry column populated automatically by the trigger. A student can search by city and receive active listings. A student with preferences set receives compatibility scores. A photo uploads and the compressed WebP version appears.
 
 ---
 
@@ -67,21 +237,19 @@ A PG owner can create a property with lat/lng and see the `location` geometry co
 
 **Entry condition:** Phase 2 is stable and tested. At least one active listing exists posted by a verified PG owner. At least one verified student exists with preferences set.
 
-**Goal:** A student can express interest in a listing. A PG owner can accept or decline. On acceptance, a connection is created and the student receives the poster's WhatsApp deep-link. Both parties can confirm the interaction happened. The notification feed works. This is the phase where the core value proposition of the platform — connecting a student to a PG owner — becomes live end to end.
+**Goal:** A student can express interest in a listing. A PG owner can accept or decline. On acceptance, a connection is created and the student receives the poster's WhatsApp deep-link. Both parties can confirm the interaction happened. The notification feed works.
 
 **What gets built:**
 
-The interest and connections layer (`Level 5`) is the most transaction-heavy level in the project. Every state transition in the interest request state machine touches multiple tables and must be atomic. When a student sends an interest request, the service first runs a duplicate check query, then inserts the `interest_requests` row and a `notifications` row for the poster inside a single `BEGIN / COMMIT` block. When a PG owner accepts, the status update on `interest_requests` and the creation of the `connections` row happen together in one transaction — if either fails, both roll back. When the transaction commits, the notification for the sender is dispatched via the `notification-queue`, and the response to the PG owner includes the student's contact information. Symmetrically, when a student's request is accepted, the PG owner's WhatsApp number is returned in the response as a formatted `wa.me` deep-link.
+The interest and connections layer (`Level 5`) — every state transition in the interest request state machine must be atomic. Interest request insert + notification for the poster go in one `BEGIN / COMMIT`. When a PG owner accepts, the status update on `interest_requests` and the creation of the `connections` row go in one transaction — if either fails, both roll back. Post-commit: notification dispatched via `notification-queue`, PG owner's WhatsApp number returned as `wa.me/91XXXXXXXXXX` deep-link.
 
-The two-sided confirmation flow is implemented here: either party can flip their own confirmed flag, and after each flip the service checks whether both are now `TRUE`. If they are, `confirmation_status` is updated to `confirmed` in the same transaction as the flag flip. This transition is also the point after which ratings become possible — which is why it is in Phase 3 even though ratings themselves are in Phase 4.
+Two-sided confirmation: either party flips their own confirmed flag. After each flip, the service checks whether both are `TRUE` — if so, `confirmation_status = confirmed` in the same transaction as the flag update.
 
-The withdrawal and decline flows are simpler state transitions but still need their own Zod validation and their own notification dispatch.
-
-The notifications layer (`Level 6`) adds the HTTP endpoints for reading notifications: the unread count endpoint (used on every page load to populate the bell badge), the full notification feed endpoint (paginated, includes read and unread), and the mark-as-read endpoint. The `notification-queue` BullMQ worker is wired here — it consumes jobs dispatched from Level 5 and inserts the notification rows. The reason notifications are at Level 6 rather than embedded in Level 5 is separation of concerns: Level 5 produces the events, Level 6 consumes and exposes them. The notification feed uses the partial index on `(recipient_id, created_at DESC) WHERE is_read = FALSE` directly.
+The notifications layer (`Level 6`) adds HTTP endpoints: unread count, paginated feed, mark-as-read. The `notification-queue` BullMQ worker is wired here.
 
 **What you can test when Phase 3 is done:**
 
-A student can send an interest request and the PG owner receives a notification. The PG owner can accept and a `connections` row appears with `confirmation_status = pending`. The student's response contains the WhatsApp deep-link. Both parties can flip their confirmed flags independently. When both flags are `TRUE`, `confirmation_status` becomes `confirmed`. A student can decline or withdraw and the correct status transition happens. The notification bell shows the correct unread count. The full notification feed returns notifications in the correct order.
+Student sends interest → PG owner gets notification. PG owner accepts → `connections` row with `confirmation_status = pending`, student gets WhatsApp deep-link. Both flip confirmed flags → `confirmation_status = confirmed`. Notification bell shows correct unread count.
 
 ---
 
@@ -89,23 +257,15 @@ A student can send an interest request and the PG owner receives a notification.
 
 **Build order levels covered:** 7
 
-**Entry condition:** Phase 3 is stable and tested. At least one `connections` row with `confirmation_status = confirmed` exists in the database. This is non-negotiable — the entire rating system depends on confirmed connections existing. If you try to build Phase 4 without Phase 3 complete, you have nothing to test against.
+**Entry condition:** Phase 3 stable. At least one `connections` row with `confirmation_status = confirmed` exists.
 
-**Goal:** A participant in a confirmed connection can rate the other party or the property. The rating appears on the reviewee's public profile. The cached average updates automatically via the trigger. Ratings can be reported. Admins can moderate reports. Hidden ratings drop out of the average automatically.
+**Goal:** A participant in a confirmed connection can rate the other party or the property. Cached average updates automatically. Ratings can be reported. Admins can moderate.
 
 **What gets built:**
 
-The ratings layer (`Level 7`) starts with the eligibility check — a query that confirms the submitting user is either `initiator_id` or `counterpart_id` in the referenced connection and that `confirmation_status = confirmed`. This check runs in the service layer before the `INSERT`. The polymorphic reviewee validation also runs here: if `reviewee_type = 'user'`, the service verifies `reviewee_id` exists in `users`; if `reviewee_type = 'property'`, it verifies it exists in `properties`. These two checks are the application-level integrity that replaces the FK constraint the database cannot express for polymorphic references.
+Eligibility check before every rating INSERT: submitting user must be `initiator_id` or `counterpart_id` in the referenced connection and `confirmation_status = confirmed`. Polymorphic reviewee check: `reviewee_type = 'user'` → verify `reviewee_id` exists in `users`; `reviewee_type = 'property'` → verify in `properties`. Then INSERT the `ratings` row — `update_rating_aggregates` trigger fires automatically, no application code needed to update the cache.
 
-After both checks pass, the `ratings` row is inserted with the `connection_id` FK. The `update_rating_aggregates` trigger fires automatically — the service writes one row and the database recalculates and updates the cached average on `users` or `properties` with no additional application code. After the `INSERT` commits, the `rating_received` notification is dispatched via `notification-queue`.
-
-The public rating feed endpoint returns all visible ratings for a given user or property, ordered newest-first, filtered by `is_visible = TRUE AND deleted_at IS NULL`. This is what the profile page renders.
-
-The report submission endpoint lets any user flag a visible rating with a reason. The partial unique index on `(reporter_id, rating_id) WHERE status = 'open'` prevents duplicate open reports. The admin moderation endpoints — protected by `authorize('admin')` — allow resolving reports as `resolved_removed` or `resolved_kept`. When `resolved_removed` is set, the service runs `UPDATE ratings SET is_visible = FALSE`, which fires `update_rating_aggregates` and removes the rating from the cached average automatically.
-
-**What you can test when Phase 4 is done:**
-
-A participant in a confirmed connection can submit a rating. A non-participant cannot. A rating without a confirmed connection is rejected. The `average_rating` on the reviewee's `users` or `properties` row updates immediately after the INSERT. The public profile shows the rating. A second rating for the same (reviewer, connection, reviewee) triple is rejected by the partial unique index. A user can report a rating. An admin can resolve it as removed and the average drops. An admin can resolve it as kept and the rating stays.
+Report submission, partial unique index prevents duplicate open reports. Admin endpoints to resolve `resolved_removed` (sets `is_visible = FALSE`, trigger recalculates average) or `resolved_kept`.
 
 ---
 
@@ -113,21 +273,15 @@ A participant in a confirmed connection can submit a rating. A non-participant c
 
 **Build order levels covered:** 8, 9
 
-**Entry condition:** Phase 4 is stable and tested. The full trust pipeline — from registration through confirmed connection through rating — works end to end.
+**Entry condition:** Phase 4 stable. Full trust pipeline works end to end.
 
-**Goal:** The platform maintains itself without manual intervention. Expired listings are cleaned up automatically. Stale connections expire. Old soft-deleted rows are permanently removed. The admin panel provides full operational control over users, verifications, and content moderation.
+**Goal:** Platform maintains itself without manual intervention. Full admin control panel.
 
 **What gets built:**
 
-The background jobs layer (`Level 8`) introduces `node-cron` scheduled tasks and the remaining BullMQ queue workers. The listing expiry cron runs daily at 02:00 — it finds all `active` listings where `expires_at < NOW()` and bulk-updates their `status` to `expired`, then dispatches `listing_expiring` notifications via `notification-queue` for any listings expiring within the next 3 days. The connection expiry cron runs daily at 03:00 — it finds `pending` connections older than 30 days and transitions them to `expired`. The hard-delete cleanup cron runs weekly on Sunday at 04:00 — it permanently removes rows where `deleted_at < NOW() - 90 days` from every soft-delete table. The `email-queue` BullMQ worker is wired here, consuming jobs dispatched from registration and OTP flows since Level 1.
+`node-cron` scheduled tasks: listing expiry (daily 02:00), connection expiry (daily 03:00), expiry warning (daily 01:00), hard-delete cleanup (weekly Sunday 04:00). `email-queue` BullMQ worker wired here, consuming jobs dispatched since Level 1.
 
-The reason background jobs come this late in the build order is not that they are unimportant — it is that they depend on the data they operate on existing and being stable. Running a listing expiry job before listings exist, or a connection expiry job before connections exist, would produce jobs that have nothing to do and would never surface real failures.
-
-The admin panel (`Level 9`) adds the admin-only Express router mounted at `/api/v1/admin`, protected by `authorize('admin')` on every single route. The routes here bypass soft-delete filters and visibility constraints so admins can see the full picture. The verification queue management endpoints allow admins to list pending verifications and approve or reject them. The user management endpoints allow suspending, banning, and reactivating accounts. The rating moderation endpoints are the admin-facing side of what was built in Phase 4 — listing open reports and resolving them. The platform analytics endpoints provide aggregate counts: total users by role, listings by status and city, connections by type, ratings submitted in the last 30 days. These are straightforward aggregate queries but they depend on all four zones having live data, which is why they come last.
-
-**What you can test when Phase 5 is done:**
-
-Listing rows with a past `expires_at` are updated to `expired` status. `pending` connections older than 30 days transition to `expired`. Rows with `deleted_at` older than 90 days are permanently removed. An admin can approve a PG owner's verification documents and see `verification_status` flip to `verified`. An admin can suspend a user account. An admin can view all open rating reports. Platform analytics return non-zero counts.
+Admin-only router at `/api/v1/admin`, `authorize('admin')` on every route. Verification queue management, user account management (suspend, ban, reactivate), rating moderation, platform analytics (aggregate counts across all zones).
 
 ---
 
@@ -135,33 +289,27 @@ Listing rows with a past `expires_at` are updated to `expired` status. `pending`
 
 **Build order levels covered:** 10
 
-**Entry condition:** Phase 3 (notifications) is stable and the polling-based notification delivery is confirmed working. This phase is explicitly deferred until the core platform is live and being used — there is no value in building WebSocket infrastructure before there are real users generating real events to push.
+**Entry condition:** Phase 3 polling confirmed working. Real users exist. This phase is explicitly deferred until the core platform is live.
 
-**Goal:** Replace polling-based notification delivery with push delivery over persistent WebSocket connections. The notification database schema does not change. The only additions are the WebSocket server layer and the notification service emitting to connected clients alongside inserting rows.
+**Goal:** Replace polling-based notification delivery with push delivery over persistent WebSocket connections. No schema changes needed.
 
 **What gets built:**
 
-The `ws` WebSocket server is attached to the same HTTP server instance as Express, so it runs on the same port. On connection, the server reads the JWT from the query parameter (`?token=...`), verifies it, looks up the user, and rejects the connection if the token is invalid or expired. On successful handshake, the connection is tracked in a `Map` keyed by `user_id`. When a notification is created — anywhere in the codebase, from any service — the `NotificationService` checks whether the recipient has an active WebSocket connection in the map and if so pushes the notification payload directly to that socket. The polling endpoints from Phase 3 remain in place as fallback for clients whose connection drops.
-
-The `@socket.io/redis-adapter` equivalent for `ws` — a Redis pub/sub layer for broadcasting across multiple server instances on Azure App Service — is also implemented here. This ensures a notification emitted by a request handled on Instance A reaches a client connected to Instance B.
-
-**What you can test when Phase 6 is done:**
-
-Open two browser tabs logged in as different users. Trigger an interest request from one. The notification appears on the other in real time without a page reload. Kill and restart the WebSocket connection — polling picks up any notifications delivered during the gap. Deploy two instances and verify cross-instance delivery works via Redis pub/sub.
+`ws` WebSocket server attached to the same HTTP server instance (same port as Express — the `server` instance is already captured in `server.js` and can be passed to the WebSocket server at that time). JWT from `?token=` query param on handshake. Connections tracked in a `Map` keyed by `user_id`. `NotificationService` checks the map before emitting. Redis pub/sub layer for cross-instance broadcast on Azure App Service.
 
 ---
 
 ## Phase Summary
 
-| Phase | Levels | What Becomes Possible | Hard Dependency |
-|-------|--------|----------------------|-----------------|
-| 1 — Foundation & Identity | 0, 1, 2 | Register, log in, verify, upload documents | Schema applied, `.env.local` valid |
-| 2 — Listings & Search | 3, 4 | Post listings, search by filters + proximity, photos, compatibility scores | Phase 1 stable |
-| 3 — Interaction Pipeline | 5, 6 | Send interest, accept/decline, WhatsApp contact, confirm interactions, notification feed | Phase 2 stable + active listing exists |
-| 4 — Reputation System | 7 | Rate users and properties, report ratings, admin moderation, cached averages | Phase 3 stable + confirmed connection exists |
-| 5 — Operations & Admin | 8, 9 | Auto-expiry, cleanup cron, full admin control panel, analytics | Phase 4 stable |
-| 6 — Real-Time (Future) | 10 | Push notifications via WebSocket, replaces polling | Phase 3 polling confirmed working, real users exist |
+| Phase | Levels | Status | What Becomes Possible | Hard Dependency |
+|-------|--------|--------|----------------------|-----------------|
+| 1 — Foundation & Identity | 0, 1, 2 | Level 0 ✅ | Register, log in, verify, upload documents | Schema applied, `.env.local` valid |
+| 2 — Listings & Search | 3, 4 | Not started | Post listings, search by filters + proximity, photos, compatibility scores | Phase 1 stable |
+| 3 — Interaction Pipeline | 5, 6 | Not started | Send interest, accept/decline, WhatsApp contact, confirm interactions, notification feed | Phase 2 stable |
+| 4 — Reputation System | 7 | Not started | Rate users and properties, report ratings, admin moderation, cached averages | Phase 3 stable |
+| 5 — Operations & Admin | 8, 9 | Not started | Auto-expiry, cleanup cron, full admin control panel, analytics | Phase 4 stable |
+| 6 — Real-Time (Future) | 10 | Deferred | Push notifications via WebSocket, replaces polling | Phase 3 polling confirmed, real users exist |
 
 ---
 
-*— End of Phased Build Plan —*
+*— Last updated: phase1/foundation merged —*
