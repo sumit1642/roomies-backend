@@ -4,8 +4,10 @@
 	"description": "Trust-first PG and roommate discovery platform for Indian college students",
 	"main": "src/server.js",
 	"scripts": {
-		"dev": "nodemon src/server.js",
-		"start": "node src/server.js",
+		"dev": "ENV_FILE=.env.local nodemon src/server.js",
+		"dev:azure": "ENV_FILE=.env.azure nodemon src/server.js",
+		"start": "ENV_FILE=.env.local node src/server.js",
+		"start:azure": "ENV_FILE=.env.azure node src/server.js",
 		"test": "node --experimental-vm-modules node_modules/.bin/jest"
 	},
 	"keywords": [],
