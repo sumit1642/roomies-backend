@@ -47,6 +47,7 @@ export const refreshSchema = z.object({
 // ─── OTP verify ──────────────────────────────────────────────────────────────
 export const otpVerifySchema = z.object({
 	body: z.object({
-		otp: z.string().length(6, { error: "OTP must be exactly 6 digits" }),
+		// Exactly 6 digits — length check alone would accept "ab1234"
+		otp: z.string().regex(/^\d{6}$/, { error: "OTP must be exactly 6 digits" }),
 	}),
 });
