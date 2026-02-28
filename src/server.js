@@ -1,6 +1,5 @@
-// config/env.js runs its Zod validation the moment it is imported.
-// If any environment variable is missing or wrong, process.exit(1) fires here
-// before a single route or database connection is attempted.
+// src/server.js
+
 import "./config/env.js";
 
 import { app } from "./app.js";
@@ -11,28 +10,56 @@ import { config } from "./config/env.js";
 
 const start = async () => {
 	try {
-		// Verify database is reachable before accepting traffic.
-		// A failed query here means the server won't start — better than
-		// starting and serving 500s on every request.
 		await pool.query("SELECT 1");
 		logger.info("PostgreSQL connected");
 
-		// Connect Redis client — must be called once before any redis.get/set calls.
 		await connectRedis();
 		logger.info("Redis connected");
 
-		// Start accepting HTTP connections only after all dependencies are up.
-		app.listen(config.PORT, () => {
+		const server = app.listen(config.PORT, () => {
 			logger.info(`Server running on port ${config.PORT} [${config.NODE_ENV}]`);
 		});
+
+		// ─── Graceful shutdown ──────────────────────────────────────────────────
+		// Captures the server instance and tears down cleanly on SIGINT / SIGTERM.
+		// Stops accepting new connections, waits for in-flight requests to finish,
+		// then closes the DB pool and exits. Without this, Ctrl+C in dev cuts off
+		// active requests mid-flight and leaks pg pool connections.
+		const shutdown = (signal) => async () => {
+			logger.info(`${signal} received — shutting down gracefully`);
+
+			server.close(async (err) => {
+				if (err) {
+					logger.fatal({ err }, "Error closing HTTP server");
+					process.exit(1);
+				}
+
+				try {
+					await pool.end();
+					logger.info("PostgreSQL pool closed");
+				} catch (poolErr) {
+					logger.error({ err: poolErr }, "Error closing PostgreSQL pool");
+				}
+
+				logger.info("Shutdown complete");
+				process.exit(0);
+			});
+
+			// Force exit if shutdown takes longer than 10 seconds
+			setTimeout(() => {
+				logger.fatal("Shutdown timeout exceeded — forcing exit");
+				process.exit(1);
+			}, 10_000).unref();
+		};
+
+		process.on("SIGINT", shutdown("SIGINT"));
+		process.on("SIGTERM", shutdown("SIGTERM"));
 	} catch (err) {
 		logger.fatal({ err }, "Server failed to start");
 		process.exit(1);
 	}
 };
 
-// Handle unhandled promise rejections globally — log and exit.
-// Without this, a crashed async function might go silently unnoticed.
 process.on("unhandledRejection", (err) => {
 	logger.fatal({ err }, "Unhandled promise rejection — shutting down");
 	process.exit(1);
