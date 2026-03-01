@@ -20,10 +20,11 @@ Each phase is broken into sub-branches that merge sequentially into the phase br
 ```
 main
  └── Phase1
-      ├── phase1/foundation   ✅ MERGED
-      ├── phase1/auth         ✅ MERGED
-      ├── phase1/institutions (next — depends on auth merged)
-      └── phase1/verification (depends on institutions merged)
+      ├── phase1/foundation       ✅ MERGED
+      ├── phase1/auth             ✅ MERGED
+      ├── phase1/institutions     ✅ MERGED
+      ├── phase1/auth-transport   ← NEXT (depends on institutions merged)
+      └── phase1/verification     ⏸ HALTED — resumes after auth-transport
 ```
 
 **Rule:** Each branch depends on the previous being merged into `Phase1` first. No parallel work — each imports from what the previous produced.
@@ -252,9 +253,9 @@ GET profile routes for both `/students/:userId/profile` and `/pg-owners/:userId/
 
 ---
 
-### Level 2 — Institution + Verification `phase1/institutions` (not started)
+### Level 2 — Institution + Verification `phase1/institutions` ✅ COMPLETE
 
-**Blocked by:** `phase1/auth` merged into `Phase1` ✅
+**Branch:** `phase1/institutions` → merged into `Phase1`
 
 **Two independent sub-systems in one branch.** The first is a read-modify-write pipeline embedded inside the existing registration transaction. The second is a multi-actor state machine with an append-only audit trail. They share a branch because both depend on `authenticate` and `authorize`, but they are architecturally unrelated problems.
 
@@ -262,55 +263,19 @@ GET profile routes for both `/students/:userId/profile` and `/pg-owners/:userId/
 
 **Sub-system 1 — Institution Auto-Verification**
 
-**What gets built:**
-
 `src/db/utils/institutions.js` — single exported function `findInstitutionByDomain(domain, client?)`. Accepts a clean domain string (not a raw email — domain extraction is the service layer's responsibility). Queries `institutions WHERE email_domain = $1 AND deleted_at IS NULL`, returns `{ institution_id, name }` or `null`. The `deleted_at IS NULL` predicate is mandatory — it matches the partial unique index predicate and forces PostgreSQL to use the index scan rather than a sequential scan. Follows the same `client?` defaulting-to-pool contract as `findUserById` and `findUserByEmail`.
 
 `src/services/auth.service.js` — the registration transaction is extended, not restructured. After the `student_profiles` INSERT, `findInstitutionByDomain` is called with the transaction client, passing `email.split('@')[1]`. On a match: `UPDATE student_profiles SET institution_id = $1 WHERE user_id = $2` and `UPDATE users SET is_email_verified = TRUE WHERE user_id = $1`, both using the transaction client. On no match: nothing runs, the default `is_email_verified = FALSE` / `institution_id = NULL` state persists. The entire block is gated `if (role === 'student')` — PG owner registration is untouched.
 
-**The atomicity requirement:** All three writes — `student_profiles` INSERT, `institution_id` UPDATE, `is_email_verified` UPDATE — must be inside the same `BEGIN / COMMIT`. A post-transaction lookup with a dropped connection between writes would produce a permanently inconsistent row with no automated recovery path. The existing transaction client is already in scope; no restructuring is required.
-
-**The stale RETURNING value problem:** The `users` INSERT uses `RETURNING is_email_verified`, which will be `FALSE` at insert time regardless of what follows. After the institution UPDATE flips it to `TRUE`, `user.is_email_verified` still holds the stale value from RETURNING. A local `effectivelyVerified` variable (initialized to `user.is_email_verified`, set to `true` on a successful match) must be passed to `buildTokenResponse` instead of `user.is_email_verified` directly — otherwise the first token issued to an auto-verified student incorrectly carries `isEmailVerified: false`.
-
-**Logging:** Every successful match logs `{ userId, institutionId, institutionName }` at `info` level. Non-matches produce no log entry — logging every non-institutional registration would be noise with no diagnostic value.
-
-**Schema constraints to carry forward into Phase 2:** `student_profiles.institution_id` has `ON DELETE SET NULL` — if an institution row is removed, `institution_id` becomes `NULL` on existing profiles without cascading deletion. This means `institution_id IS NOT NULL` is not a reliable current-enrollment signal. The authoritative trust signal is `users.is_email_verified = TRUE`, which is set at registration time and is never affected by subsequent institution table changes. Phase 2 compatibility scoring must filter by `institution_id` as a convenience feature, never as a capability gate.
+The atomicity requirement, the stale RETURNING value problem (`effectivelyVerified`), and the `ON DELETE SET NULL` schema constraint are all documented in the original Level 2 plan and remain unchanged.
 
 ---
 
 **Sub-system 2 — PG Owner Verification Pipeline**
 
-**State machine:** `verification_status_enum` defines four states: `unverified → pending → verified` (or `rejected`). `verification_requests` is the append-only audit trail — one row per submission, status written once at resolution. `pg_owner_profiles.verification_status` holds current state. Never use `verification_requests` to answer "what is this owner's current status?" — that query belongs on `pg_owner_profiles`.
+The state machine, all four service functions (`submitDocument`, `getVerificationQueue`, `approveRequest`, `rejectRequest`), the admin router with router-level authorization, keyset pagination rationale, and the concurrency safety pattern on approve/reject are all implemented and stable. Full documentation in the original Level 2 plan is carried forward unchanged.
 
-**What gets built:**
-
-`src/validators/verification.validators.js` — `submitDocumentSchema` validates `document_type` as the `document_type_enum` (four values: `property_document`, `rental_agreement`, `owner_id`, `trade_license`) and `document_url` as a non-empty string. `resolveRequestSchema` validates `requestId` param as UUID, optional `adminNotes` and `rejectionReason` strings on the reject body. `getQueueSchema` validates the pagination cursor params.
-
-`src/services/verification.service.js` — four exported functions:
-
-`submitDocument(requestingUserId, targetUserId, { documentType, documentUrl })` — ownership check first (`requestingUserId !== targetUserId` → `AppError(403)`), then guard query confirming a non-deleted `pg_owner_profiles` row exists for `targetUserId` (defense in depth: the route-level ownership check only sees JWT claims; this sees actual DB state). Single-table INSERT into `verification_requests` — not a transaction, because it is one write with no coupled dependent writes.
-
-`getVerificationQueue({ cursor, limit })` — three-way JOIN: `verification_requests` (filtered `status = 'pending' AND deleted_at IS NULL`) → `pg_owner_profiles` (on `user_id`) → `users` (on `user_id`). Explicit column selection: `vr.request_id`, `vr.document_type`, `vr.document_url`, `vr.submitted_at`, `pop.business_name`, `pop.owner_full_name`, `u.email`. No `SELECT *` from a JOIN — ambiguous column names and silent breakage on schema changes. Keyset pagination using `(submitted_at, request_id)` compound cursor — see pagination rationale below. Oldest-first ordering (`ORDER BY vr.submitted_at ASC, vr.request_id ASC`) for fairness under unbounded queue growth.
-
-`approveRequest(adminUserId, requestId)` — explicit transaction. `UPDATE verification_requests SET status = 'verified', reviewed_at = NOW(), reviewed_by = $adminUserId WHERE request_id = $requestId AND status = 'pending'` — the `AND status = 'pending'` guard makes the transition conditional at the query level. Check `rowCount`: if 0, the request does not exist or was already reviewed → `AppError(409)`. Then `UPDATE pg_owner_profiles SET verification_status = 'verified', verified_at = NOW(), verified_by = $adminUserId WHERE user_id = (SELECT user_id FROM verification_requests WHERE request_id = $requestId)`. Both updates in one `BEGIN / COMMIT` — invariant: `verification_requests.status` and `pg_owner_profiles.verification_status` always agree after any admin action.
-
-`rejectRequest(adminUserId, requestId, { rejectionReason, adminNotes })` — same transaction pattern as approve. Updates `verification_requests.status = 'rejected'` with the same `AND status = 'pending'` guard and `rowCount` check. Updates `pg_owner_profiles.verification_status = 'rejected'` and writes `rejection_reason` — this is what the PG owner sees when they check their status, so it must be present for any meaningful rejection.
-
-`src/controllers/verification.controller.js` — thin wrappers, no business logic. `submitDocument` reads `req.user.userId` and `req.params.userId`. `approveRequest` and `rejectRequest` read `req.user.userId` as the admin actor. `getVerificationQueue` reads cursor params from `req.query`.
-
-`src/routes/admin.js` — `adminRouter.use(authenticate, authorize('admin'))` at router level before any route definitions. Router-level authorization means it is architecturally impossible to register an unprotected route on this router — no developer discipline required, the system enforces it. This is the template for all future admin routers.
-
-`src/routes/pgOwner.js` — one new route: `POST /:userId/documents` with `validate(submitDocumentSchema)` and `verificationController.submitDocument`.
-
-`src/routes/index.js` — mounts admin router at `/admin`.
-
-**Pagination rationale — why offset is wrong here:** Offset pagination is unstable under concurrent writes. If new pending requests arrive while an admin is paginating, offset-based page 2 will contain rows the admin already saw on page 1, and other rows will be silently skipped. Keyset pagination is anchored to a specific data value — the cursor encodes the last seen `(submitted_at, request_id)` pair and the next-page query becomes `WHERE (submitted_at, request_id) > ($cursor_time, $cursor_id)`. New inserts before or after the cursor position do not affect it. The compound cursor is required because `submitted_at` alone is not unique. PostgreSQL's row value comparison syntax evaluates the compound `WHERE` as a lexicographic comparison that mirrors the `ORDER BY` exactly — this is a first-class language feature, not a workaround.
-
-**Concurrency safety on approve/reject:** Two admins acting on the same request simultaneously will result in one succeeding (the `AND status = 'pending'` guard matches) and one receiving a 409 (the guard returns `rowCount = 0` because the first admin already transitioned it). This is correct behavior. Without the guard, both would "succeed" and the second write would silently overwrite the first — no error, no log, wrong state.
-
----
-
-**Files changed:**
+**Files built in this branch:**
 
 | File | Type |
 |------|------|
@@ -325,19 +290,109 @@ GET profile routes for both `/students/:userId/profile` and `/pg-owners/:userId/
 
 ---
 
-**What you can test when this level is done:**
+### Level 2.5 — Dual-Client Auth Transport `phase1/auth-transport` ← NEXT
 
-Student registers with institutional email → registration response has `isEmailVerified: true`, `student_profiles.institution_id` populated, OTP flow not needed and returns 409 if attempted. Student registers with non-institutional email → `isEmailVerified: false`, `institution_id` NULL, OTP flow still works normally. PG owner registers with institutional email → PG owner registration is completely unaffected, `pg_owner_profiles` unchanged. PG owner submits document → `verification_requests` row inserted with `status = pending`. Admin hits queue as non-admin → 403. Admin hits queue → pending requests sorted oldest-first with business name, owner name, and email in each row. Admin approves → both tables updated atomically, subsequent queue fetch no longer shows that request. Admin rejects → `rejection_reason` written to profile, status updated atomically. Two admins approve the same request simultaneously → one 200, one 409.
+**Branch:** `phase1/auth-transport` → merges into `Phase1` before `phase1/verification` resumes
 
-**Regression tests (must still pass):** All seven auth endpoints from Level 1. Both profile GET and PUT routes for students and PG owners. Health check.
+**Blocked by:** `phase1/institutions` merged into `Phase1` ✅
+
+**Why this branch exists before verification continues:** The verification pipeline currently works correctly, but it serves a single client type. Before the frontend is built and before Google OAuth is layered on top, the auth transport layer must be hardened to serve both a browser client (the primary target) and an Android client simultaneously. Getting this right now means every subsequent feature — including the resumed `phase1/verification` — is born into a transport layer that is already correct, rather than retrofitting cookies around features that assumed bearer-only.
 
 ---
 
-**What `phase1/verification` inherits from this:**
+#### The Core Problem
 
-`findInstitutionByDomain` is available for the Google OAuth registration path — same domain check, same transaction insertion point. The admin router pattern (`adminRouter.use(authenticate, authorize('admin'))`) is the template for all future admin endpoints. The `verification_requests` audit trail is the canonical record that Phase 5 admin analytics will aggregate against. The `is_email_verified` as trust signal (not `institution_id`) carries forward into Phase 2 search and compatibility scoring.
+The backend currently returns both tokens in the JSON response body and reads the access token from the `Authorization: Bearer` header on every protected request. This is correct and sufficient for Android clients and Postman. It is incomplete for browser clients, where the correct security posture is to use HttpOnly cookies — tokens stored in cookies cannot be read or stolen by JavaScript, which eliminates the primary XSS attack vector.
 
-**Phase 1 is the most important phase to get completely right.** Every subsequent feature depends on the token, the user shape, and the role system being airtight. A subtle bug here — a missing role check, a token that doesn't expire, a user query that returns the wrong shape — will silently corrupt every feature built on top of it.
+The challenge is that one backend must serve both client types without duplicating logic, creating two separate code paths, or breaking either client's expectations.
+
+---
+
+#### The Solution: Priority-Based Credential Extraction
+
+The `authenticate` middleware is extended with a priority chain for finding the access token: it looks in `req.cookies.accessToken` first, and if that is empty or absent, falls through to the `Authorization: Bearer` header. The token verification logic (`jwt.verify`, `findUserById`, the `INACTIVE_STATUSES` check, the `req.user` attachment) is identical regardless of which source produced the token. Only the extraction point differs.
+
+This design means the middleware does not know or care which client type is calling. It simply tries the more secure transport first. A browser client will always hit the cookie path. An Android client will always hit the header path. The routing is automatic and requires zero per-request decision-making.
+
+---
+
+#### The Silent Refresh Problem
+
+When the access token expires, the correct behavior diverges sharply between the two client types, and this is the most important design decision in this branch.
+
+For a **browser client**, the ideal experience is that expiry is invisible. The middleware detects the expired access token cookie, immediately looks for `req.cookies.refreshToken`, validates it against Redis, issues a new access token, sets it as a new cookie on the outgoing response, and allows the original request to proceed as if nothing happened. The browser never sees a 401. The frontend JavaScript never needs a refresh interceptor. Sessions simply keep working.
+
+For an **Android client**, silent refresh in the middleware would be harmful. Android stores the refresh token in EncryptedSharedPreferences and sends the access token as a Bearer header. If the middleware silently rotated the token without Android knowing, the app's stored token would become stale, and the very next request would fail with a 401 that cannot be recovered from without re-login. Android expects the standard mobile pattern: receive a 401, call `POST /auth/refresh` explicitly with the stored refresh token, receive a new access token, update storage, and retry.
+
+The rule that unifies both cases is: **attempt silent refresh only when the expired token was found in a cookie.** Finding an expired token in the `Authorization` header means the client is managing its own token lifecycle — return a 401 and let it handle things explicitly.
+
+---
+
+#### What the Login and Register Responses Do
+
+This is the key insight that makes the whole system work without choosing sides. The controller for login and register does **both** things simultaneously: it sets the tokens as HttpOnly cookies on the response, and it also includes them in the JSON body. This is not redundant — it is deliberate dual-delivery.
+
+A browser client receives the cookies, stores them automatically at the OS level (outside JavaScript's reach), and ignores the tokens in the body. An Android client receives the tokens in the body, stores them in EncryptedSharedPreferences, and ignores the cookies. Both clients are served correctly by the same response with zero conditional logic.
+
+The `res.cookie()` options that must be applied: `httpOnly: true` (invisible to JavaScript), `secure: config.NODE_ENV === 'production'` (HTTPS-only in prod, plain HTTP allowed in dev), `sameSite: 'strict'` (cookies only sent on same-origin requests, blocking CSRF), and `maxAge` matching the JWT TTL in milliseconds (so the cookie and the token expire together — no stale cookies holding an expired token).
+
+The `maxAge` calculation requires the `parseTtlSeconds` helper from `auth.service.js` to be exported, since it is the single source of truth for TTL arithmetic.
+
+---
+
+#### The Refresh Endpoint
+
+`POST /auth/refresh` stays exactly as it is for Android — reads `req.body.refreshToken`, validates against Redis, returns a new access token in the JSON body. Android uses this endpoint explicitly. The browser never calls it because the middleware handles refresh transparently.
+
+The one scenario where a browser does encounter a 401 is when both the access token cookie and the refresh token cookie have expired simultaneously (the user has not visited in 7 days). In that case the middleware has no refresh token to work with, returns a 401, and the frontend redirects to the login page. This is correct behavior — the session has genuinely ended.
+
+---
+
+#### Files Changed and Why
+
+Only three files change in this branch:
+
+`src/middleware/authenticate.js` gains the priority extraction chain (cookies first, then header) and the conditional silent refresh path (only when the token source was a cookie). This is the only file with substantive new logic.
+
+`src/controllers/auth.controller.js` gains `res.cookie()` calls on register, login, and a cookie-clearing call on logout. The JSON body response is kept intact — this is purely additive. The controller does not change its service calls or response shape in any other way.
+
+`src/services/auth.service.js` exports `parseTtlSeconds` as a named export so the controller can calculate `maxAge` without duplicating the TTL parsing logic. This is a one-line addition.
+
+The validators, routes, service logic, database queries, Redis storage, and schema are all entirely unchanged.
+
+---
+
+#### How Each Client Experiences the System After This Branch
+
+A **browser client** logs in, receives cookies set automatically by the response, and never thinks about tokens again. Every subsequent request attaches cookies automatically. When the access token expires mid-session, the middleware silently refreshes and the request proceeds. The session ends only when the refresh token cookie expires after 7 days of inactivity, producing a 401 that the frontend handles by redirecting to login.
+
+An **Android client** logs in, reads the tokens from the JSON body, stores the refresh token in EncryptedSharedPreferences, and sends the access token as `Authorization: Bearer` on every request. When the access token expires, it receives a 401, calls `POST /auth/refresh` explicitly, receives a new access token, updates its storage, and retries the original request. Nothing about this flow changes from the current behavior.
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `src/middleware/authenticate.js` | Priority extraction (cookie → header) + conditional silent refresh |
+| `src/controllers/auth.controller.js` | `res.cookie()` on login/register, `res.clearCookie()` on logout |
+| `src/services/auth.service.js` | Export `parseTtlSeconds` for cookie `maxAge` calculation |
+
+**Regression tests (must still pass after this branch):** All seven auth endpoints from Level 1. All profile GET and PUT routes. The verification queue and resolution endpoints. Health check.
+
+**What `phase1/verification` inherits from this:** The `authenticate` middleware is now transport-agnostic. The Google OAuth registration path (the primary target of `phase1/verification`) will go through the same login response pattern — setting cookies and returning body tokens simultaneously — without any additional middleware changes.
+
+---
+
+### Level 2.6 — Google OAuth + Verification Hardening `phase1/verification` ⏸ HALTED
+
+**Blocked by:** `phase1/auth-transport` merged into `Phase1`
+
+**Why halted:** The `phase1/auth-transport` branch must be complete and merged first. The Google OAuth callback is a new authentication entry point — it must go through the same dual-delivery response (cookies + body) that the email/password login uses. Building it before the transport layer is settled would mean retrofitting cookie logic onto the OAuth path after the fact, which risks inconsistency.
+
+**What this branch will build when it resumes:**
+
+This branch completes the `findUserByGoogleId` stub in `src/db/utils/auth.js` and implements the full Google OAuth registration and login flow. A Google OAuth user registers via the `/auth/google/callback` endpoint. The backend verifies the Google ID token using `google-auth-library`, extracts the verified email, runs the same institution domain lookup as the email/password registration path, and issues tokens via the same `buildTokenResponse` function. The response uses the same dual-delivery pattern (cookies + body) established in `phase1/auth-transport`.
+
+The `phase1/verification` branch also completes any remaining hardening on the verification pipeline that was identified during review of `phase1/institutions` but was not addressed in that branch.
 
 ---
 
@@ -345,7 +400,7 @@ Student registers with institutional email → registration response has `isEmai
 
 **Build order levels covered:** 3, 4
 
-**Entry condition:** Phase 1 is stable and tested. A verified PG owner exists in the database. A verified student exists in the database.
+**Entry condition:** Phase 1 is fully stable and all sub-branches merged. A verified PG owner exists in the database. A verified student exists in the database.
 
 **Goal:** A PG owner can create a property and attach listings to it. A student can search for listings by city, rent range, room type, and proximity to a location. Photos upload and get compressed. Compatibility scores appear on search results. A student can save listings.
 
@@ -356,10 +411,6 @@ The listings layer (`Level 3`) is the largest single build level in the project.
 The search endpoint combines two query types that must be merged. The dynamic parameterised `WHERE` clause handles city, rent range, room type, gender preference, available_from, listing_type, and amenity filters — all optional. The PostGIS proximity component calls `findListingsNearPoint(lat, lng, radiusMeters, client)` in `src/db/utils/spatial.js`, returning listing IDs within the radius using `ST_DWithin`. Those IDs are merged with the filter results. `scoreListingsForUser(userId, listingIds, client)` in `src/db/utils/compatibility.js` appends a compatibility percentage to each listing card by JOINing `listing_preferences` against `user_preferences`. All search parameters are Zod-validated before the first query runs.
 
 The media layer (`Level 4`) introduces the `StorageService` interface with two implementations: `LocalDiskAdapter` for development (writes to `/uploads/`, served via Express static middleware already wired in `app.js`) and `AzureBlobStorageAdapter` for production. The Sharp compression pipeline moves into the `media-processing-queue` BullMQ worker — HTTP response returns immediately, compressed WebP replaces the original asynchronously. `STORAGE_ADAPTER` env var (already in Zod schema) controls which adapter is active.
-
-**What you can test when Phase 2 is done:**
-
-A PG owner can create a property with lat/lng and see the `location` geometry column populated automatically by the trigger. A student can search by city and receive active listings. A student with preferences set receives compatibility scores. A photo uploads and the compressed WebP version appears.
 
 ---
 
@@ -378,10 +429,6 @@ The interest and connections layer (`Level 5`) — every state transition in the
 Two-sided confirmation: either party flips their own confirmed flag. After each flip, the service checks whether both are `TRUE` — if so, `confirmation_status = confirmed` in the same transaction as the flag update.
 
 The notifications layer (`Level 6`) adds HTTP endpoints: unread count, paginated feed, mark-as-read. The `notification-queue` BullMQ worker is wired here.
-
-**What you can test when Phase 3 is done:**
-
-Student sends interest → PG owner gets notification. PG owner accepts → `connections` row with `confirmation_status = pending`, student gets WhatsApp deep-link. Both flip confirmed flags → `confirmation_status = confirmed`. Notification bell shows correct unread count.
 
 ---
 
@@ -435,8 +482,8 @@ Admin-only router at `/api/v1/admin`, `authorize('admin')` on every route. Verif
 
 | Phase | Levels | Status | What Becomes Possible | Hard Dependency |
 |-------|--------|--------|----------------------|-----------------|
-| 1 — Foundation & Identity | 0, 1, 2 | Levels 0 + 1 ✅ | Register, log in, verify, upload documents | Schema applied, `.env.local` valid |
-| 2 — Listings & Search | 3, 4 | Not started | Post listings, search by filters + proximity, photos, compatibility scores | Phase 1 stable |
+| 1 — Foundation & Identity | 0, 1, 2 | Levels 0 + 1 + 2 ✅, 2.5 next, 2.6 ⏸ | Register, log in, verify, upload documents | Schema applied, `.env.local` valid |
+| 2 — Listings & Search | 3, 4 | Not started | Post listings, search by filters + proximity, photos, compatibility scores | Phase 1 fully stable |
 | 3 — Interaction Pipeline | 5, 6 | Not started | Send interest, accept/decline, WhatsApp contact, confirm interactions, notification feed | Phase 2 stable |
 | 4 — Reputation System | 7 | Not started | Rate users and properties, report ratings, admin moderation, cached averages | Phase 3 stable |
 | 5 — Operations & Admin | 8, 9 | Not started | Auto-expiry, cleanup cron, full admin control panel, analytics | Phase 4 stable |
@@ -444,4 +491,4 @@ Admin-only router at `/api/v1/admin`, `authorize('admin')` on every route. Verif
 
 ---
 
-*— Last updated: phase1/auth merged (post-review hardening applied) —*
+*— Last updated: phase1/institutions merged; phase1/auth-transport designed and ready to build; phase1/verification halted pending transport layer —*
