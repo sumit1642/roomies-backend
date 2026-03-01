@@ -26,7 +26,12 @@ const issueRefreshToken = (userId) =>
 
 // Derives the Redis TTL in seconds from the JWT expiry string (e.g. "7d", "24h").
 // Used so Redis auto-expires the refresh token at the same time the JWT becomes invalid.
-const parseTtlSeconds = (expiresIn) => {
+//
+// Exported as a named export so auth.controller.js can calculate cookie maxAge
+// from the same source of truth. The alternative — duplicating the arithmetic in
+// the controller — would mean a TTL change in env vars silently desynchronises
+// the cookie lifetime from the token lifetime.
+export const parseTtlSeconds = (expiresIn) => {
 	const match = expiresIn.match(/^(\d+)([smhd])$/);
 	if (!match) return 7 * 24 * 60 * 60; // fallback: 7 days
 	const [, amount, unit] = match;
