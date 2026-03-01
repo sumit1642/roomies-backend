@@ -256,15 +256,86 @@ GET profile routes for both `/students/:userId/profile` and `/pg-owners/:userId/
 
 **Blocked by:** `phase1/auth` merged into `Phase1` ✅
 
+**Two independent sub-systems in one branch.** The first is a read-modify-write pipeline embedded inside the existing registration transaction. The second is a multi-actor state machine with an append-only audit trail. They share a branch because both depend on `authenticate` and `authorize`, but they are architecturally unrelated problems.
+
+---
+
+**Sub-system 1 — Institution Auto-Verification**
+
 **What gets built:**
 
-`src/db/utils/institutions.js` with `findInstitutionByDomain(domain, client?)` — called at every student registration. The registration flow is completed here: extract domain from email, call `findInstitutionByDomain()`, on match set `is_email_verified = TRUE` and write `institution_id` to `student_profiles` in the same transaction as the user insert.
+`src/db/utils/institutions.js` — single exported function `findInstitutionByDomain(domain, client?)`. Accepts a clean domain string (not a raw email — domain extraction is the service layer's responsibility). Queries `institutions WHERE email_domain = $1 AND deleted_at IS NULL`, returns `{ institution_id, name }` or `null`. The `deleted_at IS NULL` predicate is mandatory — it matches the partial unique index predicate and forces PostgreSQL to use the index scan rather than a sequential scan. Follows the same `client?` defaulting-to-pool contract as `findUserById` and `findUserByEmail`.
 
-The PG owner document upload endpoint writes rows to `verification_requests` with `status = pending` and `document_type` from the upload. The admin verification queue endpoint — protected by `authorize('admin')` — returns pending requests sorted oldest-first using the `(status, submitted_at)` composite index.
+`src/services/auth.service.js` — the registration transaction is extended, not restructured. After the `student_profiles` INSERT, `findInstitutionByDomain` is called with the transaction client, passing `email.split('@')[1]`. On a match: `UPDATE student_profiles SET institution_id = $1 WHERE user_id = $2` and `UPDATE users SET is_email_verified = TRUE WHERE user_id = $1`, both using the transaction client. On no match: nothing runs, the default `is_email_verified = FALSE` / `institution_id = NULL` state persists. The entire block is gated `if (role === 'student')` — PG owner registration is untouched.
+
+**The atomicity requirement:** All three writes — `student_profiles` INSERT, `institution_id` UPDATE, `is_email_verified` UPDATE — must be inside the same `BEGIN / COMMIT`. A post-transaction lookup with a dropped connection between writes would produce a permanently inconsistent row with no automated recovery path. The existing transaction client is already in scope; no restructuring is required.
+
+**The stale RETURNING value problem:** The `users` INSERT uses `RETURNING is_email_verified`, which will be `FALSE` at insert time regardless of what follows. After the institution UPDATE flips it to `TRUE`, `user.is_email_verified` still holds the stale value from RETURNING. A local `effectivelyVerified` variable (initialized to `user.is_email_verified`, set to `true` on a successful match) must be passed to `buildTokenResponse` instead of `user.is_email_verified` directly — otherwise the first token issued to an auto-verified student incorrectly carries `isEmailVerified: false`.
+
+**Logging:** Every successful match logs `{ userId, institutionId, institutionName }` at `info` level. Non-matches produce no log entry — logging every non-institutional registration would be noise with no diagnostic value.
+
+**Schema constraints to carry forward into Phase 2:** `student_profiles.institution_id` has `ON DELETE SET NULL` — if an institution row is removed, `institution_id` becomes `NULL` on existing profiles without cascading deletion. This means `institution_id IS NOT NULL` is not a reliable current-enrollment signal. The authoritative trust signal is `users.is_email_verified = TRUE`, which is set at registration time and is never affected by subsequent institution table changes. Phase 2 compatibility scoring must filter by `institution_id` as a convenience feature, never as a capability gate.
+
+---
+
+**Sub-system 2 — PG Owner Verification Pipeline**
+
+**State machine:** `verification_status_enum` defines four states: `unverified → pending → verified` (or `rejected`). `verification_requests` is the append-only audit trail — one row per submission, status written once at resolution. `pg_owner_profiles.verification_status` holds current state. Never use `verification_requests` to answer "what is this owner's current status?" — that query belongs on `pg_owner_profiles`.
+
+**What gets built:**
+
+`src/validators/verification.validators.js` — `submitDocumentSchema` validates `document_type` as the `document_type_enum` (four values: `property_document`, `rental_agreement`, `owner_id`, `trade_license`) and `document_url` as a non-empty string. `resolveRequestSchema` validates `requestId` param as UUID, optional `adminNotes` and `rejectionReason` strings on the reject body. `getQueueSchema` validates the pagination cursor params.
+
+`src/services/verification.service.js` — four exported functions:
+
+`submitDocument(requestingUserId, targetUserId, { documentType, documentUrl })` — ownership check first (`requestingUserId !== targetUserId` → `AppError(403)`), then guard query confirming a non-deleted `pg_owner_profiles` row exists for `targetUserId` (defense in depth: the route-level ownership check only sees JWT claims; this sees actual DB state). Single-table INSERT into `verification_requests` — not a transaction, because it is one write with no coupled dependent writes.
+
+`getVerificationQueue({ cursor, limit })` — three-way JOIN: `verification_requests` (filtered `status = 'pending' AND deleted_at IS NULL`) → `pg_owner_profiles` (on `user_id`) → `users` (on `user_id`). Explicit column selection: `vr.request_id`, `vr.document_type`, `vr.document_url`, `vr.submitted_at`, `pop.business_name`, `pop.owner_full_name`, `u.email`. No `SELECT *` from a JOIN — ambiguous column names and silent breakage on schema changes. Keyset pagination using `(submitted_at, request_id)` compound cursor — see pagination rationale below. Oldest-first ordering (`ORDER BY vr.submitted_at ASC, vr.request_id ASC`) for fairness under unbounded queue growth.
+
+`approveRequest(adminUserId, requestId)` — explicit transaction. `UPDATE verification_requests SET status = 'verified', reviewed_at = NOW(), reviewed_by = $adminUserId WHERE request_id = $requestId AND status = 'pending'` — the `AND status = 'pending'` guard makes the transition conditional at the query level. Check `rowCount`: if 0, the request does not exist or was already reviewed → `AppError(409)`. Then `UPDATE pg_owner_profiles SET verification_status = 'verified', verified_at = NOW(), verified_by = $adminUserId WHERE user_id = (SELECT user_id FROM verification_requests WHERE request_id = $requestId)`. Both updates in one `BEGIN / COMMIT` — invariant: `verification_requests.status` and `pg_owner_profiles.verification_status` always agree after any admin action.
+
+`rejectRequest(adminUserId, requestId, { rejectionReason, adminNotes })` — same transaction pattern as approve. Updates `verification_requests.status = 'rejected'` with the same `AND status = 'pending'` guard and `rowCount` check. Updates `pg_owner_profiles.verification_status = 'rejected'` and writes `rejection_reason` — this is what the PG owner sees when they check their status, so it must be present for any meaningful rejection.
+
+`src/controllers/verification.controller.js` — thin wrappers, no business logic. `submitDocument` reads `req.user.userId` and `req.params.userId`. `approveRequest` and `rejectRequest` read `req.user.userId` as the admin actor. `getVerificationQueue` reads cursor params from `req.query`.
+
+`src/routes/admin.js` — `adminRouter.use(authenticate, authorize('admin'))` at router level before any route definitions. Router-level authorization means it is architecturally impossible to register an unprotected route on this router — no developer discipline required, the system enforces it. This is the template for all future admin routers.
+
+`src/routes/pgOwner.js` — one new route: `POST /:userId/documents` with `validate(submitDocumentSchema)` and `verificationController.submitDocument`.
+
+`src/routes/index.js` — mounts admin router at `/admin`.
+
+**Pagination rationale — why offset is wrong here:** Offset pagination is unstable under concurrent writes. If new pending requests arrive while an admin is paginating, offset-based page 2 will contain rows the admin already saw on page 1, and other rows will be silently skipped. Keyset pagination is anchored to a specific data value — the cursor encodes the last seen `(submitted_at, request_id)` pair and the next-page query becomes `WHERE (submitted_at, request_id) > ($cursor_time, $cursor_id)`. New inserts before or after the cursor position do not affect it. The compound cursor is required because `submitted_at` alone is not unique. PostgreSQL's row value comparison syntax evaluates the compound `WHERE` as a lexicographic comparison that mirrors the `ORDER BY` exactly — this is a first-class language feature, not a workaround.
+
+**Concurrency safety on approve/reject:** Two admins acting on the same request simultaneously will result in one succeeding (the `AND status = 'pending'` guard matches) and one receiving a 409 (the guard returns `rowCount = 0` because the first admin already transitioned it). This is correct behavior. Without the guard, both would "succeed" and the second write would silently overwrite the first — no error, no log, wrong state.
+
+---
+
+**Files changed:**
+
+| File | Type |
+|------|------|
+| `src/db/utils/institutions.js` | New |
+| `src/services/verification.service.js` | New |
+| `src/controllers/verification.controller.js` | New |
+| `src/validators/verification.validators.js` | New |
+| `src/routes/admin.js` | New |
+| `src/services/auth.service.js` | Modified (registration transaction extended) |
+| `src/routes/pgOwner.js` | Modified (one new route) |
+| `src/routes/index.js` | Modified (admin router mounted) |
+
+---
 
 **What you can test when this level is done:**
 
-Register a student with a college email domain — `is_email_verified` is `TRUE` automatically and `institution_id` is populated. Register a student with a non-college email — `is_email_verified` stays `FALSE`. Upload a document as a PG owner — `verification_requests` row appears. Hit the admin queue as a non-admin — `403`. Hit it as an admin — pending requests appear oldest-first.
+Student registers with institutional email → registration response has `isEmailVerified: true`, `student_profiles.institution_id` populated, OTP flow not needed and returns 409 if attempted. Student registers with non-institutional email → `isEmailVerified: false`, `institution_id` NULL, OTP flow still works normally. PG owner registers with institutional email → PG owner registration is completely unaffected, `pg_owner_profiles` unchanged. PG owner submits document → `verification_requests` row inserted with `status = pending`. Admin hits queue as non-admin → 403. Admin hits queue → pending requests sorted oldest-first with business name, owner name, and email in each row. Admin approves → both tables updated atomically, subsequent queue fetch no longer shows that request. Admin rejects → `rejection_reason` written to profile, status updated atomically. Two admins approve the same request simultaneously → one 200, one 409.
+
+**Regression tests (must still pass):** All seven auth endpoints from Level 1. Both profile GET and PUT routes for students and PG owners. Health check.
+
+---
+
+**What `phase1/verification` inherits from this:**
+
+`findInstitutionByDomain` is available for the Google OAuth registration path — same domain check, same transaction insertion point. The admin router pattern (`adminRouter.use(authenticate, authorize('admin'))`) is the template for all future admin endpoints. The `verification_requests` audit trail is the canonical record that Phase 5 admin analytics will aggregate against. The `is_email_verified` as trust signal (not `institution_id`) carries forward into Phase 2 search and compatibility scoring.
 
 **Phase 1 is the most important phase to get completely right.** Every subsequent feature depends on the token, the user shape, and the role system being airtight. A subtle bug here — a missing role check, a token that doesn't expire, a user query that returns the wrong shape — will silently corrupt every feature built on top of it.
 
