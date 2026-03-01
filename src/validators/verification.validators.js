@@ -31,7 +31,7 @@ export const getQueueSchema = z.object({
 		.object({
 			cursorTime: z.string().optional(),
 			cursorId: z.uuid({ error: "cursorId must be a valid UUID" }).optional(),
-			limit: z.coerce.number().int().min(1).max(100).default(20).optional(),
+			limit: z.coerce.number().int().min(1).max(100).default(20),
 		})
 		.refine(
 			(data) => {
