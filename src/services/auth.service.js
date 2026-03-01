@@ -9,6 +9,7 @@ import { redis } from "../cache/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { findUserByEmail } from "../db/utils/auth.js";
+import { findInstitutionByDomain } from "../db/utils/institutions.js";
 import { sendOtpEmail } from "./email.service.js";
 
 // ─── Token helpers ───────────────────────────────────────────────────────────
@@ -72,6 +73,11 @@ export const register = async ({ email, password, role, fullName, businessName }
 	const passwordHash = await bcrypt.hash(password, 10);
 
 	const client = await pool.connect();
+	// Tracks the effective email verification state for the token response.
+	// Initialized from the users INSERT RETURNING value (always FALSE at insert time).
+	// May be set to true inside the transaction if institution auto-verification fires.
+	// Must be declared outside the try block so it is in scope at buildTokenResponse.
+	let effectivelyVerified = false;
 	try {
 		await client.query("BEGIN");
 
@@ -96,13 +102,58 @@ export const register = async ({ email, password, role, fullName, businessName }
 			throw err;
 		}
 
-		// Insert role-specific profile
+		// Initialise from the RETURNING value. At INSERT time the DB default is
+		// FALSE, so this will always be false here. It may be updated to true below
+		// if institution auto-verification fires for a student registration.
+		effectivelyVerified = user.is_email_verified;
 		if (role === "student") {
 			await client.query(
 				`INSERT INTO student_profiles (user_id, full_name)
          VALUES ($1, $2)`,
 				[user.user_id, fullName],
 			);
+
+			// Institution auto-verification — must run inside this transaction.
+			// All three writes (student_profiles INSERT above, institution_id UPDATE,
+			// is_email_verified UPDATE) describe a single atomic fact: "this email
+			// proves enrollment at this institution." Splitting them across transaction
+			// boundaries would allow partial state to persist on connection failure.
+			//
+			// Domain extraction happens here, not inside the utility, so the utility
+			// stays pure and independently testable with a plain domain string.
+			const domain = user.email.split("@")[1];
+			const institution = await findInstitutionByDomain(domain, client);
+
+			if (institution) {
+				await client.query(
+					`UPDATE student_profiles
+           SET institution_id = $1
+           WHERE user_id = $2`,
+					[institution.institution_id, user.user_id],
+				);
+				await client.query(
+					`UPDATE users
+           SET is_email_verified = TRUE
+           WHERE user_id = $1`,
+					[user.user_id],
+				);
+				// Track effective verification state separately from the RETURNING value.
+				// The users INSERT returned is_email_verified = FALSE (the DB default at
+				// insert time). The UPDATE above has now flipped it to TRUE in the DB, but
+				// user.is_email_verified still holds the stale RETURNING value.
+				// Passing user.is_email_verified directly to buildTokenResponse would give
+				// the first token isEmailVerified: false even though the DB says TRUE.
+				// effectivelyVerified is the source of truth for the token response.
+				effectivelyVerified = true;
+				logger.info(
+					{
+						userId: user.user_id,
+						institutionId: institution.institution_id,
+						institutionName: institution.name,
+					},
+					"Student auto-verified via institution domain",
+				);
+			}
 		} else {
 			await client.query(
 				`INSERT INTO pg_owner_profiles (user_id, owner_full_name, business_name)
@@ -123,7 +174,7 @@ export const register = async ({ email, password, role, fullName, businessName }
 		logger.info({ userId: user.user_id, role }, "User registered");
 
 		const roles = [role];
-		const tokens = buildTokenResponse(user.user_id, user.email, roles, user.is_email_verified);
+		const tokens = buildTokenResponse(user.user_id, user.email, roles, effectivelyVerified);
 		await storeRefreshToken(user.user_id, tokens.refreshToken);
 		return tokens;
 	} catch (err) {
