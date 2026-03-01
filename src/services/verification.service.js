@@ -149,7 +149,10 @@ export const approveRequest = async (adminUserId, requestId, { adminNotes } = {}
 		// Both writes must commit together — a partially-applied state (request
 		// says 'verified' but profile still says 'pending') has no automated
 		// recovery path and would leave the PG owner in an inconsistent state.
-		await client.query(
+		// rowCount is checked here for the same reason as above: if the profile row
+		// is absent or soft-deleted (data integrity issue or race with a hard-delete),
+		// we must not commit — the verification_requests UPDATE would be orphaned.
+		const { rowCount: profileRowCount } = await client.query(
 			`UPDATE pg_owner_profiles
        SET verification_status = 'verified',
            verified_at         = NOW(),
@@ -158,6 +161,10 @@ export const approveRequest = async (adminUserId, requestId, { adminNotes } = {}
          AND deleted_at IS NULL`,
 			[adminUserId, ownerId],
 		);
+
+		if (profileRowCount === 0) {
+			throw new AppError("PG owner profile not found — cannot complete approval", 409);
+		}
 
 		await client.query("COMMIT");
 
@@ -202,7 +209,10 @@ export const rejectRequest = async (adminUserId, requestId, { rejectionReason, a
 		// Write rejection_reason to the profile so the PG owner sees a meaningful
 		// explanation when they check their status. Without this they would only
 		// know they were rejected, not what to fix or resubmit.
-		await client.query(
+		// rowCount checked for consistency with approveRequest — a missing or
+		// soft-deleted profile row must abort the transaction, not silently commit
+		// an orphaned verification_requests status change.
+		const { rowCount: profileRowCount } = await client.query(
 			`
 			UPDATE pg_owner_profiles
 			SET verification_status = 'rejected',
@@ -211,6 +221,10 @@ export const rejectRequest = async (adminUserId, requestId, { rejectionReason, a
 				AND deleted_at IS NULL`,
 			[rejectionReason, ownerId],
 		);
+
+		if (profileRowCount === 0) {
+			throw new AppError("PG owner profile not found — cannot complete rejection", 409);
+		}
 
 		await client.query("COMMIT");
 
