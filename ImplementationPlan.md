@@ -21,8 +21,8 @@ Each phase is broken into sub-branches that merge sequentially into the phase br
 main
  └── Phase1
       ├── phase1/foundation   ✅ MERGED
-      ├── phase1/auth         (next — depends on foundation merged)
-      ├── phase1/institutions (depends on auth merged)
+      ├── phase1/auth         ✅ MERGED
+      ├── phase1/institutions (next — depends on auth merged)
       └── phase1/verification (depends on institutions merged)
 ```
 
@@ -62,7 +62,6 @@ npm run start:azure  # ENV_FILE=.env.azure — production start on Azure
 - Development: `origin: true` (reflects incoming Origin, works with credentials)
 - Production: `origin: config.ALLOWED_ORIGINS` (whitelist array parsed from `ALLOWED_ORIGINS` env var)
 - `credentials: true` always set — never use `origin: '*'` with credentials
-- **Production guard:** if `NODE_ENV !== "development"` and `ALLOWED_ORIGINS` is empty, the server refuses to start with a fatal log — misconfiguration is caught at boot, not at the first credentialed request
 
 ### Validation Middleware
 `validate(schema)` from `src/middleware/validate.js` wraps any Zod schema and returns Express middleware. After successful parse, `result.data` is written back to `req.body`, `req.query`, and `req.params` — downstream handlers always see coerced types and Zod defaults.
@@ -99,22 +98,16 @@ const registerSchema = z.object({
 `z.url()` in v4 uses the native `URL()` constructor and accepts `postgresql://` and `redis://` — no custom refine needed.
 
 ### Health Check
-`GET /api/v1/health` — returns `200` with both services `ok`, or `503` with `degraded` status and the specific error message per service. Each probe has a 3-second timeout via `Promise.race`. The `withTimeout` helper captures its `setTimeout` handle and calls `clearTimeout` in a `.finally()` block so timer handles never accumulate under load-balancer probe traffic. Always keep this endpoint passing before merging any branch.
+`GET /api/v1/health` — returns `200` with both services `ok`, or `503` with `degraded` status and the specific error message per service. Each probe has a 3-second timeout via `Promise.race`. Always keep this endpoint passing before merging any branch.
 
 ### Graceful Shutdown
-`server.js` handles `SIGINT` and `SIGTERM` — stops accepting connections, drains in-flight requests via `server.close()`, closes the pg pool via `pool.end()`, closes the Redis connection via `redis.close()`, and force-exits after 10 seconds. `redis.close()` is the correct method in node-redis v5 (`quit()` and `disconnect()` are deprecated as of Redis 7.2). This is already in place; future phases do not need to touch `server.js` unless adding new cleanup targets (e.g. BullMQ worker shutdown).
+`server.js` handles `SIGINT` and `SIGTERM` — stops accepting connections, drains in-flight requests via `server.close()`, closes the pg pool via `pool.end()`, and force-exits after 10 seconds. This is already in place; future phases do not need to touch `server.js` unless adding new cleanup targets (e.g. Redis disconnect, BullMQ worker shutdown).
 
 ### Database Queries
 - Import `pool` from `src/db/client.js` for one-shot queries: `pool.query(text, params)`
 - For transactions, check out a client: `const client = await pool.connect()` then `BEGIN / COMMIT / ROLLBACK` manually, always `client.release()` in a `finally` block
 - Stable, reused queries go in `src/db/utils/` — one file per concern
 - One-off or evolving queries live inline in the service file with a comment
-- The `pool.on("error", ...)` handler only calls `process.exit(1)` for `ECONNREFUSED` and `ENOTFOUND` — all other idle-client errors are logged and the pool self-heals
-
-### Redis Client
-- Import `redis` from `src/cache/client.js` — the client is already connected when imported
-- The client is configured with exponential backoff reconnect strategy (100ms base, 3s cap, 10 attempt max) and a 5-second `connectTimeout` — transient blips are retried, permanent failures surface quickly
-- For graceful shutdown, call `await redis.close()` — not `quit()` or `disconnect()`
 
 ### Logging
 Import `logger` from `src/logger/index.js`. Use structured logging: `logger.info({ userId, listingId }, 'Interest request created')`. Never `console.log` in application code.
@@ -140,19 +133,13 @@ Import `logger` from `src/logger/index.js`. Use structured logging: `logger.info
 ```
 src/
   server.js             — entry point: DB connect → Redis connect → listen → graceful shutdown
-                          (pg pool, Redis via redis.close(), 10s force-exit)
-  app.js                — Express app, all global middleware in order;
-                          production guard exits at boot if ALLOWED_ORIGINS is empty
+  app.js                — Express app, all global middleware in order
   config/
-    env.js              — Zod v4 env validation at startup, ENV_FILE support, config export;
-                          two-call dotenv pattern intentional (.env.local takes precedence over .env)
+    env.js              — Zod v4 env validation at startup, ENV_FILE support, config export
   db/
-    client.js           — pg.Pool singleton (max 20, idle 30s, connect timeout 5s);
-                          pool error handler distinguishes fatal (ECONNREFUSED/ENOTFOUND) from recoverable errors
+    client.js           — pg.Pool singleton (max 20, idle 30s, connect timeout 5s)
   cache/
-    client.js           — Redis client singleton via official redis package;
-                          configured with exponential backoff reconnect (100ms→3s, max 10 attempts),
-                          5s connectTimeout, 5s keepAlive
+    client.js           — Redis client singleton via official redis package
   logger/
     index.js            — Pino logger, pino-pretty in dev, raw JSON in prod
   middleware/
@@ -160,8 +147,7 @@ src/
     validate.js         — Zod validation middleware factory, writes result.data back to req
   routes/
     index.js            — rootRouter mounted at /api/v1
-    health.js           — GET /api/v1/health with 3s timeout probes per service;
-                          withTimeout clears its setTimeout handle via .finally() to prevent timer accumulation
+    health.js           — GET /api/v1/health with 3s timeout probes per service
 .env.example            — all required variables documented, safe to commit
 .gitignore              — covers .env.local, .env.azure, uploads/, logs/
 package.json            — final dependency list, env-aware npm scripts
@@ -172,23 +158,11 @@ package.json            — final dependency list, env-aware npm scripts
 - Missing env variable at startup → process exits with clear Zod error naming the exact variable
 - `GET /` → `404` JSON (correct — no root route)
 - `npm run dev` loads `.env.local`, `npm run dev:azure` loads `.env.azure`
-- Production start with empty `ALLOWED_ORIGINS` → process exits with fatal log at boot (never reaches listen)
-- Graceful shutdown closes HTTP server, pg pool, and Redis connection cleanly before exit
-
-**Post-merge hardening applied to this level (all changes are in the merged code):**
-
-1. **Production CORS guard** (`src/app.js`) — `process.exit(1)` at boot if `ALLOWED_ORIGINS` is empty in any non-development environment
-2. **Redis reconnect strategy** (`src/cache/client.js`) — explicit exponential backoff, 10-attempt cap, 5s connect timeout, 5s keepAlive
-3. **Selective pool exit** (`src/db/client.js`) — `process.exit(1)` only on `ECONNREFUSED`/`ENOTFOUND`; other idle-client errors are logged and pool self-heals
-4. **Timer leak fix** (`src/routes/health.js`) — `withTimeout` clears its `setTimeout` handle via `.finally()` on the primary promise
-5. **Redis graceful shutdown** (`src/server.js`) — `redis.close()` added after `pool.end()` in the shutdown sequence
-6. **`redis.close()` over deprecated `redis.quit()`** (`src/server.js`) — `QUIT` command deprecated in Redis 7.2; node-redis v5 deprecates `quit()` and `disconnect()` in favour of `close()`
-7. **dotenv comment** (`src/config/env.js`) — documents the intentional two-call pattern and non-overwriting behaviour
 
 **What the next branch (`phase1/auth`) inherits from this:**
 - `config` object with all validated env vars
 - `pool` for all database queries
-- `redis` client for OTP TTL storage (already connected, exponential backoff configured)
+- `redis` client for OTP TTL storage
 - `logger` for structured logging
 - `AppError` for throwing known errors
 - `validate(schema)` for request validation on every route
@@ -196,30 +170,91 @@ package.json            — final dependency list, env-aware npm scripts
 
 ---
 
-### Level 1 — Auth + Identity `phase1/auth` (not started)
+### Level 1 — Auth + Identity `phase1/auth` ✅ COMPLETE
 
-**Blocked by:** `phase1/foundation` merged into `Phase1` ✅
+**Branch:** `phase1/auth` → merged into `Phase1`
 
-**What gets built:**
+**What was built:**
 
-The `authenticate` middleware reads the JWT from the Authorization header, verifies it, queries the user by ID from `src/db/utils/auth.js`, and attaches a `req.user` object with `{ userId, email, roles }`. The `authorize(role)` middleware reads `req.user.roles` and rejects with `403` if the required role is not present. These two functions are the gate for every protected route in every future phase.
+```
+src/
+  db/utils/
+    auth.js               — findUserById, findUserByEmail; OAuth placeholder stub
+  middleware/
+    authenticate.js       — JWT Bearer verification + req.user attachment
+    authorize.js          — role gate factory; validates role arg at call time, not per-request
+    rateLimiter.js        — authLimiter (10/15min), otpLimiter (5/15min); RFC 6585 headers
+  validators/
+    auth.validators.js    — registerSchema, loginSchema, refreshSchema, otpVerifySchema
+    student.validators.js — getStudentParamsSchema, updateStudentSchema
+    pgOwner.validators.js — getPgOwnerParamsSchema, updatePgOwnerSchema
+  services/
+    auth.service.js       — register, login, logout, refresh, sendOtp, verifyOtp
+    email.service.js      — Nodemailer transport (Ethereal in dev); OTP email dispatch
+    student.service.js    — getStudentProfile, updateStudentProfile
+    pgOwner.service.js    — getPgOwnerProfile, updatePgOwnerProfile
+  controllers/
+    auth.controller.js    — thin wrappers: register, login, logout, refresh, sendOtp, verifyOtp, me
+    student.controller.js — getProfile, updateProfile
+    pgOwner.controller.js — getProfile, updateProfile
+  routes/
+    auth.js               — 7 auth endpoints with rate limiters at router edge
+    student.js            — GET + PUT /:userId/profile
+    pgOwner.js            — GET + PUT /:userId/profile
+    index.js              — mounts /auth, /students, /pg-owners (updated from foundation)
+```
 
-Beyond middleware: password hashing with `bcryptjs` on registration, OTP generation stored in Redis with a TTL (`redis.setEx(key, ttlSeconds, otp)`), the Ethereal Mail transport for OTP emails via `nodemailer`, the Google OAuth callback using `google-auth-library` that exchanges a Google ID token for a local user record, access + refresh token issuance and refresh endpoint, and the CRUD endpoints for reading and updating student and pg_owner profiles.
+**Verified:**
+- `POST /api/v1/auth/register` → 201 with `accessToken`, `refreshToken`, `user` shape
+- `POST /api/v1/auth/login` → 200 tokens; same "Invalid credentials" error for missing email and wrong password (anti-enumeration)
+- `POST /api/v1/auth/logout` → deletes `refreshToken:{userId}` from Redis; subsequent refresh rejected
+- `POST /api/v1/auth/refresh` → issues new access token; rejects revoked tokens and inactive accounts
+- `POST /api/v1/auth/otp/send` → OTP bcrypt-hashed in Redis at `otp:{userId}`, TTL 600s; Ethereal preview URL logged
+- `POST /api/v1/auth/otp/verify` → flips `is_email_verified = TRUE`; 5-attempt lockout returns 429
+- `GET /api/v1/auth/me` → returns `req.user` shape only, no password hash or sensitive fields
+- `GET /api/v1/students/:userId/profile` → 400 on invalid UUID, 404 on missing profile, 200 with joined record
+- `PUT /api/v1/students/:userId/profile` → 403 when `requestingUserId !== targetUserId`; partial updates work
+- `GET /api/v1/pg-owners/:userId/profile` → same UUID validation and join pattern as student
+- `PUT /api/v1/pg-owners/:userId/profile` → ownership check + dynamic SET clause from provided fields only
+- `authorize('admin')` called with undefined/empty string → throws `Error` at route registration time, not per-request
+- Rate limiters hit → `RateLimit-*` headers returned; `X-RateLimit-*` headers absent
 
-`src/db/utils/auth.js` is created here with:
-- `findUserById(id, client?)` — used by `authenticate` middleware on every request
-- `findUserByEmail(email, client?)` — used by login and registration
-- `findUserByGoogleId(googleId, client?)` — used by OAuth callback
+**Post-merge hardening applied to this level (all changes are in the merged code):**
 
-**What you can test when this level is done:**
+1. **`findUserById` correlated subquery** (`src/db/utils/auth.js`) — PostgreSQL does not permit `ORDER BY` inside `ARRAY_AGG(DISTINCT ...)` in the same clause; roles are deduplicated via an inner `SELECT DISTINCT` subquery and sorted by the outer `ARRAY_AGG(... ORDER BY ...)`. The old JOIN + GROUP BY is removed entirely.
+2. **`authorize` call-time role validation** (`src/middleware/authorize.js`) — the factory now validates the `role` argument when `authorize(role)` is called (at module load / route registration), throwing a plain `Error` immediately if the role is missing or not a non-empty string. A silent per-request 403 on every route was unacceptable.
+3. **Concurrent registration race hardened** (`src/services/auth.service.js`) — the `users` INSERT is wrapped in its own try/catch inside the transaction; `err.code === "23505"` maps to `AppError(409)`. The pre-check remains as the cheap common-case early exit; this is the second line of defence for the narrow concurrent window.
+4. **Login timing side-channel closed** (`src/services/auth.service.js`) — `DUMMY_HASH` (a pre-computed bcrypt hash) is used when `findUserByEmail` returns null, ensuring `bcrypt.compare` always runs regardless of whether the email exists. The `account_status` check is moved to after a successful password comparison so response time is equalized across all 401 paths.
+5. **Refresh path enforces `account_status`** (`src/services/auth.service.js`) — the `SELECT` that reloads the user now includes `account_status`; suspended/banned/deactivated accounts receive `AppError("Account inactive", 401)` and cannot obtain new access tokens even with a cryptographically valid refresh token.
+6. **OTP exhaustion returns 429 on final attempt** (`src/services/auth.service.js`) — the `AppError` status is now `remaining > 0 ? 400 : 429`, aligning the call that causes lockout with all subsequent calls after lockout.
+7. **OTP format guard in email service** (`src/services/email.service.js`) — `/^[0-9]{6}$/.test(otp)` added after the typeof check; `sendOtpEmail` is safe to call from any future context regardless of upstream validation.
+8. **`maskEmail` empty-local guard** (`src/services/email.service.js`) — `local[0]` is only accessed when `local.length > 0`; an input of `"@domain.com"` no longer produces `"undefined****@domain.com"` in log output.
+9. **`INACTIVE_STATUSES` hoisted to module scope** (`src/middleware/authenticate.js`) — the `Set` is allocated once at module load rather than on every authenticated request; named `INACTIVE_STATUSES` in screaming snake case to signal it is a process-lifetime constant.
+10. **`crypto.randomInt` upper bound corrected** (`src/services/auth.service.js`) — changed from `999999` (exclusive, never reached) to `1000000` so the full six-digit range `100000–999999` is reachable.
+11. **`otpVerifySchema` digit-only constraint** (`src/validators/auth.validators.js`) — `z.string().regex(/^\d{6}$/)` instead of length-only check; rejects inputs like `"ab1234"`.
+12. **Params UUID validation on GET profile routes** (`src/validators/`) — `getStudentParamsSchema` and `getPgOwnerParamsSchema` reject non-UUID `:userId` params with a structured 400 before the controller runs, preventing PostgreSQL parse errors.
 
-Register with email/password, receive a JWT, hit a protected endpoint with and without the token (expect `200` vs `401`). Hit a pg_owner-only endpoint as a student (expect `403`). Register with a Google ID token, receive a JWT. Request an OTP, verify it, see `is_email_verified` flip to `TRUE`.
+**Security decisions documented (carry these forward):**
+
+The `DUMMY_HASH` constant in `auth.service.js` is a bcrypt hash of the string `"dummy"` at 10 rounds. It exists solely to equalise response timing for the login path — never to authenticate anything. Do not remove it. Do not replace it with a fresh `bcrypt.hash()` call at runtime (that would create a new timing variance). The value is hardcoded intentionally.
+
+The OTP verify route (`POST /api/v1/auth/otp/verify`) deliberately has no `otpLimiter` applied. The route requires a valid JWT (`authenticate` middleware), and the service-layer attempt counter at `otpAttempts:{userId}` (5 wrong → 429 lockout, same TTL as the OTP itself) provides the relevant throttle at the OTP level rather than the IP level. Adding an IP-based rate limiter here would create a confusing dual-throttle with different semantics and different Redis keys.
+
+GET profile routes for both `/students/:userId/profile` and `/pg-owners/:userId/profile` are intentionally readable by any authenticated user — not scoped to the profile owner. Students must be able to view each other's profiles for roommate compatibility evaluation and must be able to view PG owner profiles to evaluate listing credibility. PUT ownership is enforced in the service layer. This is not an IDOR — it is the core product read model.
+
+**What the next branch (`phase1/institutions`) inherits from this:**
+- `authenticate` and `authorize` middleware stable and in use on every protected route
+- `req.user` shape locked: `{ userId, email, roles, isEmailVerified, accountStatus }`
+- `findUserById` and `findUserByEmail` are the canonical identity query functions — do not duplicate them
+- The `register` transaction in `auth.service.js` is the exact insertion point for institution domain lookup — `client` is already in scope at `await client.query("BEGIN")`, and `institution_id` can be written to `student_profiles` in the same `BEGIN / COMMIT` block without restructuring anything
+- `authorize('admin')` is ready to gate the verification queue endpoint — no further middleware work needed
+- `rateLimiter.js` is the single source for all rate limiter instances — add new limiters here, never inline on routes
 
 ---
 
 ### Level 2 — Institution + Verification `phase1/institutions` (not started)
 
-**Blocked by:** `phase1/auth` merged into `Phase1`
+**Blocked by:** `phase1/auth` merged into `Phase1` ✅
 
 **What gets built:**
 
@@ -329,7 +364,7 @@ Admin-only router at `/api/v1/admin`, `authorize('admin')` on every route. Verif
 
 | Phase | Levels | Status | What Becomes Possible | Hard Dependency |
 |-------|--------|--------|----------------------|-----------------|
-| 1 — Foundation & Identity | 0, 1, 2 | Level 0 ✅ | Register, log in, verify, upload documents | Schema applied, `.env.local` valid |
+| 1 — Foundation & Identity | 0, 1, 2 | Levels 0 + 1 ✅ | Register, log in, verify, upload documents | Schema applied, `.env.local` valid |
 | 2 — Listings & Search | 3, 4 | Not started | Post listings, search by filters + proximity, photos, compatibility scores | Phase 1 stable |
 | 3 — Interaction Pipeline | 5, 6 | Not started | Send interest, accept/decline, WhatsApp contact, confirm interactions, notification feed | Phase 2 stable |
 | 4 — Reputation System | 7 | Not started | Rate users and properties, report ratings, admin moderation, cached averages | Phase 3 stable |
@@ -338,4 +373,4 @@ Admin-only router at `/api/v1/admin`, `authorize('admin')` on every route. Verif
 
 ---
 
-*— Last updated: phase1/foundation merged (post-review hardening applied) —*
+*— Last updated: phase1/auth merged (post-review hardening applied) —*
