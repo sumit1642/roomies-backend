@@ -3,6 +3,7 @@ node_modules/
 
 # Environment files — never commit any .env variant
 .env
+.env.test
 .env.local
 .env.azure
 .env.*.local
