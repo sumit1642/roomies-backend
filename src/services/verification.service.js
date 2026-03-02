@@ -75,11 +75,17 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 	// without any additional requests. Driving from verification_requests
 	// (filtered to pending) allows the composite index on (status, submitted_at)
 	// to be used for the initial filtered scan.
+	//
+	// vr.user_id is included so the admin UI can construct a deep-link to the
+	// PG owner's profile page (/pg-owners/:userId/profile) from each queue row,
+	// without requiring a second request.
+	//
 	// Explicit column selection: no SELECT * from a JOIN — ambiguous column names
 	// and silent breakage on schema changes.
 	const { rows } = await pool.query(
 		`SELECT
       vr.request_id,
+      vr.user_id,
       vr.document_type,
       vr.document_url,
       vr.submitted_at,
