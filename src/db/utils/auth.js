@@ -45,7 +45,9 @@ export const findUserById = async (id, client = pool) => {
 };
 
 // Called by login (needs password_hash for bcrypt compare) and registration
-// duplicate check (only needs existence). Returns null if not found or soft-deleted.
+// duplicate check (only needs existence). Also called by the OAuth account-linking
+// path which needs google_id to detect whether the row already has a google_id set.
+// Returns null if not found or soft-deleted.
 export const findUserByEmail = async (email, client = pool) => {
 	const { rows } = await client.query(
 		`
@@ -53,16 +55,47 @@ export const findUserByEmail = async (email, client = pool) => {
 			user_id,
 			email,
 			password_hash,
+			google_id,
 			account_status,
 			is_email_verified
-			FROM users
-			WHERE email = $1
-				AND deleted_at IS NULL`,
+		FROM users
+		WHERE email = $1
+			AND deleted_at IS NULL`,
 		[email],
 	);
 	return rows[0] ?? null;
 };
 
-// Added at end of branch when OAuth endpoint is implemented.
-// Placeholder kept here so the import location is established.
-// export const findUserByGoogleId = async (googleId, client = pool) => { ... }
+// Looks up a user by their Google OAuth subject ID (the `sub` field in the
+// Google ID token). Called during OAuth sign-in to determine whether this
+// Google account has been seen before (returning user) or is new.
+//
+// Returns enough columns for the service to make a branching decision:
+//   - user_id           → needed for JWT issuance and Redis key
+//   - email             → included in JWT payload
+//   - google_id         → returned so the caller can confirm the link rather
+//                         than assuming it
+//   - account_status    → checked before issuing tokens, same as login
+//   - is_email_verified → included in token response user object
+//
+// Does NOT return password_hash — OAuth users may not have one, and the
+// OAuth flow never needs it. Keeping it out prevents accidental logging.
+//
+// Accepts an optional client so it can participate in a transaction when the
+// account-linking UPDATE and a subsequent SELECT need to be atomic.
+export const findUserByGoogleId = async (googleId, client = pool) => {
+	const { rows } = await client.query(
+		`
+		SELECT
+			user_id,
+			email,
+			google_id,
+			account_status,
+			is_email_verified
+		FROM users
+		WHERE google_id = $1
+			AND deleted_at IS NULL`,
+		[googleId],
+	);
+	return rows[0] ?? null;
+};
