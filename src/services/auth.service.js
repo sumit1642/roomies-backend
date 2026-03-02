@@ -3,14 +3,41 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import { OAuth2Client } from "google-auth-library";
 import { config } from "../config/env.js";
 import { pool } from "../db/client.js";
 import { redis } from "../cache/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
-import { findUserByEmail } from "../db/utils/auth.js";
+import { findUserByEmail, findUserByGoogleId } from "../db/utils/auth.js";
 import { findInstitutionByDomain } from "../db/utils/institutions.js";
 import { sendOtpEmail } from "./email.service.js";
+
+// ─── Google OAuth client ──────────────────────────────────────────────────────
+//
+// Initialised once at module scope — not per-request. OAuth2Client is stateless
+// after construction; creating it per-request would allocate a new object on
+// every OAuth call with no benefit.
+//
+// Only GOOGLE_CLIENT_ID is needed. The client_secret is used in the Authorization
+// Code flow where the server exchanges a code for tokens. In our flow the client
+// obtains the ID token itself and sends it here — we only verify its audience
+// claim (ensuring the token was issued for our app, not another Google project).
+//
+// Null-safe: if GOOGLE_CLIENT_ID is not configured, googleOAuthClient is null and
+// googleOAuth() throws a clear AppError on invocation rather than crashing at
+// module load. This keeps the server bootable when OAuth is not yet configured.
+const googleOAuthClient = config.GOOGLE_CLIENT_ID ? new OAuth2Client(config.GOOGLE_CLIENT_ID) : null;
+
+// ─── Account status guard ─────────────────────────────────────────────────────
+//
+// The three statuses that render an account non-functional. Defined once at
+// module scope — not inline per-call — so the set is allocated once for the
+// lifetime of the process and all checks in this file reference the same object.
+// authenticate.js uses the same pattern with its own module-scope INACTIVE_STATUSES.
+// This constant is intentionally not exported: callers outside this module should
+// not be making account-status decisions — that is the service layer's responsibility.
+const INACTIVE_ACCOUNT_STATUSES = new Set(["suspended", "banned", "deactivated"]);
 
 // ─── Token helpers ───────────────────────────────────────────────────────────
 
@@ -205,7 +232,12 @@ export const login = async ({ email, password }) => {
 	// Always run bcrypt — even when the user does not exist — to prevent timing
 	// attacks that distinguish "no such email" from "wrong password".
 	const hashToCompare = user ? user.password_hash : DUMMY_HASH;
-	const passwordMatch = await bcrypt.compare(password, hashToCompare);
+
+	// Guard: an OAuth-only user has password_hash = NULL in the DB. bcrypt.compare
+	// against null would throw a TypeError rather than returning false. Use
+	// DUMMY_HASH so timing stays constant and the compare cleanly returns false.
+	const effectiveHash = hashToCompare ?? DUMMY_HASH;
+	const passwordMatch = await bcrypt.compare(password, effectiveHash);
 
 	if (!passwordMatch || !user) {
 		// Intentionally identical message for both cases to prevent email enumeration.
@@ -215,8 +247,7 @@ export const login = async ({ email, password }) => {
 	// Password is correct — now check whether the account is usable.
 	// This check comes AFTER bcrypt so the response time is the same whether
 	// the account is inactive or the password was wrong.
-	const inactiveStatuses = new Set(["suspended", "banned", "deactivated"]);
-	if (inactiveStatuses.has(user.account_status)) {
+	if (INACTIVE_ACCOUNT_STATUSES.has(user.account_status)) {
 		throw new AppError(`Account is ${user.account_status}`, 401);
 	}
 
@@ -269,8 +300,7 @@ export const refresh = async (incomingRefreshToken) => {
 	// must not be able to obtain new access tokens — even with a cryptographically
 	// valid refresh token. The revocation only removes the Redis entry on explicit
 	// logout; status changes don't clear Redis, so we must check here.
-	const inactiveStatuses = new Set(["suspended", "banned", "deactivated"]);
-	if (inactiveStatuses.has(userRows[0].account_status)) {
+	if (INACTIVE_ACCOUNT_STATUSES.has(userRows[0].account_status)) {
 		throw new AppError("Account inactive", 401);
 	}
 
@@ -330,4 +360,228 @@ export const verifyOtp = async (userId, otp) => {
 	await pool.query(`UPDATE users SET is_email_verified = TRUE WHERE user_id = $1`, [userId]);
 
 	logger.info({ userId }, "Email verified via OTP");
+};
+
+// ─── Google OAuth ─────────────────────────────────────────────────────────────
+//
+// Accepts a Google ID token sent by the client after they completed Google
+// sign-in on their side. Verifies it with google-auth-library, then branches:
+//
+//   Path 1 — Returning OAuth user: google_id already exists in users → login.
+//
+//   Path 2 — Account linking: no google_id match, but the email already exists
+//   with google_id = NULL → write the google_id onto the existing row and treat
+//   as login. This handles "registered with password, now signing in with Google
+//   using the same email." Google has verified that email, so this link is as
+//   trustworthy as the OTP flow.
+//
+//   Path 3 — New user: no google_id match, no email match → registration. Mirrors
+//   the email/password register transaction exactly with two differences:
+//   password_hash is NULL and is_email_verified starts TRUE (Google already
+//   verified the email, so no OTP is needed).
+//
+// All three paths converge at buildTokenResponse + setAuthCookies in the
+// controller — dual delivery (cookies + JSON body) is identical to login/register.
+//
+// role, fullName, and businessName are only required for Path 3. Paths 1 and 2
+// ignore them — you cannot change your role by signing in with Google.
+export const googleOAuth = async ({ idToken, role, fullName, businessName }) => {
+	if (!googleOAuthClient) {
+		throw new AppError("Google OAuth is not configured on this server", 503);
+	}
+
+	// ── Step 1: Verify the ID token ───────────────────────────────────────────
+	//
+	// verifyIdToken checks all of:
+	//   - Signature: signed by Google's private key (fetched from Google's JWKS endpoint)
+	//   - Audience:  token was issued for OUR client_id, not another app
+	//   - Expiry:    token has not expired (Google ID tokens last 1 hour)
+	//   - Issuer:    must be accounts.google.com or https://accounts.google.com
+	//
+	// If any check fails, verifyIdToken throws. We catch and re-throw as a user-facing
+	// 401 — the raw error is never exposed to the client as it may contain token details.
+	let ticket;
+	try {
+		ticket = await googleOAuthClient.verifyIdToken({
+			idToken,
+			audience: config.GOOGLE_CLIENT_ID,
+		});
+	} catch (err) {
+		logger.warn({ err: err.message }, "Google ID token verification failed");
+		throw new AppError("Invalid or expired Google token", 401);
+	}
+
+	const payload = ticket.getPayload();
+	if (!payload) {
+		throw new AppError("Invalid Google token payload", 401);
+	}
+
+	const googleId = payload.sub; // Google's stable, unique user identifier
+	const email = payload.email;
+	const emailVerifiedByGoogle = payload.email_verified;
+
+	// Google only issues ID tokens for verified emails. The field exists in the
+	// spec so we check it explicitly — accepting an unverified email would
+	// undermine the trust model that the whole platform is built on.
+	if (!email || !emailVerifiedByGoogle) {
+		throw new AppError("Google account does not have a verified email address", 400);
+	}
+
+	// ── Step 2: Returning OAuth user (fast path) ──────────────────────────────
+	const existingByGoogleId = await findUserByGoogleId(googleId);
+
+	if (existingByGoogleId) {
+		if (INACTIVE_ACCOUNT_STATUSES.has(existingByGoogleId.account_status)) {
+			throw new AppError(`Account is ${existingByGoogleId.account_status}`, 401);
+		}
+
+		const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [
+			existingByGoogleId.user_id,
+		]);
+		const roles = roleRows.map((r) => r.role_name);
+
+		logger.info({ userId: existingByGoogleId.user_id }, "User signed in via Google OAuth");
+
+		const tokens = buildTokenResponse(
+			existingByGoogleId.user_id,
+			existingByGoogleId.email,
+			roles,
+			existingByGoogleId.is_email_verified,
+		);
+		await storeRefreshToken(existingByGoogleId.user_id, tokens.refreshToken);
+		return tokens;
+	}
+
+	// ── Step 3: Account linking ───────────────────────────────────────────────
+	//
+	// Email exists but google_id is NULL on this row (or was NULL at read time).
+	// Write google_id onto the existing row. The UPDATE itself uses AND google_id IS NULL
+	// as a concurrency guard — see the rowCount check below.
+	const existingByEmail = await findUserByEmail(email);
+
+	if (existingByEmail) {
+		if (INACTIVE_ACCOUNT_STATUSES.has(existingByEmail.account_status)) {
+			throw new AppError(`Account is ${existingByEmail.account_status}`, 401);
+		}
+
+		// AND google_id IS NULL is the concurrency guard: if two OAuth requests for
+		// the same email arrive simultaneously with different googleIds, both pass the
+		// findUserByGoogleId null-check above. Without this clause the second writer
+		// would silently overwrite the first link. With it, the loser gets rowCount = 0
+		// and we surface a 409 rather than issuing tokens that reflect a link that was
+		// not actually applied.
+		const { rowCount: linkRowCount } = await pool.query(
+			`UPDATE users SET google_id = $1 WHERE user_id = $2 AND google_id IS NULL AND deleted_at IS NULL`,
+			[googleId, existingByEmail.user_id],
+		);
+
+		if (linkRowCount === 0) {
+			// The row exists but google_id was already set by a concurrent request —
+			// the account is already linked to a different Google identity.
+			throw new AppError("This account is already linked to a different Google account", 409);
+		}
+
+		const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [
+			existingByEmail.user_id,
+		]);
+		const roles = roleRows.map((r) => r.role_name);
+
+		logger.info({ userId: existingByEmail.user_id }, "Google account linked to existing email/password account");
+
+		const tokens = buildTokenResponse(
+			existingByEmail.user_id,
+			existingByEmail.email,
+			roles,
+			existingByEmail.is_email_verified,
+		);
+		await storeRefreshToken(existingByEmail.user_id, tokens.refreshToken);
+		return tokens;
+	}
+
+	// ── Step 4: New user — registration ──────────────────────────────────────
+	if (!role) {
+		throw new AppError("Role is required for new account registration via Google", 400);
+	}
+	if (!fullName?.trim()) {
+		throw new AppError("Full name is required for new account registration", 400);
+	}
+	if (role === "pg_owner" && !businessName?.trim()) {
+		throw new AppError("Business name is required for PG owner registration", 400);
+	}
+
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
+
+		let user;
+		try {
+			// password_hash omitted — NULL by default (no password for OAuth users).
+			// is_email_verified = TRUE because Google already verified this email —
+			// no OTP flow is needed or appropriate.
+			const { rows: userRows } = await client.query(
+				`INSERT INTO users (email, google_id, is_email_verified)
+         VALUES ($1, $2, TRUE)
+         RETURNING user_id, email, is_email_verified`,
+				[email, googleId],
+			);
+			user = userRows[0];
+		} catch (err) {
+			// Concurrent registration race — same defence as email/password register.
+			if (err.code === "23505") {
+				throw new AppError("An account with this email already exists", 409);
+			}
+			throw err;
+		}
+
+		if (role === "student") {
+			await client.query(`INSERT INTO student_profiles (user_id, full_name) VALUES ($1, $2)`, [
+				user.user_id,
+				fullName,
+			]);
+
+			// Institution domain lookup — identical logic to email/password register.
+			// Google's verified email domain is trusted proof of institutional enrollment.
+			const domain = email.split("@")[1];
+			const institution = await findInstitutionByDomain(domain, client);
+
+			if (institution) {
+				await client.query(`UPDATE student_profiles SET institution_id = $1 WHERE user_id = $2`, [
+					institution.institution_id,
+					user.user_id,
+				]);
+				// is_email_verified is already TRUE from the INSERT — no UPDATE needed.
+				logger.info(
+					{
+						userId: user.user_id,
+						institutionId: institution.institution_id,
+						institutionName: institution.name,
+					},
+					"OAuth student auto-verified via institution domain",
+				);
+			}
+		} else {
+			await client.query(
+				`INSERT INTO pg_owner_profiles (user_id, owner_full_name, business_name)
+         VALUES ($1, $2, $3)`,
+				[user.user_id, fullName, businessName],
+			);
+		}
+
+		await client.query(`INSERT INTO user_roles (user_id, role_name) VALUES ($1, $2)`, [user.user_id, role]);
+
+		await client.query("COMMIT");
+
+		logger.info({ userId: user.user_id, role }, "New user registered via Google OAuth");
+
+		const roles = [role];
+		// is_email_verified = TRUE — set at INSERT time, no tracking variable needed
+		const tokens = buildTokenResponse(user.user_id, user.email, roles, true);
+		await storeRefreshToken(user.user_id, tokens.refreshToken);
+		return tokens;
+	} catch (err) {
+		await client.query("ROLLBACK");
+		throw err;
+	} finally {
+		client.release();
+	}
 };
