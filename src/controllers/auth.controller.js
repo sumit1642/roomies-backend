@@ -2,6 +2,7 @@
 
 import * as authService from "../services/auth.service.js";
 import { parseTtlSeconds } from "../services/auth.service.js";
+import { AppError } from "../middleware/errorHandler.js";
 import { config } from "../config/env.js";
 
 // ─── Cookie configuration ─────────────────────────────────────────────────────
@@ -108,7 +109,23 @@ export const logout = async (req, res, next) => {
 
 export const refresh = async (req, res, next) => {
 	try {
-		const result = await authService.refresh(req.body.refreshToken);
+		// Resolve the refresh token from one of two sources:
+		//   1. req.body.refreshToken  — Android sends it explicitly in the body
+		//   2. req.cookies.refreshToken — browsers carry it in the HttpOnly cookie
+		//
+		// Body takes precedence: an Android client sending a body token should not
+		// have a different cookie token substituted silently. In practice these two
+		// client types never overlap, but making the priority explicit prevents
+		// subtle bugs if they ever do.
+		//
+		// The "at least one source" check cannot live in Zod because Zod only sees
+		// the body, not req.cookies. So it lives here, just before the service call.
+		const incomingRefreshToken = req.body.refreshToken ?? req.cookies?.refreshToken;
+		if (!incomingRefreshToken) {
+			return next(new AppError("Refresh token is required", 401));
+		}
+
+		const result = await authService.refresh(incomingRefreshToken);
 		res.json({ status: "success", data: result });
 	} catch (err) {
 		next(err);
@@ -135,4 +152,25 @@ export const verifyOtp = async (req, res, next) => {
 
 export const me = (req, res) => {
 	res.json({ status: "success", data: req.user });
+};
+
+// ─── Google OAuth callback ────────────────────────────────────────────────────
+//
+// Receives a Google ID token from the client, verifies it, and returns auth
+// tokens. All branching logic (returning user / new user / account linking)
+// lives in authService.googleOAuth. The controller's only job is to call the
+// service and apply the dual-delivery pattern consistently with all other auth
+// endpoints: cookies for browsers, body for Android.
+//
+// No authenticate middleware on this route — it IS the authentication entry
+// point. Placing authenticate here would create a circular dependency: the
+// user needs a token to get a token.
+export const googleCallback = async (req, res, next) => {
+	try {
+		const tokens = await authService.googleOAuth(req.body);
+		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
+		res.json({ status: "success", data: tokens });
+	} catch (err) {
+		next(err);
+	}
 };
