@@ -6,6 +6,7 @@ node_modules/
 .env.local
 .env.azure
 .env.*.local
+.env.test
 
 # Local file uploads — stored on disk in dev, Azure Blob in prod
 uploads/
