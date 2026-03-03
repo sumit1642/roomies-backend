@@ -41,7 +41,18 @@ export const findUserById = async (id, client = pool) => {
 			AND u.deleted_at IS NULL`,
 		[id],
 	);
-	return rows[0] ?? null;
+	if (!rows[0]) return null;
+
+	const user = rows[0];
+	// pg returns PostgreSQL arrays as strings like "{student,admin}" in some
+	// driver versions. Normalise to a JavaScript array unconditionally so
+	// downstream code (authorize middleware, JWT payload) always sees a real array.
+	if (typeof user.roles === "string") {
+		user.roles = user.roles === "{}" ? [] : user.roles.replace(/^{|}$/g, "").split(",");
+	}
+	return user;
+
+	// return rows[0] ?? null;
 };
 
 // Called by login (needs password_hash for bcrypt compare) and registration
