@@ -7,6 +7,7 @@ import { studentRouter } from "./student.js";
 import { pgOwnerRouter } from "./pgOwner.js";
 import { adminRouter } from "./admin.js";
 import { propertyRouter } from "./property.js";
+import { listingRouter } from "./listing.js";
 
 // All feature routers are imported and mounted here as phases are built.
 // Pattern: import → router.use('/path', featureRouter)
@@ -19,3 +20,4 @@ rootRouter.use("/students", studentRouter);
 rootRouter.use("/pg-owners", pgOwnerRouter);
 rootRouter.use("/admin", adminRouter);
 rootRouter.use("/properties", propertyRouter);
+rootRouter.use("/listings", listingRouter);

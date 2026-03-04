@@ -3,34 +3,12 @@
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
-
-// ─── Verification gate ────────────────────────────────────────────────────────
-//
-// Extracted as a private helper so every mutating operation (create, update,
-// delete) can call it in one line without duplicating the query. It is not
-// exported — account verification decisions belong exclusively to the service
-// layer. The route and controller layers have no business knowing what
-// verification_status means.
-//
-// Returns void on success. Throws AppError on failure so the caller's try/catch
-// (or the global error handler) handles it uniformly.
-const assertOwnerVerified = async (userId) => {
-	const { rows } = await pool.query(
-		`SELECT verification_status
-     FROM pg_owner_profiles
-     WHERE user_id = $1
-       AND deleted_at IS NULL`,
-		[userId],
-	);
-
-	if (!rows.length) {
-		throw new AppError("PG owner profile not found", 404);
-	}
-
-	if (rows[0].verification_status !== "verified") {
-		throw new AppError("Your account must be verified before you can manage properties", 403);
-	}
-};
+import { assertPgOwnerVerified as assertOwnerVerified } from "../db/utils/pgOwner.js";
+// assertOwnerVerified is aliased from the shared utility in src/db/utils/pgOwner.js.
+// It was previously a private function defined in this file. Extracted when
+// listing.service.js needed the same check — a shared import avoids duplication
+// and any circular dependency between peer service files. All existing call sites
+// are unchanged.
 
 // ─── Amenity bulk-insert helper ───────────────────────────────────────────────
 //
