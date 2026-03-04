@@ -164,3 +164,41 @@ listingRouter.put(
 	validate(reorderPhotosSchema),
 	photoController.reorderPhotos,
 );
+
+// ─── Interest request routes (child resource of /:listingId) ─────────────────
+//
+// These two routes are listing-scoped: you create an interest *on a listing*,
+// and a poster views interests *for their listing*. They live here rather than
+// in the interest router because the listingId context is already present in
+// the URL and the action is semantically "do something related to this listing."
+//
+// The student dashboard (GET /interests/me) and status transitions
+// (PATCH /interests/:interestId/status) live in src/routes/interest.js because
+// they are scoped to the interest request itself, not to a parent listing.
+
+import { createInterestSchema, getListingInterestsSchema } from "../validators/interest.validators.js";
+import * as interestController from "../controllers/interest.controller.js";
+
+// POST /api/v1/listings/:listingId/interests — student expresses interest.
+// Students only: a PG owner cannot send interest requests to their own or
+// others' listings in their pg_owner capacity. The service additionally
+// checks that the student is not the poster of this listing.
+listingRouter.post(
+	"/:listingId/interests",
+	authenticate,
+	authorize("student"),
+	validate(createInterestSchema),
+	interestController.createInterestRequest,
+);
+
+// GET /api/v1/listings/:listingId/interests — poster views all requests on their listing.
+// No role restriction at the route level because a student who posted their own
+// room is technically the "poster" — they have no pg_owner role but they are
+// allowed to see interest in their listing. Ownership is enforced in the service
+// via WHERE posted_by = $2 on the listings join.
+listingRouter.get(
+	"/:listingId/interests",
+	authenticate,
+	validate(getListingInterestsSchema),
+	interestController.getListingInterests,
+);
