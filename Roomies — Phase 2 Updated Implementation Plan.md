@@ -296,3 +296,204 @@ be stable before it can begin.
 ---
 
 _— Document created: Phase 2 planning complete, no code written yet —_
+
+# Phase 2 / `phase2/amenities` — Build Plan
+
+Let's think through this branch carefully before touching any code. There are two jobs here — amenity seeding and
+property CRUD — and the decisions made in this branch set the conventions that `phase2/listings` will depend on.
+
+---
+
+## What This Branch Delivers
+
+By the end of this branch, a verified PG owner should be able to create a property (with amenities attached), read it
+back, update it, and soft-delete it (subject to the active-listings gate). None of this is testable end-to-end until
+`phase2/listings` exists, but the property endpoints can be manually verified in isolation.
+
+---
+
+## Part 1 — The Amenity Seed Script
+
+### Where it lives and how it runs
+
+The script goes at `src/db/seeds/amenities.js`. It is a standalone Node script — not a route, not a service function —
+and it is run manually once per environment after the schema is applied. The npm script for it will be something like
+`"seed:amenities": "ENV_FILE=.env.local node src/db/seeds/amenities.js"` added to `package.json`.
+
+It must not be wired into server startup. The reasons are practical: you don't want the boot sequence to block on a seed
+operation, and idempotency alone is not sufficient justification to run it every time — idempotent still means "it does
+something," and "something" should be intentional.
+
+### Idempotency via `ON CONFLICT DO NOTHING`
+
+The `amenities` table has a `UNIQUE` constraint on `name`. The seed script uses
+`INSERT INTO amenities (...) VALUES ... ON CONFLICT (name) DO NOTHING`. This means re-running the script after adding
+new amenities only inserts the rows that don't yet exist — it never touches existing rows. That's the correct behaviour:
+you want to be able to add new amenities to the seed list and re-run safely, without touching whatever `icon_name` or
+`category` updates an admin may have made in the DB since the last seed.
+
+### What amenities to seed
+
+The three categories are `utility`, `safety`, and `comfort` — those are the enum values in the schema. A reasonable
+initial set across all three:
+
+**Utility** covers infrastructure: WiFi, power backup, water supply (24-hour), piped gas, laundry, housekeeping.
+
+**Safety** covers security: CCTV, security guard, gated entry, biometric/key-card access, fire extinguisher.
+
+**Comfort** covers quality-of-life: AC, ceiling fan, attached bathroom, furnished room, gym, common room/lounge,
+parking, rooftop/terrace.
+
+The `icon_name` column is what the frontend uses to render icons without a hardcoded map. The convention needs to be
+established now. A reasonable choice is kebab-case strings that map to a known icon library (e.g. Lucide or React Icons)
+— something like `wifi`, `power-backup`, `cctv`, `air-conditioning`. These strings must be documented in a comment in
+the seed file so future developers know what format to follow when adding new amenities.
+
+### The script structure
+
+The script connects to the pool, runs the INSERT, logs how many rows were inserted vs skipped (you can get this from
+`result.rowCount` — `ON CONFLICT DO NOTHING` means `rowCount` only counts actual inserts), and closes the pool. It
+should import `config` from `src/config/env.js` and `pool` from `src/db/client.js` exactly as any other file does — no
+special treatment just because it's a seed script.
+
+---
+
+## Part 2 — Property CRUD
+
+### New files this branch creates
+
+The property system follows the exact layering pattern already established in Phase 1. The new files are
+`src/validators/property.validators.js`, `src/services/property.service.js`, `src/controllers/property.controller.js`,
+and `src/routes/property.js`. The property router gets mounted at `/api/v1/properties` in `src/routes/index.js`.
+
+### Validation layer — the interesting decisions
+
+The property Zod schema has one non-obvious requirement: `latitude` and `longitude` must be validated as a cross-field
+pair. Either both are present or neither is — a property with only `latitude` is invalid because the
+`sync_location_geometry` trigger needs both. In Zod v4 this is a `.refine()` on the body object:
+
+```js
+.refine(
+  data => (data.latitude === undefined) === (data.longitude === undefined),
+  { error: "latitude and longitude must be provided together" }
+)
+```
+
+`amenityIds` is validated as an array of UUIDs with `z.array(z.uuid())`. The array can be empty (a property with no
+amenities is valid), but the array itself must be present — or at minimum treated as an empty array via `.default([])`.
+Why? Because the service always needs to know "what amenities should this property have" — `undefined` and `[]` mean
+different things in the update path.
+
+For the update schema, `amenityIds` means "replace the entire amenity set with this new list." This is a full-replace
+semantic, not a patch. It's simpler and more predictable for both the API consumer and the implementation. The
+partial-patch approach (add these, remove those) requires a diff and is not worth the complexity here.
+
+`pincode` is a string, not a number — leading zeros are significant in Indian postal codes (e.g. 011001).
+
+### Service layer — the key decisions
+
+**The verification gate.** Before any property write, the service queries `pg_owner_profiles` for
+`verification_status = 'verified'` where `user_id = requestingUserId AND deleted_at IS NULL`. If the row doesn't exist
+or the status isn't `verified`, it throws `AppError("Your account must be verified before creating properties", 403)`.
+This is a 403, not a 401 — the user is authenticated, just not authorised for this specific operation. The check lives
+in the service, not in a middleware, because it's a data-dependent decision that the schema cannot enforce.
+
+**The amenity transaction.** Property creation uses an explicit `BEGIN/COMMIT` block. Inside the transaction: INSERT
+into `properties` with RETURNING `property_id`, then (if `amenityIds.length > 0`) bulk-INSERT into `property_amenities`.
+The bulk insert uses a single parameterised query with a VALUES list built dynamically — not N separate queries.
+Pseudocode: `INSERT INTO property_amenities (property_id, amenity_id) VALUES ($1, $2), ($1, $3), ...` where `$1` is the
+new `property_id` and `$2..$N` are the amenity IDs. This is atomic — if any amenity ID is invalid (FK violation on
+`amenity_id`), the whole transaction rolls back and the property doesn't exist. That's the correct behaviour. The error
+handler already catches `23503` (FK violation) and returns a 409 — so invalid amenity IDs surface cleanly.
+
+**Why not use a trigger for amenity linking?** Because amenity linking requires application input (which amenity IDs to
+link). Triggers only fire on data that's already being written — they can't read from request context. The transaction
+pattern is the right tool here.
+
+**The soft-delete gate.** Before setting `deleted_at = NOW()` on a property, the service runs a check query:
+`SELECT COUNT(*) FROM listings WHERE property_id = $1 AND status = 'active' AND deleted_at IS NULL`. If count > 0, throw
+`AppError("Deactivate all active listings before deleting this property", 409)`. A 409 is appropriate because the
+conflict is with existing data state, not the request itself.
+
+**The update path.** The service uses the same dynamic `SET` clause pattern from Phase 1 for scalar fields. For
+`amenityIds` specifically, if it's present in the update body: delete all existing rows from `property_amenities` where
+`property_id = $1`, then re-insert the new set. Both the delete and re-insert happen in the same transaction as the
+property UPDATE. This full-replace semantic is simple and correct — it avoids any diff logic and the DB constraint
+prevents duplicates.
+
+**Ownership check on write operations.** For update and delete, the service checks `owner_id = requestingUserId` by
+querying the property row first. If the property doesn't exist or `deleted_at IS NOT NULL`, it's a 404. If it exists but
+`owner_id` doesn't match, it's a 403. This is the resource-level ownership check that Phase 2 introduces for the first
+time (as noted in the implementation plan).
+
+A cleaner approach is to embed the ownership check into the UPDATE/DELETE query itself —
+`WHERE property_id = $1 AND owner_id = $2 AND deleted_at IS NULL` — and use `rowCount === 0` to distinguish "doesn't
+exist" from "not your resource" only when needed. For update and soft-delete, this is fine because we return a 404/403
+either way. The property read (GET) doesn't need an ownership check at all — any authenticated user can read any
+property.
+
+### Routes
+
+The property router shape looks like this:
+
+`POST /api/v1/properties` — `authenticate`, `authorize('pg_owner')`, `validate(createPropertySchema)`,
+`propertyController.createProperty`
+
+`GET /api/v1/properties/:propertyId` — `authenticate`, `validate(propertyParamsSchema)`,
+`propertyController.getProperty`
+
+`PUT /api/v1/properties/:propertyId` — `authenticate`, `authorize('pg_owner')`, `validate(updatePropertySchema)`,
+`propertyController.updateProperty`
+
+`DELETE /api/v1/properties/:propertyId` — `authenticate`, `authorize('pg_owner')`, `validate(propertyParamsSchema)`,
+`propertyController.deleteProperty`
+
+`GET /api/v1/properties` — `authenticate`, `authorize('pg_owner')`, `validate(listPropertiesSchema)`,
+`propertyController.listProperties` — returns only the requesting user's own properties. A PG owner needs a "my
+properties" view to manage listings under each property.
+
+### The `listProperties` query and pagination
+
+This is the first list endpoint in the project (the verification queue was Phase 1, but that was admin-only and already
+handled). It uses keyset pagination, consistent with `getVerificationQueue`. The cursor is `(created_at, property_id)`,
+ordered newest-first (a PG owner wants to see their most recently added properties at the top). The query filters on
+`owner_id = $1 AND deleted_at IS NULL`. The `limit + 1` trick for detecting next-page applies here too.
+
+### What the response shape looks like
+
+The GET single property response should include the property's own columns plus the list of amenity objects (not just
+IDs) joined from `amenities`. This means a JOIN or a subquery against `property_amenities JOIN amenities`. Returning
+full amenity objects (with `name`, `category`, `icon_name`) means the frontend never needs to make a second request to
+translate IDs to display values.
+
+The list response (for "my properties") returns a leaner version — property metadata plus a count of amenities (not the
+full amenity objects), and a count of active listings (which requires a subquery against `listings`). This gives the PG
+owner dashboard the information density it needs without over-fetching.
+
+---
+
+## What This Branch Does NOT Include
+
+It's worth being explicit about the boundary. This branch does not include: listing creation (that's `phase2/listings`),
+photo upload (that's `phase2/media`), PostGIS proximity queries (those belong to the listing search endpoint), or any
+student-facing property views. Students will find properties through listings, not by browsing properties directly.
+
+---
+
+## Branch Completion Criteria
+
+Before this branch merges, you should be able to manually verify:
+
+A verified PG owner can POST a property with amenities and get a 201 back with the created property including full
+amenity objects. Attempting to create a property with an invalid amenity UUID returns a 409 (FK violation). An
+unverified PG owner gets a 403. A student gets a 403 (role check). GET retrieves the property with amenities. PUT
+updates scalar fields and (when `amenityIds` is included) replaces the amenity set atomically. DELETE succeeds on a
+property with no active listings, and returns a 409 when active listings exist. The seed script runs without error and
+is idempotent.
+
+The health check must still return 200 after all this — that's the standing rule before any merge.
+
+---
+
+When you're ready, we can start writing the actual code in dependency order: seed script first (standalone, no
+blockers), then validators, then service, then controller, then routes.
