@@ -886,3 +886,154 @@ Before merging, you should be able to manually verify: a verified PG owner uploa
 ---
 
 *— Document complete. Ready to build in dependency order: storage adapters → Multer config → photo service → photo controller → photo routes → worker → server.js integration —*
+
+# `phase2/interests` — Architecture, Reasoning & Planning
+
+No code in this document. Every decision is explained from first principles.
+
+---
+
+## What This Phase Is, And Why It Exists Where It Does
+
+Before writing a single schema or function name, it's worth understanding what an "interest request" actually *is* in the mental model of this application, because getting that right determines almost every design decision that follows.
+
+A student sees a listing they like. They tap "I'm interested." That action is not a booking, not a payment, not a reservation. It is a signal — a student raising their hand and saying "I would like to talk to you." The poster (either a PG owner or a student listing their own room) sees that signal and can choose to accept it, decline it, or ignore it. If accepted, it means "yes, let's proceed to a conversation or a viewing." It does not mean the room is theirs. The room remains visible and listable until the poster explicitly marks it as filled.
+
+This framing matters because it governs what the data model needs to express and what the state machine needs to enforce. It is *not* a booking system — it doesn't need payment states, holds, or reservation windows. It *is* a communication coordination system — it needs to track who expressed interest in what, what the poster decided, and ensure that the history of those decisions is preserved for trust and accountability purposes.
+
+---
+
+## The State Machine — The Core of This Phase
+
+Everything in this phase is downstream of getting the state machine right. The `interest_requests` table has a `status` column that is the authoritative record of where any given request stands. Before designing any endpoint, you need to know exactly which states exist, which transitions are legal, and crucially — *who is allowed to trigger each transition*.
+
+The states are: `pending`, `accepted`, `declined`, `withdrawn`, and `expired`.
+
+Think of it as a conversation between two parties. The student fires the opening move by creating a request in `pending` state. From `pending`, only the poster can move — they can accept (`pending → accepted`) or decline (`pending → declined`). The student can also take back their request before the poster responds (`pending → withdrawn`). Once a request is `accepted`, the student can still withdraw (`accepted → withdrawn`) — perhaps they found somewhere better, or the viewing didn't go well. The poster can also decline after accepting (`accepted → declined`) — perhaps the student was unresponsive. `declined` and `withdrawn` are terminal — no transitions out. `expired` is a system-managed terminal state: if a listing expires (60 days, or manually deactivated), all its `pending` requests automatically expire. The system triggers this, not either user.
+
+The critical constraint to internalise: a student can only have **one non-terminal request per listing at any time**. "Non-terminal" means `pending` or `accepted`. A student cannot express interest twice in the same listing simultaneously — that would be incoherent. But they *can* re-express interest after their previous request was `declined` or `withdrawn`. This is the difference between "one request per listing ever" (too restrictive — punishes students for changing their mind) and "one active request per listing" (correct — prevents simultaneous duplicate signals). The DB enforces this with a partial unique index: `UNIQUE (student_id, listing_id) WHERE status IN ('pending', 'accepted')`. Only one row can exist matching that combination.
+
+---
+
+## Why The State Machine Lives In The Database, Not Application Code
+
+This is a design principle that extends beyond just this phase, so it's worth understanding deeply. You could implement the state machine entirely in the service layer: check the current status, validate the transition, run the UPDATE, all in JavaScript. For a low-traffic application with a single server instance, this works fine.
+
+The problem is the TOCTOU race — Time Of Check To Time Of Use. Between the moment the service *reads* the current status and the moment it *writes* the new status, another request could change the state. Two students could both successfully create interest requests for the same listing if their requests arrived within milliseconds of each other — both would pass the "does an active request already exist?" check before either INSERT completes.
+
+The database solves this at the constraint level. The partial unique index on `(student_id, listing_id) WHERE status IN ('pending', 'accepted')` is enforced atomically by PostgreSQL during the INSERT. If two requests arrive simultaneously, PostgreSQL serialises them at the page latch level — one succeeds, one gets a `23505 unique violation` error. No race window exists because the check and the write are the same operation. The service layer's job is then simply to translate that `23505` error into a meaningful `409 Conflict` response.
+
+The same principle applies to status transitions. Rather than reading the current status in JavaScript, branching, and then writing, use `WHERE status = 'expected_status'` in the UPDATE statement itself. If `rowCount === 0`, the status was not what you expected — either it was already transitioned by someone else (race condition caught), or the row doesn't exist, or ownership doesn't match. All three map to a `404` from the caller's perspective (you don't confirm whether ownership failed or the row is in the wrong state — that would leak information).
+
+---
+
+## The Notification Problem — And Why You Don't Solve It Here
+
+Every status transition is inherently interesting to the other party. When a student sends a request, the poster wants to know. When a poster accepts, the student wants to know. This suggests that every service function should, after updating the `interest_requests` row, trigger a notification.
+
+The question is: what kind of notification, and implemented how?
+
+In-app notifications (a count badge, an inbox — these are Phase 3 in the plan). Push notifications to mobile (Phase 6). Email (Phase 6 or later). WebSocket/real-time updates (Phase 6).
+
+None of these belong in this phase. The correct design is to write the notification *hook points* — clearly marked places in the service where notifications will eventually be triggered — as comments, without implementing the notification delivery. This is not laziness. It reflects the principle that adding a notification later should not require modifying the interest request state machine. The notification is a side effect of the transition, not part of it. If you bake email sending into `createInterestRequest()` now, you've coupled a network I/O operation with unknown latency into a DB transaction. When the email provider is down, interest requests start failing. That coupling is wrong.
+
+The clean architectural pattern is: complete the DB write, commit the transaction, then fire any side effects asynchronously. In this phase, those side effects are empty — the hook points are documented. In Phase 3, the notification service will fill them in without touching the state machine code.
+
+---
+
+## The Actors and Their Permissions — Detailed
+
+It's easy to state "students send interest, posters respond" and move on. But the edge cases require precision. Let's reason through each actor's permission surface carefully.
+
+**The student (requester).** Can create a request for any active listing that isn't their own (a student posting their own room cannot express interest in their own listing). Can withdraw a request they sent, in either `pending` or `accepted` state. Cannot accept or decline — those are poster-only actions. Cannot see other students' interest requests for the same listing (privacy — you don't need to know you're competing with three other applicants, though the listing's view count gives a weak signal). Can see the full history of their own requests across all listings (for their "my interests" dashboard).
+
+**The poster (responder).** Can accept or decline any `pending` request on their listing. Can decline an `accepted` request (exceptional case, but it must be possible — people change their mind, circumstances change). Cannot withdraw — withdrawal is the requester's action. Can see all interest requests for listings they own (their "manage interest" view). Cannot see one requester's request on another poster's listing.
+
+**A subtle edge case:** what if the poster is a student who listed their own room? A `student_room` listing has `posted_by` = the student's user ID. That student is simultaneously the requester-role and the poster-role in the system. The service must ensure they cannot express interest in their own listing (`WHERE listed_by != requester_id` check on create) while also being allowed to accept/decline requests from other students on their listing (the poster-action check looks at `posted_by`, not at roles — correct).
+
+**Another edge case:** what if a listing's status changes to `filled` or `inactive` while requests are `pending`? The planning doc from Phase 2 noted that deleting a listing is gated on open interest requests — but what about deactivation (status change, not deletion)? Pending requests on a deactivated listing are in limbo — the student doesn't know why nothing is happening. The correct behaviour is to auto-expire all `pending` requests when a listing is deactivated or filled. This is a small but important piece of logic in the listing service's status-update path, not in the interest service — the interest phase needs to *expose* the `expired` status in its schema and explain how it gets set, but the trigger is elsewhere.
+
+---
+
+## API Surface Design
+
+The endpoints follow REST conventions with one deliberate deviation worth explaining.
+
+The natural REST URL for "create an interest request for listing X" would be `POST /listings/:listingId/interests` — the interest is a child resource of the listing. However, this creates a structural problem: the listing router becomes the parent of both photo routes and interest routes, and interests also need a top-level view (`GET /interests/me` — all requests sent by this student, across all listings). This suggests interests should also be a top-level resource at `/interests`.
+
+The resolution is to use **both** mounting points for different concerns:
+- `POST /listings/:listingId/interests` — create an interest on a specific listing (listing-scoped action)
+- `GET /interests/me` — student's own interests dashboard (user-scoped)
+- `GET /listings/:listingId/interests` — poster's view of all requests on their listing (listing-scoped, poster only)
+- `PATCH /interests/:interestId/status` — poster or student changes status (interest-scoped action)
+
+The `PATCH /interests/:interestId/status` endpoint is the most important design choice. An alternative would be to use separate endpoints: `POST /interests/:interestId/accept`, `POST /interests/:interestId/decline`, `POST /interests/:interestId/withdraw`. The separate-endpoints approach is more RESTfully pure (verbs in URLs are often a smell, but action endpoints are a legitimate REST pattern). However, for a state machine with 4 possible transitions all hitting the same row, a single PATCH endpoint with a `status` field in the body is more maintainable — the service validates whether the requested transition is legal from the current state, and only one route definition handles all transitions.
+
+---
+
+## The Service Layer — Key Functions and Their Internal Logic
+
+**`createInterestRequest(studentId, listingId)`**
+
+This function has four validation concerns in order: verify the listing is active and not deleted, verify the student is not the poster of the listing, check for an existing active request (though the DB partial unique index catches this at write time — this check is optional and serves only to give a cleaner error message), then INSERT. The INSERT returns the new `interest_id` and the full request row. Any `23505` error from PostgreSQL is caught and translated to a `409 Conflict` with a human message: "You already have an active interest request for this listing."
+
+**`updateInterestStatus(requesterId, interestId, newStatus)`**
+
+This is the state machine enforcement function. It is the most complex function in the phase. The logic is:
+
+First, fetch the current row: `SELECT status, student_id, listing_id, l.posted_by FROM interest_requests ir JOIN listings l ON l.listing_id = ir.listing_id WHERE ir.interest_id = $1`. This single query gives us everything needed — current status, who the student is, who the poster is.
+
+If the row doesn't exist, throw 404.
+
+Then determine which actor is calling. If `requesterId === row.student_id`, the caller is the student-requester. If `requesterId === row.posted_by`, the caller is the poster. If neither, throw 403.
+
+Then validate the transition against a transition table. The transition table is a plain JavaScript object — not a database table, not a class hierarchy. Something like:
+
+```
+transitions = {
+  student: { pending: ['withdrawn'], accepted: ['withdrawn'] },
+  poster:  { pending: ['accepted', 'declined'], accepted: ['declined'] }
+}
+```
+
+If the requested `newStatus` is not in the allowed transitions for the actor's role from the current status, throw `422 Unprocessable Entity` (the request is syntactically valid but semantically illegal — not a 400, not a 403, specifically 422).
+
+Then run the UPDATE: `UPDATE interest_requests SET status = $1, updated_at = NOW() WHERE interest_id = $2 AND status = $3`. The `AND status = $3` clause is the atomic safety net — if another request changed the status between the SELECT and this UPDATE, `rowCount` will be 0, and you throw a `409 Conflict` ("Status has already changed — please refresh and try again"). This is the correct handling for the race condition.
+
+**`getInterestRequestsForListing(posterId, listingId)`**
+
+Poster-only endpoint. Returns all non-deleted interest requests for the listing along with the student's public profile (name, profile photo URL, average rating, institution name). The WHERE clause must include `l.posted_by = $2` to enforce that the poster only sees requests on listings they own.
+
+**`getMyInterestRequests(studentId, filters)`**
+
+Returns all interest requests the student sent. Supports filtering by `status` and keyset pagination. Each row includes the listing summary (title, city, rent, cover photo, poster name) so the student can see at a glance what listing they expressed interest in and what its current state is — without needing to join to a separate listing detail fetch.
+
+---
+
+## Files This Phase Creates
+
+The structure is completely standard: `src/validators/interest.validators.js`, `src/services/interest.service.js`, `src/controllers/interest.controller.js`, and two route files — `src/routes/interest.js` for the top-level `/interests` resource (student dashboard, status updates) and additions to `src/routes/listing.js` for the listing-scoped routes (`POST /listings/:listingId/interests`, `GET /listings/:listingId/interests`).
+
+No new database utilities are needed. The service uses `pool` directly. No new middleware is needed — `authenticate`, `authorize`, and `validate` are all already available.
+
+---
+
+## What This Phase Does NOT Include
+
+The "mark listing as filled" endpoint — that belongs to the listing service. This phase focuses purely on the interest request lifecycle. Rating/review after a successful interest → viewing → move-in flow — that's Phase 3 or later; it requires completed transactions, not just accepted interest requests. Bulk accept/decline for posters managing many requests at once — a useful feature for Phase 5 (optimisations and admin tools), not a Phase 2 concern. Any form of matching algorithm or recommendation ("based on your preferences, you might like...") — Phase 5.
+
+---
+
+## The One Architectural Tension Worth Sitting With
+
+There is a genuine design tension in this phase that doesn't have a single right answer: **should an accepted interest request prevent the listing from receiving new interest requests from other students?**
+
+The current design says no — a listing can have multiple `accepted` requests simultaneously. The listing is not "taken" until the poster explicitly changes its status to `filled`. This is permissive — it allows the poster to keep their options open, which is realistic in the messy human process of finding a roommate. But it means students don't know whether an accepted request actually means anything, because they can't see competing accepted requests.
+
+An alternative design would limit `accepted` to one at a time — accepting one request automatically declines all other `pending` requests. This is more decisive and reduces ambiguity for students, but it removes flexibility from the poster (what if the accepted student ghosts them?) and requires more complex logic in the accept transition.
+
+The permissive design is chosen for Phase 2 because it requires less logic and fewer state changes per transition, and because the product can always add the "accepting one declines all others" behaviour later as an option. Adding constraints later is easier than removing them. The listing service's `deleteListing` gate (which blocks deletion while active interest requests exist) already handles the most important case — the room can't disappear without the poster first resolving their outstanding commitments.
+
+---
+
+*— Document complete. Ready to build in order: validators → service → controller → routes —*
