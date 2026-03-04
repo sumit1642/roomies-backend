@@ -738,3 +738,151 @@ Before merging this branch: a student can search for listings by city and get re
 ---
 
 *— Document complete. Ready to build in dependency order: listing CRUD → preferences → search → saved —*
+
+# `phase2/media` — Architecture & Planning
+
+No code in this document. Every decision reasoned from the schema and the constraints of Node.js and Azure.
+
+---
+
+## The Mental Model Before Anything Else
+
+It helps to understand *why* this branch exists as a separate phase rather than being folded into the listings branch. The answer is that photo upload involves a fundamentally different kind of work than every other endpoint built so far. Every endpoint in Phases 1 and 2 so far is I/O-bound in a predictable way — send a query to PostgreSQL, wait for rows, return JSON. The event loop is blocked for microseconds at most, and Node.js handles concurrent requests comfortably.
+
+Photo upload breaks this pattern in two ways. First, receiving a multipart file upload involves streaming potentially megabytes of binary data through the HTTP request parser — that's I/O-bound but at a much larger scale than a JSON body. Second, and more critically, *processing* that photo with Sharp (resize, convert to WebP, compress) is CPU-bound. Node.js runs JavaScript on a single thread. A CPU-bound operation that takes 200–400ms does not politely yield the event loop to other requests — it holds it. If ten students upload photos simultaneously and the processing runs synchronously, the eleventh student's request (even just a simple listing GET) has to wait for all ten photo processing jobs to finish before it can be served. This is the fundamental problem that BullMQ solves.
+
+Understanding this shapes every decision that follows.
+
+---
+
+## What This Branch Delivers
+
+Three things: a `StorageService` abstraction with two adapters (local disk for dev, Azure Blob stub for production), a Multer-based upload endpoint that accepts the file and returns `202 Accepted` immediately, and a BullMQ worker that processes photos in the background. The worker is started in `server.js` and shut down gracefully alongside the pool and Redis connection.
+
+This branch does not deliver Aadhaar verification, profile photo upload, or any other non-listing photo concern. The `listing_photos` table is the only target for this branch. Profile photos are a Phase 5 concern.
+
+---
+
+## The Storage Adapter Pattern
+
+The storage layer is designed around a simple interface with two implementations. The interface looks like this in concept: you call `storageService.upload(file, destination)` and receive back a URL string. You call `storageService.delete(url)` and the file is removed. That is the entire contract. Neither the controller, the service, nor the worker ever knows or cares which adapter is active — they only call these two methods.
+
+The `STORAGE_ADAPTER` environment variable in `.env.local` is `local`, which instantiates the `LocalDiskAdapter`. In `.env.azure` it is `azure`, which instantiates the `AzureBlobAdapter`. The selection happens once at module load time in a new file `src/storage/index.js`, which exports a pre-instantiated `storageService` singleton. Everything else imports from there.
+
+**Why a singleton rather than instantiating per-request?** Because both adapters have internal state that is expensive to recreate — `LocalDiskAdapter` needs to verify that the `/uploads` directory exists, and `AzureBlobAdapter` creates an authenticated client using the Azure SDK that involves reading credentials and configuring TLS. Creating these per request would add latency and in Azure's case burn unnecessary memory allocating SDK client objects.
+
+### The Local Disk Adapter
+
+The `LocalDiskAdapter` writes compressed files to `/uploads/listings/{listingId}/` on the host filesystem. It returns a relative URL like `/uploads/listings/{listingId}/{filename}.webp`. Express already serves the `/uploads` directory statically in development (this is set up in `app.js` from Phase 1). So a file written to disk at `/uploads/listings/abc/cover.webp` is immediately accessible at `http://localhost:3000/uploads/listings/abc/cover.webp`. No additional serving infrastructure is needed in development.
+
+The adapter must create the directory if it does not exist. Node's `fs.mkdir` with `{ recursive: true }` handles this safely — it is a no-op if the directory already exists, and it creates any intermediate directories that are missing. This call must happen inside the upload method, not at adapter construction time, because the `listingId`-scoped subdirectory cannot be known at construction.
+
+### The Azure Blob Adapter
+
+The `AzureBlobAdapter` is a **stub** in this branch. It throws `AppError("Azure Blob Storage is not yet configured", 501)` from both `upload` and `delete`. The interface exists and is complete — the implementation is deferred. The reason to build the stub now rather than later is architectural cleanliness: the entire rest of the system can be written against the interface without any `if (STORAGE_ADAPTER === 'azure')` conditionals scattered throughout service files. When Azure integration is implemented, only the adapter file changes. Nothing else in the codebase needs to touch it.
+
+The `AzureBlobAdapter` is where, in a future phase, you would use `@azure/storage-blob`'s `BlobServiceClient` to upload to an Azure Storage container and return the blob's HTTPS URL. The URL format would be `https://{account}.blob.core.windows.net/{container}/listings/{listingId}/{filename}.webp`. That URL is what gets written to `listing_photos.photo_url` in the database.
+
+### Why Not Use Multer's `diskStorage` or `memoryStorage` Directly?
+
+You might wonder why there is a `StorageService` abstraction at all, rather than just configuring Multer's built-in disk storage or memory storage. The answer is that Multer's job ends at receiving the file — it has no understanding of compression, destination organisation, or cloud storage. Multer writes the *raw* uploaded file. Sharp compression has to run *after* Multer has written it, and the compressed file goes to a *different* location than the raw file. The `StorageService` is what handles the final destination write of the *compressed* file, which is what actually gets stored permanently. The Multer staging location is temporary.
+
+---
+
+## The Upload Flow Step by Step
+
+Understanding the exact sequence of events from upload request to permanent storage is essential before designing anything. Here it is:
+
+A client POSTs to `POST /api/v1/listings/:listingId/photos` with a `multipart/form-data` body containing the image file. Multer middleware intercepts this, parses the multipart body, and writes the raw file to a staging directory — `/uploads/staging/{uuid}.{ext}`. Multer attaches the file metadata (original name, staging path, mimetype, size) to `req.file`. The controller validates the listing exists and belongs to the authenticated poster (a service call — no direct DB access in the controller). Then the controller calls the service's `uploadPhoto` function, which inserts a provisional row into `listing_photos` with a placeholder URL and `is_cover = FALSE`, then enqueues a BullMQ job with the `{ listingId, photoId, stagingPath }` payload. The service returns `{ photoId, status: 'processing' }`. The controller responds with `202 Accepted` and that payload. The HTTP request is complete.
+
+Separately, the BullMQ worker picks up the job from Redis. It reads the staged file, runs Sharp (resize to max 1200px on the longest dimension, convert to WebP at quality 80, strip EXIF metadata), calls `storageService.upload()` to write the compressed file to the final destination, updates the `listing_photos` row with the real URL and sets `status` to whatever signals completion (or alternatively, since there is no status column on `listing_photos`, it simply writes the real URL — replacing the placeholder). It deletes the staging file. If this is the first photo for this listing and no cover photo exists, it sets `is_cover = TRUE` on this photo's row.
+
+The client polls `GET /api/v1/listings/:listingId/photos` to see the final URL appear. This is not push delivery — that is Phase 6. Polling with a small backoff (500ms, 1s, 2s) is entirely acceptable for photo upload UX.
+
+---
+
+## Multer Configuration
+
+Multer is configured centrally in `src/middleware/upload.js` rather than inline on routes. This is the same philosophy as `validate.js` and `authenticate.js` — middleware belongs in the middleware directory, not scattered across route files.
+
+The configuration requires careful decisions about three things:
+
+**Storage destination.** Multer must write to a staging directory rather than the final destination. The staging directory is `/uploads/staging/`. Multer's `diskStorage` option is used with a `filename` function that generates a UUID filename (using `crypto.randomUUID()`) with the original file extension preserved. This prevents filename collisions when multiple uploads arrive concurrently.
+
+**File filter.** Only image types should be accepted. The filter checks `file.mimetype` against an allowlist: `image/jpeg`, `image/png`, `image/webp`. A file claiming to be `image/jpeg` but actually containing a PHP script or an executable is caught later by Sharp — Sharp will throw when it tries to decode a non-image binary. The mimetype filter is a fast pre-check, not a security guarantee.
+
+**File size limit.** The limit is 10MB per file. This is set in Multer's `limits.fileSize` option. Without a size limit, a malicious client could upload a 2GB file, hold a Node.js file descriptor open, and potentially exhaust disk space or memory. The 10MB limit is generous for a photo that will be compressed to WebP — it accommodates RAW camera photos exported as JPEG while still being a reasonable bound. Express and Multer enforce this at the HTTP streaming level, so the file is rejected before it is fully written to disk.
+
+Only one file per request is accepted. The route uses `upload.single('photo')`. Accepting multiple files simultaneously would complicate the job queue logic and the cover-photo election logic without a meaningful UX benefit — the client can make multiple sequential upload requests.
+
+---
+
+## The BullMQ Worker Design
+
+The worker lives in `src/workers/mediaProcessor.js`. It is a separate module that exports a function `startMediaWorker()` which creates and returns a BullMQ `Worker` instance. `server.js` calls `startMediaWorker()` during startup and stores the returned worker instance for graceful shutdown.
+
+**Why a factory function rather than a module-level side effect?** Because a module-level `new Worker(...)` call would execute the moment the file is imported, even in test environments where you do not want workers running. A factory function gives the caller control over when the worker starts. This is a testability concern as much as a design one.
+
+**Queue name.** The queue is named `media-processing` consistently between the enqueuer (listing service) and the consumer (worker). This string is the coupling point between the two — if it ever drifts, jobs are enqueued to one queue and consumed from another, silently. Define the queue name as a constant exported from `src/workers/mediaProcessor.js` so the service imports it rather than hardcoding the string in two places.
+
+**Concurrency of 1.** The worker is created with `{ concurrency: 1 }`. This is the correct setting for a single-instance Node.js deployment running Sharp. Sharp is CPU-intensive — it calls native compiled C++ code (libvips) to do image resizing. Running two Sharp jobs simultaneously on one Node.js instance does not make them finish twice as fast; it makes them both run slower because they compete for the same CPU core(s) while also multiplying memory usage (each Sharp operation buffers the full image in memory). Serialising them at concurrency 1 means each job uses the full CPU budget and completes as fast as possible. When deployed to Azure App Service with multiple instances, each instance runs its own worker with concurrency 1, which gives you horizontal scaling without intra-instance contention.
+
+**Job retry policy.** BullMQ supports automatic retries with backoff. The worker should be configured with `{ attempts: 3, backoff: { type: 'exponential', delay: 2000 } }` — three attempts with exponential backoff starting at 2 seconds. Why? Because Sharp failures can be transient (the staging file might not yet be flushed to disk when the worker picks up the job in the same millisecond, though this is extremely rare with `diskStorage`). Three attempts with backoff give the system a chance to self-heal transient failures without developer intervention. After three failures, the job moves to the BullMQ dead-letter queue (the `failed` set in Redis), where it can be inspected and replayed manually or via a future admin tool.
+
+**Job data shape.** Each enqueued job carries `{ listingId, photoId, stagingPath, posterId }`. The `photoId` is the UUID of the provisional `listing_photos` row created before the job was enqueued — the worker uses this to update that specific row with the final URL. The `posterId` is carried for logging purposes, making log correlation easy when debugging a failed job.
+
+**What happens to the staging file on failure?** After all retry attempts are exhausted, the staging file remains on disk. This is acceptable — a cleanup cron (Phase 5) can sweep the staging directory and delete files older than, say, 24 hours. Deleting the staging file inside the worker's failure handler is tempting but risky: if the job fails because Sharp can't read the file (corrupted upload), deleting it means you can never inspect what was uploaded. Retaining failed staging files is the right operational choice.
+
+---
+
+## The `listing_photos` Table Design Considerations
+
+The schema already has `listing_photos` with a partial unique index `WHERE is_cover = TRUE AND deleted_at IS NULL`. This index enforces at most one cover photo per listing at the database level, which is the final safety net. But the application layer must also honour this contract to avoid hitting the unique violation in the first place.
+
+The cover photo election logic lives in the worker, not in the controller or the upload service, because it runs after compression completes — not at upload time. The logic is: after the worker writes the final URL to the `listing_photos` row, it runs `SELECT COUNT(*) FROM listing_photos WHERE listing_id = $1 AND is_cover = TRUE AND deleted_at IS NULL`. If the count is zero, this new photo becomes the cover by running `UPDATE listing_photos SET is_cover = TRUE WHERE photo_id = $1`. If the count is already one, the new photo stays as a non-cover photo.
+
+This check-then-update has a tiny TOCTOU race window — two simultaneous uploads could both see count zero and both try to set `is_cover = TRUE`, which would violate the partial unique index and throw a `23505` error. The correct fix is to make the cover election atomic. The SQL for this is `UPDATE listing_photos SET is_cover = TRUE WHERE photo_id = $1 AND NOT EXISTS (SELECT 1 FROM listing_photos WHERE listing_id = $2 AND is_cover = TRUE AND deleted_at IS NULL)`. This single statement atomically sets `is_cover = TRUE` only if no cover already exists — the existence check and the update happen in one server-side operation without a gap. `rowCount === 0` means a cover already existed and this photo correctly stays as a non-cover.
+
+---
+
+## The Photo Delete Endpoint
+
+`DELETE /api/v1/listings/:listingId/photos/:photoId` soft-deletes the photo row and calls `storageService.delete(photo.photo_url)` to remove the file from disk (or blob storage). Both operations must succeed or neither should be committed — this is a transaction concern. The SQL UPDATE sets `deleted_at = NOW()`. The storage delete happens after the transaction commits, not inside it. This is the correct order: if the storage delete fails, the DB row is already soft-deleted, which means the photo won't be served to users even though the file still exists on disk. The orphaned file will be cleaned up by a maintenance cron. The reverse order — delete the file first, then commit the DB row — risks a situation where the file is gone but the DB row still points to it, serving broken image URLs.
+
+If the deleted photo was the cover, the service must elect a new cover. The query for this is `UPDATE listing_photos SET is_cover = TRUE WHERE listing_id = $1 AND deleted_at IS NULL AND photo_id != $2 ORDER BY display_order ASC LIMIT 1`. If no other photos exist, no cover is elected — a listing with zero photos has no cover, which is a valid state during onboarding.
+
+---
+
+## Server.js Integration
+
+The worker startup and shutdown sequence in `server.js` follows a strict order that matters:
+
+**Startup order:** PostgreSQL connects, Redis connects, worker starts (it requires Redis to be connected to communicate with BullMQ), Express server starts listening. The worker must start *after* Redis is connected — BullMQ uses Redis as its backing store, and a worker that starts before Redis is ready will fail to register its queue listener.
+
+**Shutdown order:** On SIGTERM, Express stops accepting new connections (`server.close()`), the media worker closes (`worker.close()` — this waits for the currently-running job, if any, to finish before returning), Redis disconnects, PostgreSQL pool drains. The order matters because the worker's `close()` method attempts to wait for the active job to complete — but the job may need Redis (to update job state) and may need PostgreSQL (to update the `listing_photos` row). Both must still be connected when the worker shuts down. So the shutdown order is: HTTP server → worker → Redis → PostgreSQL. This is the *opposite* of the startup order, which is the correct pattern for dependency teardown.
+
+The forced 10-second shutdown timeout already in `server.js` handles the case where a job is taking too long. If a Sharp job is 8 seconds in when SIGTERM arrives, the worker's `close()` will wait for it to finish (total time ~2s more), and then shutdown proceeds. If the job were 12 seconds in, the forced exit fires and the job moves to the failed set in BullMQ — it will be retried on the next startup.
+
+---
+
+## New Files This Branch Creates
+
+The new files follow the established project conventions without exception. `src/storage/index.js` is the adapter factory and the singleton export. `src/storage/adapters/localDisk.js` is the local disk implementation. `src/storage/adapters/azureBlob.js` is the stub. `src/workers/mediaProcessor.js` is the worker factory plus the queue name constant. `src/middleware/upload.js` is the Multer configuration. `src/validators/photo.validators.js` contains the upload params schema and the photo params schema (listingId + photoId for delete). `src/services/photo.service.js` handles the provisional DB row creation and photo deletion logic. `src/controllers/photo.controller.js` is thin as always. Photo routes are registered on the listing router under `/:listingId/photos` — they are a child resource of listings, not a top-level resource. No new top-level router mount is needed.
+
+The property service does not gain photo upload capability in this branch. Property-level photos (the building exterior, common areas) are a Phase 5 admin tool concern — they are not user-uploaded in the same flow as listing room photos.
+
+---
+
+## What This Branch Does NOT Include
+
+Profile photo upload (students, PG owners) is not in scope — it requires a separate Multer configuration (smaller size limit, different destination) and different DB write targets. It is a Phase 5 concern. Video upload is not in scope — the `listing_photos` table only supports images, and video would require a transcoding pipeline far beyond what Sharp provides. The BullMQ dashboard (`@bull-board/express`) is noted in the project plan as a dev tool — it is wired in this branch alongside the worker since the queue now exists and has real jobs, but it is a single middleware registration on the admin router, not a separate deliverable.
+
+---
+
+## Branch Completion Criteria
+
+Before merging, you should be able to manually verify: a verified PG owner uploads a JPEG to a listing they own and receives `202 Accepted` with a `photoId`. Within a second or two (worker processing time), `GET /listings/:listingId` returns that photo in the `photos` array with a real WebP URL. The file on disk is WebP format and smaller than the original. The first uploaded photo is automatically elected as cover. Uploading a second photo does not change the cover. Explicitly deleting the cover photo via DELETE elects the next photo as cover. Uploading a file larger than 10MB returns `413 Payload Too Large`. Uploading a non-image file (e.g. a PDF) returns `400 Bad Request`. A student trying to upload a photo to another user's listing gets `404`. The health check still returns `200`. The server shuts down cleanly on SIGTERM without leaving orphaned Sharp processes.
+
+---
+
+*— Document complete. Ready to build in dependency order: storage adapters → Multer config → photo service → photo controller → photo routes → worker → server.js integration —*
