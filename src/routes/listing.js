@@ -29,6 +29,14 @@ import {
 	savedListingsSchema,
 } from "../validators/listing.validators.js";
 import * as listingController from "../controllers/listing.controller.js";
+import { upload } from "../middleware/upload.js";
+import {
+	uploadPhotoSchema,
+	deletePhotoSchema,
+	reorderPhotosSchema,
+	setCoverSchema,
+} from "../validators/photo.validators.js";
+import * as photoController from "../controllers/photo.controller.js";
 
 export const listingRouter = Router();
 
@@ -104,4 +112,55 @@ listingRouter.delete(
 	authorize("student"),
 	validate(saveListingSchema),
 	listingController.unsaveListing,
+);
+
+// ─── Photo routes (child resource of /:listingId) ────────────────────────────
+//
+// Photo routes are registered here rather than in a separate router file because
+// they are semantically a child resource of listings — a photo cannot exist
+// without a parent listing. Keeping them in the listing router also means the
+// listingId param is already parsed and available from the parent route context.
+//
+// All photo mutations require the poster to own the listing — ownership is
+// verified inside the service via WHERE listing_id = $1 AND posted_by = $2.
+// No separate authorize() middleware is needed beyond authenticate().
+
+// GET /api/v1/listings/:listingId/photos — world-readable (any authenticated user)
+listingRouter.get("/:listingId/photos", authenticate, validate(uploadPhotoSchema), photoController.getPhotos);
+
+// POST /api/v1/listings/:listingId/photos — upload a new photo
+// upload.single('photo') runs BEFORE validate() because Multer must parse the
+// multipart body before Zod can read req.body or req.file. The order matters:
+// if validate ran first on a multipart request, req.body would be empty (Express
+// does not parse multipart bodies — only Multer does).
+listingRouter.post(
+	"/:listingId/photos",
+	authenticate,
+	upload.single("photo"),
+	validate(uploadPhotoSchema),
+	photoController.uploadPhoto,
+);
+
+// DELETE /api/v1/listings/:listingId/photos/:photoId — soft-delete a photo
+listingRouter.delete(
+	"/:listingId/photos/:photoId",
+	authenticate,
+	validate(deletePhotoSchema),
+	photoController.deletePhoto,
+);
+
+// PATCH /api/v1/listings/:listingId/photos/:photoId/cover — set as cover
+listingRouter.patch(
+	"/:listingId/photos/:photoId/cover",
+	authenticate,
+	validate(setCoverSchema),
+	photoController.setCoverPhoto,
+);
+
+// PUT /api/v1/listings/:listingId/photos/reorder — update display_order for all photos
+listingRouter.put(
+	"/:listingId/photos/reorder",
+	authenticate,
+	validate(reorderPhotosSchema),
+	photoController.reorderPhotos,
 );
