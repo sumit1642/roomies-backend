@@ -1,6 +1,5 @@
 // src/services/interest.service.js
 //
-// Implements the interest request state machine and all associated queries.
 //
 // ─── THE STATE MACHINE ────────────────────────────────────────────────────────
 //
@@ -17,16 +16,7 @@
 // The ALLOWED_TRANSITIONS map below is the single source of truth for this logic.
 // Any code that needs to know "can actor X move from state Y to state Z?" should
 // consult this map — never inline the logic elsewhere.
-//
-// ─── DATABASE ENFORCEMENT ────────────────────────────────────────────────────
-//
-// The partial unique index UNIQUE (student_id, listing_id) WHERE status IN
-// ('pending', 'accepted') means PostgreSQL enforces the "one active request per
-// student per listing" rule atomically at write time. No application-level SELECT
-// before INSERT is needed for correctness (though we do it anyway to give a
-// better error message). A race condition between two simultaneous requests from
-// the same student produces a 23505 error from PostgreSQL, which we catch and
-// translate to 409.
+
 //
 // ─── NOTIFICATION HOOKS ──────────────────────────────────────────────────────
 //
@@ -40,13 +30,6 @@ import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 
-// ─── State machine transition table ──────────────────────────────────────────
-//
-// Keys are actor roles as determined by the service (not JWT roles — a student
-// who posts their own room is a 'poster' when acting on their own listing's
-// requests). Values are objects mapping current status → array of reachable
-// statuses. If a (actor, currentStatus, newStatus) combination does not appear
-// here, the transition is illegal and the service throws 422.
 const ALLOWED_TRANSITIONS = {
 	student: {
 		pending: ["withdrawn"],
@@ -58,11 +41,6 @@ const ALLOWED_TRANSITIONS = {
 	},
 };
 
-// ─── Private helpers ──────────────────────────────────────────────────────────
-
-// Fetches a single interest request row with the context needed for transition
-// validation: who is the requester, who is the poster, what is the current status.
-// Returns null if the row doesn't exist or is soft-deleted.
 const fetchInterestWithContext = async (interestId, client = pool) => {
 	const { rows } = await client.query(
 		`SELECT
@@ -84,20 +62,12 @@ const fetchInterestWithContext = async (interestId, client = pool) => {
 	return rows[0] ?? null;
 };
 
-// Determines the caller's role relative to a specific interest request.
-// Returns 'student' if the caller is the requester, 'poster' if they own
-// the listing, null if they are neither (unauthorized).
-// This is intentionally distinct from JWT roles — a student who posted their
-// own room is a 'poster' in this context when responding to others' requests.
 const resolveActorRole = (callerId, row) => {
 	if (callerId === row.student_id) return "student";
 	if (callerId === row.poster_id) return "poster";
 	return null;
 };
 
-// Shapes a raw interest DB row into the API response format for the student's
-// dashboard view, including the listing summary they need to recognise the
-// context of the request.
 const toStudentInterestShape = (row) => ({
 	interestId: row.interest_id,
 	status: row.status,
@@ -216,17 +186,11 @@ export const createInterestRequest = async (studentId, listingId, message) => {
 // ─── Update interest status (state machine transition) ────────────────────────
 
 export const updateInterestStatus = async (callerId, interestId, newStatus) => {
-	// Fetch the full context row — we need it to determine the actor's role,
-	// validate the transition, and run the UPDATE with the right WHERE clause.
 	const row = await fetchInterestWithContext(interestId);
 	if (!row) throw new AppError("Interest request not found", 404);
 
-	// Determine who the caller is relative to this request.
 	const actorRole = resolveActorRole(callerId, row);
 	if (!actorRole) {
-		// The caller has no relationship to this request. Return 404, not 403 —
-		// confirming that the request exists but the caller lacks permission would
-		// leak information about another user's activity.
 		throw new AppError("Interest request not found", 404);
 	}
 
@@ -236,22 +200,19 @@ export const updateInterestStatus = async (callerId, interestId, newStatus) => {
 		throw new AppError(`Cannot transition from '${row.status}' to '${newStatus}' as ${actorRole}`, 422);
 	}
 
-	// Run the UPDATE with AND status = current status as an atomic safety net.
-	// If another request changed the status between our SELECT and this UPDATE,
-	// rowCount will be 0 and we surface a 409 rather than silently applying
-	// a transition on top of an already-changed state.
 	const { rowCount, rows: updatedRows } = await pool.query(
 		`UPDATE interest_requests
      SET status     = $1,
          updated_at = NOW()
      WHERE interest_id = $2
        AND status      = $3
+       AND deleted_at  IS NULL
      RETURNING interest_id, student_id, listing_id, status, updated_at`,
 		[newStatus, interestId, row.status],
 	);
-
+	
 	if (rowCount === 0) {
-		throw new AppError("The status of this request has changed — please refresh and try again", 409);
+		throw new AppError("Interest request not found or status has already changed — please refresh", 409);
 	}
 
 	const updated = updatedRows[0];
@@ -382,10 +343,6 @@ export const getMyInterestRequests = async (studentId, filters) => {
 
 	params.push(limit + 1);
 
-	// The student sees a listing summary alongside each request so they can
-	// immediately recognise which property the request relates to — title, city,
-	// rent, cover photo, and the poster's name are enough for recognition without
-	// fetching the full listing detail.
 	const { rows } = await pool.query(
 		`SELECT
        ir.interest_id,
@@ -442,23 +399,6 @@ export const getMyInterestRequests = async (studentId, filters) => {
 };
 
 // ─── Expire pending requests for a listing ────────────────────────────────────
-//
-// Called by the listing service when a listing is deactivated, filled, or
-// soft-deleted. Sets all 'pending' interest requests to 'expired' so requesters
-// are not left waiting indefinitely for a response that will never come.
-//
-// This function is NOT exposed as an HTTP endpoint — it is an internal
-// service-to-service call. It takes a `client` parameter so it can participate
-// in the same transaction as the listing status change that triggered it.
-// This is the correct design: expiring the requests and changing the listing
-// status should be atomic — you never want a listing to be 'filled' while
-// some of its requests are still 'pending'.
-//
-// 'accepted' requests are deliberately excluded from this expiry: if the poster
-// has already accepted a request and then marks the listing as filled, the
-// accepted request represents a real agreement that should remain visible in
-// both parties' history. Only 'pending' requests — which represent unanswered
-// signals — are expired.
 export const expirePendingRequestsForListing = async (listingId, client = pool) => {
 	const { rowCount } = await client.query(
 		`UPDATE interest_requests
