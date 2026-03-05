@@ -1,4 +1,6 @@
 // src/server.js
+// Bootstrap: connects PostgreSQL, Redis, and the media worker, starts the HTTP server,
+// and tears everything down cleanly in dependency-reverse order on SIGINT/SIGTERM.
 
 import "./config/env.js";
 
@@ -7,6 +9,8 @@ import { pool } from "./db/client.js";
 import { redis, connectRedis } from "./cache/client.js";
 import { logger } from "./logger/index.js";
 import { config } from "./config/env.js";
+import { startMediaWorker } from "./workers/mediaProcessor.js";
+import { closeAllQueues } from "./workers/queue.js";
 
 const start = async () => {
 	try {
@@ -16,19 +20,17 @@ const start = async () => {
 		await connectRedis();
 		logger.info("Redis connected");
 
+		// Worker must start after Redis is ready — BullMQ uses Redis as its backing store.
+		// Store the instance so shutdown can call worker.close() before Redis disconnects.
+		const mediaWorker = startMediaWorker();
+
 		const server = app.listen(config.PORT, () => {
 			logger.info(`Server running on port ${config.PORT} [${config.NODE_ENV}]`);
 		});
 
-		// ─── Graceful shutdown ──────────────────────────────────────────────────
-		// Captures the server instance and tears down cleanly on SIGINT / SIGTERM.
-		// Stops accepting new connections, waits for in-flight requests to finish,
-		// then closes the DB pool and Redis connection before exiting.
-		//
-		// Redis must be explicitly disconnected — Azure Cache for Redis tracks
-		// open connections per instance, and in rolling restarts or scale-in events
-		// leaving connections open can exhaust the connection limit on the new
-		// instance before the old one's TCP connections time out on their own.
+		// Shutdown order: HTTP → worker → queues → PostgreSQL → Redis.
+		// Worker and queues must close before Redis because in-flight jobs still need both.
+		// Redis must close before the process exits to avoid exhausting Azure connection limits.
 		const shutdown = (signal) => async () => {
 			logger.info(`${signal} received — shutting down gracefully`);
 
@@ -38,8 +40,25 @@ const start = async () => {
 					process.exit(1);
 				}
 
-				// Close PostgreSQL pool — waits for in-flight queries to complete
-				// then releases all connections back to the server.
+				// Drain the active job (if any) before closing queues — worker.close() blocks
+				// until the current job finishes, respecting the job retry/fail contract.
+				try {
+					await mediaWorker.close();
+					logger.info("Media worker closed");
+				} catch (workerErr) {
+					logger.error({ err: workerErr }, "Error closing media worker");
+				}
+
+				// Close all BullMQ Queue connections — uses Promise.allSettled so every
+				// queue gets a close attempt even if one fails.
+				try {
+					await closeAllQueues();
+					logger.info("BullMQ queues closed");
+				} catch (queueErr) {
+					logger.error({ err: queueErr }, "Error closing BullMQ queues");
+				}
+
+				// Pool.end() waits for in-flight queries to complete before releasing connections.
 				try {
 					await pool.end();
 					logger.info("PostgreSQL pool closed");
@@ -47,12 +66,8 @@ const start = async () => {
 					logger.error({ err: poolErr }, "Error closing PostgreSQL pool");
 				}
 
-				// Disconnect Redis using close(), which is the correct method in
-				// node-redis v5. The Redis QUIT command was deprecated in Redis 7.2,
-				// so quit() is now deprecated in node-redis v5 as well. close()
-				// performs a graceful shutdown — it flushes any pending or in-flight
-				// commands before tearing down the network connection, giving the
-				// same safety guarantee that quit() was previously used for.
+				// redis.close() is the correct node-redis v5 method — flushes pending commands
+				// before tearing down the TCP connection (quit() is deprecated in Redis 7.2+).
 				try {
 					await redis.close();
 					logger.info("Redis connection closed");
@@ -64,7 +79,7 @@ const start = async () => {
 				process.exit(0);
 			});
 
-			// Force exit if shutdown takes longer than 10 seconds
+			// Safety net — force exit if graceful shutdown stalls beyond 10 seconds.
 			setTimeout(() => {
 				logger.fatal("Shutdown timeout exceeded — forcing exit");
 				process.exit(1);
