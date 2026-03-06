@@ -1,13 +1,4 @@
 // src/controllers/photo.controller.js
-//
-// Photo controller — thin delegation layer, nothing more.
-//
-// The only controller-level concern beyond delegation is the req.file check.
-// Multer attaches the staged file metadata to req.file when it successfully
-// receives and writes the upload. If req.file is undefined, it means either
-// (a) the client sent no file at all, or (b) the client used a field name
-// other than 'photo'. Both are client errors — return 400 here rather than
-// letting a undefined-property access blow up inside the service.
 
 import * as photoService from "../services/photo.service.js";
 

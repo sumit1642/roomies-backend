@@ -1,8 +1,5 @@
 // src/controllers/interest.controller.js
 //
-// Thin delegation layer — no logic lives here.
-// All validation is handled by Zod middleware before these functions run.
-// All business logic and DB access is in interest.service.js.
 
 import * as interestService from "../services/interest.service.js";
 

@@ -1,8 +1,7 @@
 // src/db/utils/institutions.js
 
 import { pool } from "../client.js";
-
-// Looks up an institution by its email domain — e.g. 'iitb.ac.in'.
+ 
 // Called during student registration to determine whether the email address
 // qualifies for automatic verification without going through the OTP flow.
 //

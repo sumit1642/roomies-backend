@@ -26,8 +26,7 @@ export const pool = new Pool({
 pool.on("connect", () => {
 	logger.debug("pg pool: new client connected");
 });
-
-// The pool emits "error" when an idle client encounters an unexpected error —
+ 
 // for example, the PostgreSQL backend process was killed, or the TCP connection
 // was dropped by a network device. In these cases pg has already removed the
 // bad client from the pool and will open a fresh connection on the next query.
@@ -50,18 +49,14 @@ pool.on("error", (err) => {
 		logger.fatal({ err }, "pg pool: unrecoverable connection error — shutting down");
 		process.exit(1);
 	}
-
-	// For everything else (backend process killed, idle timeout race, etc.)
+ 
 	// pg discards the bad client and the pool recovers automatically.
 	// No exit needed — the error is logged and the server keeps running.
 });
-
-// ECONNREFUSED means the PostgreSQL host is completely unreachable.
+ 
 // ENOTFOUND means DNS resolution failed — the host does not exist.
 // Both are unrecoverable at runtime; defined once at module scope to avoid
 // reallocating on every error event.
 const fatalCodes = new Set(["ECONNREFUSED", "ENOTFOUND"]);
-
-// Convenience wrapper — for simple one-shot queries outside of transactions.
-// For transactions, check out a client directly: pool.connect()
+ 
 export const query = (text, params) => pool.query(text, params);

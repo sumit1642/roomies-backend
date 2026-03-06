@@ -7,12 +7,9 @@ import { findUserById } from "../db/utils/auth.js";
 import { redis } from "../cache/client.js";
 import { pool } from "../db/client.js";
 import { parseTtlSeconds } from "../services/auth.service.js";
-
-// Defined at module scope so the Set is allocated once for the lifetime of the
-// process rather than on every authenticated request.
+ 
 const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
-
-// Cookie options for the silently-refreshed access token. Must match the options
+ 
 // used in auth.controller.js — a cookie set with sameSite:'strict' must also be
 // cleared/replaced with sameSite:'strict'. Inconsistent options cause browsers to
 // treat them as different cookies, leaving the old one in place.
@@ -26,8 +23,7 @@ const ACCESS_COOKIE_OPTIONS = {
 	sameSite: "strict",
 	maxAge: parseTtlSeconds(config.JWT_EXPIRES_IN) * 1000,
 };
-
-// ─── Token extraction ─────────────────────────────────────────────────────────
+ 
 //
 // Priority chain: cookie first, then Authorization header.
 //
@@ -52,8 +48,7 @@ const extractToken = (req) => {
 
 	return null;
 };
-
-// ─── Silent refresh ───────────────────────────────────────────────────────────
+ 
 //
 // Only attempted when:
 //   1. The access token came from a cookie (source === 'cookie')
@@ -86,8 +81,7 @@ const attemptSilentRefresh = async (req, res) => {
 		// Token has been revoked (logout from another device) — return null for 401
 		return null;
 	}
-
-	// Refresh token is valid and matches Redis. Issue a new access token.
+ 
 	// We sign a minimal payload here — the full user shape is loaded from the DB
 	// below in the main middleware body, just as it is for a normal non-expired request.
 	// This avoids any stale data from the refresh token payload being used as req.user.
@@ -109,16 +103,13 @@ const attemptSilentRefresh = async (req, res) => {
 		config.JWT_SECRET,
 		{ expiresIn: config.JWT_EXPIRES_IN },
 	);
-
-	// Set the new access token cookie on the outgoing response.
-	// The request continues normally — the browser receives the new cookie in the
-	// response and uses it for all subsequent requests. Zero visible interruption.
+ 
 	res.cookie("accessToken", newAccessToken, ACCESS_COOKIE_OPTIONS);
 
 	return refreshPayload.userId;
 };
+ 
 
-// ─── Middleware ───────────────────────────────────────────────────────────────
 //
 // Verifies the access token, loads the user from DB, and attaches req.user.
 //

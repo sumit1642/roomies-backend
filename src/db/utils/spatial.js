@@ -1,16 +1,8 @@
 // src/db/utils/spatial.js
 //
-// PostGIS spatial query utilities for proximity-based listing discovery.
-//
-// Why this is a separate utility file:
-// The proximity query uses PostGIS-specific SQL syntax (ST_DWithin, ST_MakePoint,
-// ::geography cast) that has no equivalent in regular SQL. Isolating it here
-// means the rest of the codebase never needs to know about PostGIS internals,
-// and the spatial logic can be tested or swapped independently of listing CRUD.
-
+ 
 import { pool } from "../client.js";
-
-// Finds all active, non-deleted listings whose PostGIS `location` geometry falls
+ 
 // within `radiusMeters` meters of the given (lat, lng) point.
 //
 // Returns an array of listing_id strings — NOT full listing rows. The caller

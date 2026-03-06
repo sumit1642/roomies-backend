@@ -2,20 +2,6 @@
 
 import { pool } from "../client.js";
 
-// Called by authenticate middleware on every protected request.
-// Selects only what req.user needs — not SELECT *.
-// Returns null if not found or soft-deleted.
-//
-// Roles are aggregated via a correlated subquery rather than a JOIN + GROUP BY
-// for two reasons:
-//   1. DISTINCT + ORDER BY cannot coexist inside ARRAY_AGG(DISTINCT ...) in the
-//      same clause in PostgreSQL — the subquery deduplicates first, then the outer
-//      AGG orders the result, which satisfies both requirements cleanly.
-//   2. The subquery approach avoids the GROUP BY on the users columns entirely,
-//      which is simpler and less error-prone when new columns are selected later.
-// In practice user_roles has a composite PK (user_id, role_name) that already
-// prevents duplicates, but the DISTINCT makes the query correct-by-construction
-// regardless of future schema changes.
 export const findUserById = async (id, client = pool) => {
 	const { rows } = await client.query(
 		`
@@ -44,9 +30,7 @@ export const findUserById = async (id, client = pool) => {
 	if (!rows[0]) return null;
 
 	const user = rows[0];
-	// pg returns PostgreSQL arrays as strings like "{student,admin}" in some
-	// driver versions. Normalise to a JavaScript array unconditionally so
-	// downstream code (authorize middleware, JWT payload) always sees a real array.
+
 	if (typeof user.roles === "string") {
 		user.roles = user.roles === "{}" ? [] : user.roles.replace(/^{|}$/g, "").split(",");
 	}
@@ -55,10 +39,6 @@ export const findUserById = async (id, client = pool) => {
 	// return rows[0] ?? null;
 };
 
-// Called by login (needs password_hash for bcrypt compare) and registration
-// duplicate check (only needs existence). Also called by the OAuth account-linking
-// path which needs google_id to detect whether the row already has a google_id set.
-// Returns null if not found or soft-deleted.
 export const findUserByEmail = async (email, client = pool) => {
 	const { rows } = await client.query(
 		`
@@ -76,8 +56,6 @@ export const findUserByEmail = async (email, client = pool) => {
 	);
 	return rows[0] ?? null;
 };
-
-// Looks up a user by their Google OAuth subject ID (the `sub` field in the
 // Google ID token). Called during OAuth sign-in to determine whether this
 // Google account has been seen before (returning user) or is new.
 //

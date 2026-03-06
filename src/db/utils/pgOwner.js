@@ -1,24 +1,9 @@
 // src/db/utils/pgOwner.js
 //
-// Shared database utilities for PG owner data.
-//
-// Why this file exists:
-// Both property.service.js and listing.service.js need to verify that a PG owner
-// is verified before allowing any write operation. Originally this lived as a
-// private function inside property.service.js. That worked fine until listing
-// CRUD needed the same check — importing from property.service.js would create
-// a coupling between two peer service files, and if either later imported the
-// other for any reason, it would become a circular dependency.
-//
-// The project convention (established in Phase 1) is that stable, reused queries
-// that are called from more than one place live in src/db/utils/, not in service
-// files. This file follows that convention. Neither property.service.js nor
-// listing.service.js imports the other — both import this utility independently.
-
+ 
 import { pool } from "../client.js";
 import { AppError } from "../../middleware/errorHandler.js";
-
-// Asserts that the user identified by `userId` has a non-deleted PG owner profile
+ 
 // with verification_status = 'verified'. Throws AppError on any failure:
 //   404 — no pg_owner_profiles row exists for this user (should not happen if
 //          authorize('pg_owner') middleware ran first, but guards against data
