@@ -1,5 +1,6 @@
 // src/storage/index.js
-// Fixed: reads STORAGE_ADAPTER from config (Zod-validated) instead of process.env directly.
+// Fix: reads STORAGE_ADAPTER from Zod-validated config instead of process.env directly,
+// ensuring the value is validated at startup and misconfiguration throws rather than silently falling back.
 
 import { LocalDiskAdapter } from "./adapters/localDisk.js";
 import { AzureBlobAdapter } from "./adapters/azureBlob.js";
@@ -12,7 +13,7 @@ let storageService;
 
 if (adapter === "azure") {
 	storageService = new AzureBlobAdapter();
-	logger.info("Storage adapter: Azure Blob (stub)");
+	logger.info("Storage adapter: Azure Blob");
 } else {
 	storageService = new LocalDiskAdapter();
 	logger.info("Storage adapter: Local disk");
