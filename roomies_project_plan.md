@@ -440,3 +440,5 @@ This file is used specifically to verify the application can connect to all Azur
 ---
 
 *— Last updated: phase1/foundation merged —*
+
+<!-- roomies_project_plan.md -->

@@ -400,6 +400,15 @@ Phase2
 
 `phase2/saved` — `POST/DELETE /listings/:listingId/save`, `GET /users/me/saved-listings`. Save is idempotent (`ON CONFLICT DO NOTHING`). Feed silently omits deleted/expired listings.
 
+```
+Phase2
+ ├── phase2/amenities    ← seed data + property CRUD
+ ├── phase2/listings     ← listing CRUD + search + compatibility
+ ├── phase2/media        ← photo upload + Sharp compression via BullMQ
+ ├── phase2/saved        ← saved listings
+ └── phase2/interests    ← BLOCKED: interest request CRUD depends on Phase 3 connection creation
+ ```
+
 ---
 
 ## Phase 3 — Interaction Pipeline & Contact
@@ -476,3 +485,5 @@ Admin-only router `/api/v1/admin`: verification queue management, user account m
 ---
 
 *— Last updated: phase1/auth-transport merged; phase1/verification is next (unblocked) —*
+
+<!-- ImplementationPlan.md -->

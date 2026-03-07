@@ -1037,3 +1037,5 @@ The permissive design is chosen for Phase 2 because it requires less logic and f
 ---
 
 *— Document complete. Ready to build in order: validators → service → controller → routes —*
+
+<!-- Roomies — Phase 2 Updated Implementation Plan.md -->
