@@ -9,6 +9,9 @@ import { adminRouter } from "./admin.js";
 import { propertyRouter } from "./property.js";
 import { listingRouter } from "./listing.js";
 import { interestRouter } from "./interest.js";
+import { connectionRouter } from "./connection.js";
+import { notificationRouter } from "./notification.js";
+import { ratingRouter } from "./rating.js";
 
 // All feature routers are imported and mounted here as phases are built.
 // Pattern: import → router.use('/path', featureRouter)
@@ -23,3 +26,6 @@ rootRouter.use("/admin", adminRouter);
 rootRouter.use("/properties", propertyRouter);
 rootRouter.use("/listings", listingRouter);
 rootRouter.use("/interests", interestRouter);
+rootRouter.use("/connections", connectionRouter);
+rootRouter.use("/notifications", notificationRouter);
+rootRouter.use("/ratings", ratingRouter);
