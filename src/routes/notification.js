@@ -8,7 +8,7 @@
 // the connection and interest routers.
 
 import { Router } from "express";
-import { authenticate } from "../middleware/auth.js";
+import { authenticate } from "../middleware/authenticate.js";
 import { validate } from "../middleware/validate.js";
 import { getFeedSchema, markReadSchema } from "../validators/notification.validators.js";
 import * as notificationController from "../controllers/notification.controller.js";
