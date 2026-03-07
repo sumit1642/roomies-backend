@@ -36,6 +36,7 @@ import {
 	getRatingsForConnectionSchema,
 	getPublicRatingsSchema,
 	getMyGivenRatingsSchema,
+	getPublicPropertyRatingsSchema,
 } from "../validators/rating.validators.js";
 import * as ratingController from "../controllers/rating.controller.js";
 
@@ -57,6 +58,17 @@ ratingRouter.get("/me/given", authenticate, validate(getMyGivenRatingsSchema), r
 // (If a future product decision requires login to view ratings, add authenticate
 // here — the service has no caller-identity dependency.)
 ratingRouter.get("/user/:userId", validate(getPublicRatingsSchema), ratingController.getPublicRatings);
+
+// GET /api/v1/ratings/property/:propertyId — public rating history for a property.
+// No authenticate middleware — publicly readable, same rationale as /user/:userId.
+// Students browsing listings need to see property ratings without logging in.
+// Returns 404 if the property doesn't exist or is soft-deleted (distinguishes
+// "no ratings yet" from "wrong ID" — empty list vs 404).
+ratingRouter.get(
+	"/property/:propertyId",
+	validate(getPublicPropertyRatingsSchema),
+	ratingController.getPublicPropertyRatings,
+);
 
 // GET /api/v1/ratings/connection/:connectionId — both ratings for one connection.
 // Only the two connection parties can call this. Returns { myRating, theirRating }

@@ -553,3 +553,102 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
 		nextCursor,
 	};
 };
+
+// ─── Get public ratings for a property ────────────────────────────────────────
+//
+// Publicly readable — no authentication required. Returns paginated visible
+// ratings for a specific property (reviewee_type = 'property', is_visible = TRUE).
+//
+// Mirrors getPublicRatings but for properties. Each row includes enough to
+// render a review card: scores, comment, reviewer name/photo, createdAt.
+//
+// Pre-check: verifies the property exists (404 if not). This gives a clean
+// error rather than silently returning an empty list for a non-existent property,
+// which would make it impossible to distinguish "no ratings yet" from "wrong ID".
+//
+// Keyset pagination on (created_at DESC, rating_id ASC) — newest first.
+export const getPublicPropertyRatings = async (propertyId, filters) => {
+	// Property existence check — 404 for unknown or soft-deleted properties.
+	const { rows: propRows } = await pool.query(
+		`SELECT 1 FROM properties WHERE property_id = $1 AND deleted_at IS NULL`,
+		[propertyId],
+	);
+	if (!propRows.length) {
+		throw new AppError("Property not found", 404);
+	}
+
+	const { cursorTime, cursorId, limit = 20 } = filters;
+
+	const clauses = [
+		`r.reviewee_id   = $1`,
+		`r.reviewee_type = 'property'::reviewee_type_enum`,
+		`r.is_visible    = TRUE`,
+		`r.deleted_at    IS NULL`,
+	];
+	const params = [propertyId];
+	let p = 2;
+
+	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
+	if (hasCursor) {
+		clauses.push(`(r.created_at < $${p} OR (r.created_at = $${p} AND r.rating_id > $${p + 1}::uuid))`);
+		params.push(cursorTime, cursorId);
+		p += 2;
+	}
+
+	params.push(limit + 1);
+	const limitParam = p;
+
+	const { rows } = await pool.query(
+		`SELECT
+       r.rating_id,
+       r.overall_score,
+       r.cleanliness_score,
+       r.communication_score,
+       r.reliability_score,
+       r.value_score,
+       r.review_text        AS comment,
+       r.created_at,
+       COALESCE(sp.full_name, u.email) AS reviewer_name,
+       sp.profile_photo_url            AS reviewer_photo_url
+     FROM ratings r
+     JOIN users u
+       ON u.user_id    = r.reviewer_id
+      AND u.deleted_at IS NULL
+     LEFT JOIN student_profiles sp
+       ON sp.user_id    = r.reviewer_id
+      AND sp.deleted_at IS NULL
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY r.created_at DESC, r.rating_id ASC
+     LIMIT $${limitParam}`,
+		params,
+	);
+
+	const hasNextPage = rows.length > limit;
+	const items = hasNextPage ? rows.slice(0, limit) : rows;
+
+	const nextCursor =
+		hasNextPage ?
+			{
+				cursorTime: items[items.length - 1].created_at.toISOString(),
+				cursorId: items[items.length - 1].rating_id,
+			}
+		:	null;
+
+	return {
+		items: items.map((row) => ({
+			ratingId: row.rating_id,
+			overallScore: row.overall_score,
+			cleanlinessScore: row.cleanliness_score,
+			communicationScore: row.communication_score,
+			reliabilityScore: row.reliability_score,
+			valueScore: row.value_score,
+			comment: row.comment,
+			createdAt: row.created_at,
+			reviewer: {
+				fullName: row.reviewer_name,
+				profilePhotoUrl: row.reviewer_photo_url,
+			},
+		})),
+		nextCursor,
+	};
+};

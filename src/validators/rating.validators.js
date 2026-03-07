@@ -127,3 +127,17 @@ export const getPublicRatingsSchema = z.object({
 export const getMyGivenRatingsSchema = z.object({
 	query: paginationQuerySchema,
 });
+
+// ─── Get public ratings for a property ────────────────────────────────────────
+//
+// GET /api/v1/ratings/property/:propertyId
+//
+// Publicly readable — no authentication required. Returns paginated visible
+// ratings for a property (reviewee_type = 'property', is_visible = TRUE only).
+// Mirrors getPublicRatingsSchema for users.
+export const getPublicPropertyRatingsSchema = z.object({
+	params: z.object({
+		propertyId: z.uuid({ error: "Invalid property ID" }),
+	}),
+	query: paginationQuerySchema,
+});

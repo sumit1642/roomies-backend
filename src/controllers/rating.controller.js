@@ -60,3 +60,16 @@ export const getMyGivenRatings = async (req, res, next) => {
 		next(err);
 	}
 };
+
+// GET /api/v1/ratings/property/:propertyId
+// Public rating history for a property. No authentication required.
+// Returns paginated ratings the property has received (reviewee_type = 'property').
+// 404 if the property doesn't exist or is soft-deleted.
+export const getPublicPropertyRatings = async (req, res, next) => {
+	try {
+		const result = await ratingService.getPublicPropertyRatings(req.params.propertyId, req.query);
+		res.json({ status: "success", data: result });
+	} catch (err) {
+		next(err);
+	}
+};
