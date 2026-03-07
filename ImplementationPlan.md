@@ -425,6 +425,340 @@ Interest request INSERT + notification INSERT in one `BEGIN/COMMIT`. Acceptance:
 
 Two-sided confirmation: each party flips their own flag. After each flip, service checks both `TRUE` → sets `confirmation_status = confirmed` in same transaction. Notifications layer: unread count, paginated feed, mark-as-read. `notification-queue` BullMQ worker wired here.
 
+Let me re-read the relevant sections of both remaining files carefully before planning anything.Good. Now I have the full picture from both planning docs and the codebase. Let me reason through this carefully before writing anything.
+
+---
+
+# Roomies — Phase 3 Implementation Plan
+## Interaction Pipeline & Contact
+
+**Author perspective:** Senior backend engineer planning from the database up.
+**Entry condition:** Phase 2 fully merged and stable. At least one active listing by a verified PG owner. At least one verified student with preferences set.
+**No code in this document — only architecture, reasoning, and decisions.**
+
+---
+
+## The Mental Model Before Writing Anything
+
+Phase 1 answered "who are you?" Phase 2 answered "what is being offered?" Phase 3 answers "how do two strangers reach a confirmed real-world meeting?"
+
+The pipeline has three sequential stages and they are not interchangeable — each one is a prerequisite for the next:
+
+```
+interest_requests  →  connections  →  notifications
+     (intent)           (proof)        (awareness)
+```
+
+A student signals intent by sending an interest request. A poster signals willingness by accepting it — and at the moment of acceptance, a `connections` row is born. That row is the trust anchor for everything in Phase 4 (ratings require it). Notifications exist purely to make both parties aware that something happened — they are side effects of state transitions, never the transition itself.
+
+This ordering has one important consequence for branch planning: you cannot build `connections` without `interest_requests` being done, and you cannot build the full notification system without both. The branch dependency is strict.
+
+---
+
+## Branch Structure
+
+```
+Phase3
+ ├── phase3/interests        ← completes deferred phase2/interests + accept→connections atomic transaction
+ ├── phase3/connections      ← two-sided confirmation, WhatsApp deep-link
+ └── phase3/notifications    ← HTTP feed, unread count, mark-read, notification-queue worker
+```
+
+**Rule:** Each branch must be merged and manually verified before the next begins. No parallel work.
+
+---
+
+## Branch 1 — `phase3/interests`
+
+### What This Branch Actually Is
+
+This is not new territory — the full architecture was planned in the Phase 2 deferred section. What this branch does is complete that work and add the one piece that was blocking it: the `accepted` transition must atomically create a `connections` row in the same `BEGIN/COMMIT`. Now that Phase 3 owns `connections`, that blocker is gone.
+
+Everything from the deferred plan carries forward unchanged. The state machine, the actor resolution logic, the endpoint surface, the pagination pattern — all of it was already reasoned through. This section focuses only on what is new or non-obvious.
+
+### The `accepted` Transition — The Critical Atomic Block
+
+This is the most important transaction in the entire Phase 3 codebase. When a poster calls `PATCH /interests/:interestId/status` with `{ status: "accepted" }`, the service must do three things inside a single `BEGIN/COMMIT`:
+
+1. `UPDATE interest_requests SET status = 'accepted' WHERE interest_id = $1 AND status = 'pending'`
+2. `INSERT INTO connections (initiator_id, counterpart_id, listing_id, interest_request_id, connection_type)` — derived from the interest request row
+3. Neither succeeds unless both succeed.
+
+If the connection INSERT fails after the status UPDATE commits, you have an accepted interest request with no connection — a broken state that Phase 4 ratings cannot reference and that the UI has no way to represent. The atomicity is non-negotiable.
+
+The `connection_type` is derived from `listing.listing_type`:
+- `student_room` → `student_roommate`
+- `pg_room` → `pg_stay`
+- `hostel_bed` → `hostel_stay`
+
+This derivation happens inside the transaction — the listing row is already fetched for actor resolution, so the `listing_type` is available at zero extra query cost.
+
+### The `connections` Row at Birth
+
+When created, a `connections` row has:
+- `initiator_id` = `interest_request.sender_id` (the student who expressed interest)
+- `counterpart_id` = `listing.posted_by` (the poster who accepted)
+- `listing_id` = from the interest request
+- `interest_request_id` = the interest request that triggered it
+- `connection_type` = derived from listing type
+- `initiator_confirmed = FALSE`, `counterpart_confirmed = FALSE`
+- `confirmation_status = 'pending'`
+- `status = 'active'`
+
+The confirmation flags start `FALSE` intentionally — the acceptance of an interest request does not mean either party has confirmed the real-world interaction happened. That is a separate, later action.
+
+### WhatsApp Deep-Link — Returned at Accept Time
+
+When the `accepted` transition succeeds, the response includes the poster's WhatsApp deep-link. The format is `https://wa.me/91${posterPhoneNumber}` where the phone number comes from `pg_owner_profiles.whatsapp_number` (for PG owners) or `student_profiles.phone_number` (for students posting their own room).
+
+This is returned in the response body of the `PATCH /interests/:interestId/status` call — not via a notification, not via a separate endpoint. The student's app receives `{ status: "accepted", connectionId: "...", whatsappLink: "https://wa.me/91..." }` and can render the deep-link immediately. This is the correct place: the student just got accepted and wants the contact info right now, in the same response.
+
+One important guard: if the poster has no phone number on their profile, `whatsappLink` is `null` in the response — not an error. Missing phone number is a data quality problem, not a transaction failure. The connection is still created. The student can always find contact info by viewing the poster's profile.
+
+### Notification Hook Points in This Branch
+
+Every transition fires a notification. In this branch, the notification is inserted via a direct `pool.query` call **after the transaction commits** — never inside it. This is the pattern established in the project conventions. The notification INSERT is fire-and-forget: if it fails (which is rare), the state machine transition is not rolled back. A missed notification is a UX problem; a rolled-back state machine transition is a data integrity problem. These have different severity levels.
+
+The notification types fired in this branch:
+- `new_interest_request` → to poster, when a student creates a request
+- `interest_request_accepted` → to student, when poster accepts
+- `interest_request_declined` → to student, when poster declines
+- `interest_request_withdrawn` → to poster, when student withdraws
+
+The notification row shape: `(recipient_id, type, entity_type='interest_request', entity_id=interest_id, is_read=FALSE)`.
+
+The `notification-queue` BullMQ worker does not yet exist in this branch — the direct `pool.query` is the delivery mechanism here. The worker is `phase3/notifications`'s job. This means in this branch, notification INSERT failures are silent. That is acceptable — the worker in the next branch makes delivery reliable and decoupled.
+
+### `expirePendingRequestsForListing` — Where It Gets Called
+
+This function already exists in `interest.service.js` (implemented in the Phase 2 bug fix). In this branch, it gets wired into the listing service. Specifically: when a listing's `status` is updated to anything other than `active` (filled, deactivated, deleted), the listing service calls `expirePendingRequestsForListing(listingId, client)` **inside the same transaction** as the listing status update. This ensures that if the listing status update rolls back, the interest request expiry also rolls back. Atomicity here matters — you do not want expired interest requests pointing at a listing that is still technically active.
+
+### Files Changed or Created
+
+| File | Change |
+|------|--------|
+| `src/validators/interest.validators.js` | New |
+| `src/services/interest.service.js` | Already exists (Phase 2 bug fix) — add `accepted` transition with connection INSERT |
+| `src/controllers/interest.controller.js` | New |
+| `src/routes/interest.js` | New — mounts at `/api/v1/interests` |
+| `src/routes/listing.js` | Add `POST /:listingId/interests` and `GET /:listingId/interests` |
+| `src/routes/index.js` | Mount interest router |
+| `src/services/listing.service.js` | Wire `expirePendingRequestsForListing` into status-update path |
+
+No new `db/utils/` file needed — all queries are listing-specific and live inline in the service.
+
+---
+
+## Branch 2 — `phase3/connections`
+
+### What a Connection Actually Represents
+
+A `connections` row is proof that two people agreed to interact. It is not proof that the interaction happened. That distinction is the entire point of the two-sided confirmation system — the connection is created at acceptance (agreement to interact), and `confirmation_status` only reaches `confirmed` after both parties independently say "yes, this actually happened."
+
+This matters because ratings (Phase 4) are anchored to confirmed connections. If you allowed ratings on any accepted connection, a poster could accept a hundred interest requests, generate a hundred connection rows, and solicit a hundred ratings from collaborators — without a single real interaction. The two-sided confirmation makes this impractical: both parties must confirm, and a student confirming a stay that never happened is visible in the audit trail.
+
+### The Two-Sided Confirmation — The Atomicity Requirement
+
+Each party flips their own flag independently. The endpoints are:
+- `POST /connections/:connectionId/confirm` — called by either party (service detects which flag to flip based on `req.user.userId`)
+
+The service logic for each confirmation flip:
+
+1. Fetch the connection row: `SELECT initiator_id, counterpart_id, initiator_confirmed, counterpart_confirmed, confirmation_status WHERE connection_id = $1 AND deleted_at IS NULL`
+2. Determine which flag belongs to the caller. If neither `initiator_id` nor `counterpart_id` matches, throw 404 (don't leak that the connection exists).
+3. Open a transaction.
+4. `UPDATE connections SET initiator_confirmed = TRUE WHERE connection_id = $1` (or `counterpart_confirmed`, depending on caller).
+5. **In the same transaction**, check if both flags are now true: `SELECT initiator_confirmed AND counterpart_confirmed AS both_confirmed FROM connections WHERE connection_id = $1`.
+6. If `both_confirmed`, also `UPDATE connections SET confirmation_status = 'confirmed'` in the same statement — or combine steps 4–6 into one atomic UPDATE:
+
+```sql
+UPDATE connections
+SET
+  initiator_confirmed  = CASE WHEN initiator_id  = $2 THEN TRUE ELSE initiator_confirmed  END,
+  counterpart_confirmed = CASE WHEN counterpart_id = $2 THEN TRUE ELSE counterpart_confirmed END,
+  confirmation_status  = CASE
+    WHEN (initiator_confirmed  OR initiator_id  = $2)
+     AND (counterpart_confirmed OR counterpart_id = $2)
+    THEN 'confirmed'
+    ELSE confirmation_status
+  END,
+  updated_at = NOW()
+WHERE connection_id = $1
+  AND (initiator_id = $2 OR counterpart_id = $2)
+  AND deleted_at IS NULL
+RETURNING *
+```
+
+This single UPDATE atomically flips the correct flag and sets `confirmation_status = 'confirmed'` if and only if both flags are now true — with no gap between check and write. `rowCount === 0` means "not your connection or doesn't exist" → 404.
+
+After the transaction commits, if `confirmation_status` just became `confirmed`, fire a `connection_confirmed` notification to both parties (two notification INSERTs, both fire-and-forget post-commit).
+
+### What Confirmation Unlocks
+
+Once `confirmation_status = 'confirmed'`:
+- Both parties are eligible to submit ratings referencing this `connection_id` (Phase 4 enforces this)
+- The connection appears in each party's public interaction history
+- The listing can be marked as `filled` if the poster chooses (not automatic — the poster decides)
+
+### The Connection Read Endpoints
+
+Two read endpoints:
+
+`GET /connections/me` — returns all connections the authenticated user is party to (either `initiator_id` or `counterpart_id`). Supports filtering by `confirmation_status`. Keyset pagination on `(created_at, connection_id)`. Each row includes the other party's public profile (name, photo, rating) and the listing summary. This is the "my connections" dashboard for both students and posters.
+
+`GET /connections/:connectionId` — single connection detail. Only accessible by the two parties — `WHERE (initiator_id = $2 OR counterpart_id = $2)` enforced in the WHERE clause. Returns full detail including both confirmation flags, so each party can see whether the other has confirmed yet.
+
+### Files Changed or Created
+
+| File | Change |
+|------|--------|
+| `src/validators/connection.validators.js` | New |
+| `src/services/connection.service.js` | New |
+| `src/controllers/connection.controller.js` | New |
+| `src/routes/connection.js` | New — mounts at `/api/v1/connections` |
+| `src/routes/index.js` | Mount connection router |
+
+---
+
+## Branch 3 — `phase3/notifications`
+
+### The Two-Layer Notification Architecture
+
+Notifications have two concerns that must be kept separate:
+
+**Layer 1 — Storage:** Writing a `notifications` row to the database. This is what makes the notification durable and queryable. It already happens (fire-and-forget `pool.query`) in branches 1 and 2.
+
+**Layer 2 — Delivery:** Ensuring the write actually happens reliably, even if the database was momentarily slow or the Node process restarted between the state transition and the notification INSERT. This is what the `notification-queue` BullMQ worker provides.
+
+In branches 1 and 2, the notification INSERT is fire-and-forget inline. In this branch, it gets promoted: instead of calling `pool.query` directly, the service calls `notificationQueue.add('send-notification', payload)`. The BullMQ worker picks it up and does the INSERT with retry logic. If the worker fails after 3 attempts, the notification lands in the BullMQ dead-letter queue for inspection — the state transition that triggered it is completely unaffected.
+
+This promotion is a **refactor of the existing notification calls** in branches 1 and 2. The state machine code does not change — only the line that was `await pool.query(INSERT INTO notifications...)` becomes `await notificationQueue.add(...)`. This is the entire scope of the notification queue wiring.
+
+### The HTTP Notification Endpoints
+
+Three endpoints, all on a new `src/routes/notification.js` router mounted at `/api/v1/notifications`:
+
+**`GET /notifications`** — the paginated notification feed for the authenticated user. Keyset pagination on `(created_at DESC, notification_id)`. Each row includes `type`, `entity_type`, `entity_id`, `is_read`, `created_at`, and a human-readable `message` string generated from the type and entity. The `message` is assembled in the service from a type→template map — never stored in the DB, always computed at read time so wording can be changed without a migration.
+
+The query hits the partial index `(recipient_id, created_at DESC) WHERE is_read = FALSE` for the unread-first sort, then falls back to the full index for read notifications. The `LIMIT + 1` cursor pattern applies here too.
+
+**`GET /notifications/unread-count`** — returns `{ count: N }`. This is the bell badge number. The query is `SELECT COUNT(*) FROM notifications WHERE recipient_id = $1 AND is_read = FALSE AND deleted_at IS NULL`. This query must be fast — it runs on every page load. The partial index `WHERE is_read = FALSE` keeps the index small (read notifications fall out of it automatically), so this is an index scan on a small set regardless of total notification history size.
+
+**`POST /notifications/mark-read`** — accepts `{ notificationIds: [uuid, uuid, ...] }` or `{ all: true }`. The bulk mark-read case uses `UPDATE notifications SET is_read = TRUE WHERE recipient_id = $1 AND notification_id = ANY($2::uuid[]) AND is_read = FALSE`. The `all: true` case uses `UPDATE notifications SET is_read = TRUE WHERE recipient_id = $1 AND is_read = FALSE`. Both are safe bulk updates — no looping, no N+1. The `AND is_read = FALSE` guard means re-marking already-read notifications is a no-op (correct idempotent behaviour).
+
+### The `notification-queue` Worker
+
+Lives in `src/workers/notificationWorker.js`. Exported as `startNotificationWorker()` — same factory function pattern as `startMediaWorker()`. Started in `server.js` after Redis connects, shut down before Redis disconnects.
+
+The worker concurrency is `10` (from the project plan). Unlike Sharp processing, notification delivery is pure I/O (a single `INSERT` into PostgreSQL) — it is fast and non-CPU-bound, so running 10 concurrent jobs is safe and desirable.
+
+Job payload shape: `{ recipientId, type, entityType, entityId }`. The worker does one thing: `INSERT INTO notifications (recipient_id, type, entity_type, entity_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`. The `ON CONFLICT DO NOTHING` handles the case where a job is retried after a partial failure — the notification may have already been inserted on the first attempt. There is no unique constraint to define "duplicate" precisely here, so this is more of a belt-and-suspenders guard than a strict deduplication. True deduplication would require a composite unique index on `(recipient_id, type, entity_id)` — reasonable to add if duplicate notifications become a real problem.
+
+Retry policy: `{ attempts: 5, backoff: { type: 'exponential', delay: 1000 } }`. Five attempts because notification delivery is important but not life-critical. After five failures, the notification lands in the failed set — a Phase 5 admin tool can replay or inspect it.
+
+### Refactoring the Inline Notification Calls
+
+In branches 1 and 2, notifications are inserted inline as fire-and-forget `pool.query` calls. This branch refactors those call sites to enqueue instead. The change at each call site is minimal:
+
+**Before (branch 1/2 pattern):**
+```js
+// fire-and-forget post-commit
+pool.query(`INSERT INTO notifications ...`, [recipientId, type, entityType, entityId]);
+```
+
+**After (this branch):**
+```js
+// enqueue post-commit — worker handles INSERT with retry
+notificationQueue.add('send-notification', { recipientId, type, entityType, entityId });
+```
+
+The `notificationQueue` is the singleton from `getQueue(NOTIFICATION_QUEUE_NAME)` in `src/workers/notificationWorker.js`. The queue name constant is exported from there and imported at the call sites — same pattern as `MEDIA_QUEUE_NAME`.
+
+### Files Changed or Created
+
+| File | Change |
+|------|--------|
+| `src/workers/notificationWorker.js` | New — worker factory + queue name constant |
+| `src/validators/notification.validators.js` | New |
+| `src/services/notification.service.js` | New |
+| `src/controllers/notification.controller.js` | New |
+| `src/routes/notification.js` | New — mounts at `/api/v1/notifications` |
+| `src/routes/index.js` | Mount notification router |
+| `src/services/interest.service.js` | Refactor inline notification calls → enqueue |
+| `src/services/connection.service.js` | Refactor inline notification calls → enqueue |
+| `server.js` | Start + gracefully shut down notification worker |
+
+---
+
+## Cross-Cutting Concerns for the Entire Phase
+
+### The Actor Resolution Pattern
+
+Phase 3 introduces a new authorization pattern that doesn't exist in earlier phases: **both parties in a two-party resource have equal but different permissions**. In interest requests, the sender and poster have different allowed transitions. In connections, the initiator and counterpart have different confirmation flags. The pattern for resolving this is always the same:
+
+1. Fetch the resource row including both party IDs.
+2. Compare `req.user.userId` against each party ID.
+3. Derive the caller's role from that comparison.
+4. Use the role to gate the allowed operations.
+5. If the caller matches neither party ID, return 404 — never 403. Confirming that a resource exists but the caller can't access it is an information leak.
+
+This pattern is already established in `interest.service.js` via `resolveActorRole`. The connection service uses the same pattern.
+
+### Notification Decoupling Is Non-Negotiable
+
+The rule established in the project conventions bears repeating because it is violated easily under time pressure: **notifications are side effects that run after the transaction commits, never inside it**.
+
+The reason: if a notification INSERT is inside a transaction and the notification INSERT fails (table locked, constraint violation, etc.), it rolls back the state machine transition that triggered it. A student's interest request being accepted gets rolled back because a notification INSERT failed. This is catastrophically wrong — a 500ms transient DB hiccup causes real data loss visible to users.
+
+Post-commit fire-and-forget (or post-commit enqueue) means: the state change is committed and permanent, then the notification is attempted. If the notification fails, the state change still happened. The user may not get notified, but their interaction was correctly recorded. This is always the correct trade-off for notification delivery.
+
+### The `connections` Table as Phase 4's Foundation
+
+Every design decision in this phase should be made with Phase 4 in mind. Ratings require `connection_id` to be non-null, and the rating submission will check `confirmation_status = 'confirmed'` before accepting. This means:
+
+- The `connection_id` must be returned in the `PATCH /interests/:interestId/status` response so the client has it immediately after acceptance.
+- The `GET /connections/:connectionId` endpoint must return `confirmation_status` so the client knows when ratings become available.
+- The `confirmed` status must never be set prematurely — the atomic single-UPDATE pattern in branch 2 ensures this.
+
+### The `phase2/interests` Deferred Work
+
+The deferred section in `ImplementationPlan.md` is the spec for `phase3/interests`. The implementation notes there carry forward without change. The one addition is wiring `expirePendingRequestsForListing` into the listing service's status-update path, which was not part of the original deferred spec.
+
+---
+
+## Branch Completion Criteria
+
+### `phase3/interests`
+A student can POST an interest request to an active listing they don't own. The poster can PATCH it to `accepted` and receives back a `connectionId` and `whatsappLink`. A `connections` row exists in the DB after acceptance with `confirmation_status = 'pending'`. The poster can PATCH to `declined` — no `connections` row is created. The student can PATCH to `withdrawn` while `pending` or `accepted`. Attempting a transition that violates the state machine returns 422. Concurrent duplicate interest requests from the same student to the same listing: one succeeds, the other returns 409. Deactivating a listing expires all its pending interest requests in the same transaction. Notification rows are inserted post-commit for each transition. Health check still 200.
+
+### `phase3/connections`
+Either party can POST to `/connections/:connectionId/confirm`. After one confirmation, `confirmation_status` is still `pending`. After the second, `confirmation_status = 'confirmed'` in a single atomic UPDATE. Neither party can confirm for the other. A third party gets 404. `GET /connections/me` returns the connection with the other party's profile and the listing summary. `connection_confirmed` notifications fire post-commit to both parties when confirmed. Health check still 200.
+
+### `phase3/notifications`
+`GET /notifications` returns the paginated feed correctly ordered, with human-readable messages assembled from type templates. `GET /notifications/unread-count` returns the correct count. `POST /notifications/mark-read` with specific IDs marks only those. `POST /notifications/mark-read` with `all: true` clears all. The `notification-queue` worker processes enqueued jobs and INSERTs notification rows. The inline `pool.query` notification calls in interest and connection services have been replaced with queue enqueues. Server shuts down cleanly on SIGTERM with worker draining. Health check still 200.
+
+---
+
+## What Phase 3 Unlocks
+
+By the end of Phase 3, the core social loop is complete for the first time: a student finds a listing, expresses interest, gets accepted, contacts the poster over WhatsApp, both confirm the interaction happened, and notifications keep both parties informed throughout. The `connections` table now has rows with `confirmation_status = 'confirmed'` — Phase 4's entire ratings and reputation system becomes buildable.
+
+---
+
+## Updated Branch Tracking (for `ImplementationPlan.md`)
+
+```
+Phase3
+ ├── phase3/interests      ← completes deferred phase2/interests
+ │                            + accepted transition atomically creates connections row
+ │                            + expirePendingRequestsForListing wired into listing service
+ ├── phase3/connections    ← two-sided confirmation (atomic single-UPDATE pattern)
+ │                            + WhatsApp deep-link returned at accept time
+ │                            + GET /connections/me + GET /connections/:id
+ └── phase3/notifications  ← notification HTTP endpoints (feed, unread-count, mark-read)
+                              + notification-queue BullMQ worker
+                              + refactor inline pool.query calls → enqueue in interests + connections
+```
 ---
 
 ## Phase 4 — Reputation System
