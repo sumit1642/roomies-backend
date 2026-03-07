@@ -1,6 +1,5 @@
 // src/workers/mediaProcessor.js
-// BullMQ worker for async photo processing: compress with Sharp, write to storage,
-// update DB, elect cover photo, and clean up the staging file.
+// Fixed: BullMQ connection now uses REDIS_URL from config instead of manual REDIS_HOST/PORT/PASSWORD vars.
 
 import fs from "fs/promises";
 import sharp from "sharp";
@@ -8,11 +7,20 @@ import { Worker } from "bullmq";
 import { pool } from "../db/client.js";
 import { storageService } from "../storage/index.js";
 import { logger } from "../logger/index.js";
+import { config } from "../config/env.js";
 
 export const MEDIA_QUEUE_NAME = "media-processing";
 
 const MAX_DIMENSION_PX = 1200;
 const WEBP_QUALITY = 80;
+
+const redisConnection = new URL(config.REDIS_URL);
+const bullConnection = {
+	host: redisConnection.hostname,
+	port: parseInt(redisConnection.port || "6379", 10),
+	password: redisConnection.password || undefined,
+	tls: redisConnection.protocol === "rediss:" ? {} : undefined,
+};
 
 export const startMediaWorker = () => {
 	const worker = new Worker(
@@ -25,8 +33,6 @@ export const startMediaWorker = () => {
 				"Media worker: processing job",
 			);
 
-			// Resize to fit within 1200×1200, convert to WebP, strip EXIF metadata
-			// (EXIF can contain GPS coordinates — always strip for user privacy).
 			const outputBuffer = await sharp(stagingPath)
 				.resize(MAX_DIMENSION_PX, MAX_DIMENSION_PX, { fit: "inside", withoutEnlargement: true })
 				.webp({ quality: WEBP_QUALITY })
@@ -50,8 +56,6 @@ export const startMediaWorker = () => {
 					"Media worker: photo row deleted before processing completed — cleaning up uploaded file",
 				);
 
-				// The permanent file was already written to storage before the DB row disappeared.
-				// Delete it best-effort to prevent orphaned storage objects.
 				try {
 					await storageService.delete(finalUrl);
 				} catch (deleteErr) {
@@ -69,8 +73,6 @@ export const startMediaWorker = () => {
 				return;
 			}
 
-			// Atomically elect cover only if the listing has none — NOT EXISTS + UPDATE
-			// in a single statement closes the TOCTOU race window entirely.
 			await pool.query(
 				`UPDATE listing_photos
          SET is_cover = TRUE
@@ -98,11 +100,7 @@ export const startMediaWorker = () => {
 		},
 		{
 			concurrency: 1,
-			connection: {
-				host: process.env.REDIS_HOST ?? "localhost",
-				port: parseInt(process.env.REDIS_PORT ?? "6379", 10),
-				password: process.env.REDIS_PASSWORD ?? undefined,
-			},
+			connection: bullConnection,
 		},
 	);
 
