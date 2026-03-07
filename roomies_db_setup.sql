@@ -1,3 +1,4 @@
+-- Active: 1772230719653@@127.0.0.1@5432@roomies_db
 -- =============================================================================
 -- ROOMIES — DATABASE SCHEMA SETUP SCRIPT
 --
@@ -1208,6 +1209,66 @@ CREATE OR REPLACE TRIGGER trg_rating_reports_updated_at
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 
+-- =============================================================================
+-- PHASE 3 / INTERESTS — SCHEMA MIGRATION
+--
+-- Run this after the base roomies_db_setup.sql schema is already applied.
+-- Safe to inspect and run section by section.
+--
+-- Changes:
+--   1. Add interest_request_withdrawn to notification_type_enum
+--   2. Add interest_request_id FK column to connections
+--   3. Add index for the new FK
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- 1. Extend notification_type_enum
+--
+-- WHY: The interest service has four actor-driven transitions. Three of them
+-- (received, accepted, declined) already exist in the enum. The fourth
+-- (withdrawn) was missing, forcing either a wrong notification type or silence.
+-- PostgreSQL enums can only be extended with ADD VALUE — values cannot be
+-- removed or reordered. This is additive and safe on a live database.
+-- -----------------------------------------------------------------------------
+ALTER TYPE notification_type_enum ADD VALUE IF NOT EXISTS 'interest_request_withdrawn';
+
+-- -----------------------------------------------------------------------------
+-- 2. Add interest_request_id to connections
+--
+-- WHY: A connection is born from exactly one interest_request. Without this FK
+-- the audit chain is: connection → listing + two user IDs, then guess which
+-- interest_request created it. This breaks down when a student withdraws,
+-- re-applies, and gets accepted — multiple interest_requests now satisfy the
+-- naive (sender_id, listing_id, status='accepted') lookup. A direct FK is the
+-- only deterministic link. Phase 4 ratings reference connection_id, and the
+-- full audit trail connection → interest_request is needed for disputes.
+--
+-- ON DELETE SET NULL: if an interest_request row is ever hard-deleted (by the
+-- Phase 5 cleanup cron), the connection is not destroyed — it is the primary
+-- trust record and must outlive the event that created it.
+--
+-- The column is nullable because:
+--   a) Admin-created connections (mentioned in the schema comments) have no
+--      originating interest_request.
+--   b) Any connections rows that already exist before this migration run will
+--      have NULL here — acceptable, they are pre-migration records.
+-- -----------------------------------------------------------------------------
+ALTER TABLE connections
+ADD COLUMN IF NOT EXISTS interest_request_id UUID REFERENCES interest_requests (request_id) ON DELETE SET NULL;
+
+-- -----------------------------------------------------------------------------
+-- 3. Index on connections.interest_request_id
+--
+-- WHY: The lookup "find the connection that came from this interest_request"
+-- is a natural query for a detail page or audit tool. Without an index it is
+-- a seq scan on connections. With it, it is an index scan on a narrow column.
+-- A partial index excluding NULLs keeps it small — admin-created connections
+-- (interest_request_id IS NULL) are never looked up by this column.
+-- -----------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_connections_interest_request_id ON connections (interest_request_id)
+WHERE
+    interest_request_id IS NOT NULL
+    AND deleted_at IS NULL;
 -- =============================================================================
 -- SANITY CHECK QUERIES
 --
