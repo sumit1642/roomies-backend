@@ -1,6 +1,7 @@
 // src/server.js
-// Bootstrap: connects PostgreSQL, Redis, and the media worker, starts the HTTP server,
-// and tears everything down cleanly in dependency-reverse order on SIGINT/SIGTERM.
+// Bootstrap: connects PostgreSQL, Redis, the media worker, and the notification
+// worker, starts the HTTP server, and tears everything down cleanly in
+// dependency-reverse order on SIGINT/SIGTERM.
 
 import "./config/env.js";
 
@@ -10,6 +11,7 @@ import { redis, connectRedis } from "./cache/client.js";
 import { logger } from "./logger/index.js";
 import { config } from "./config/env.js";
 import { startMediaWorker } from "./workers/mediaProcessor.js";
+import { startNotificationWorker } from "./workers/notificationWorker.js";
 import { closeAllQueues } from "./workers/queue.js";
 
 const start = async () => {
@@ -20,17 +22,21 @@ const start = async () => {
 		await connectRedis();
 		logger.info("Redis connected");
 
-		// Worker must start after Redis is ready — BullMQ uses Redis as its backing store.
-		// Store the instance so shutdown can call worker.close() before Redis disconnects.
+		// Both workers must start after Redis is ready — BullMQ uses Redis as its
+		// backing store. Store both instances so shutdown can call .close() on each
+		// before Redis disconnects. Closing a worker tells BullMQ to stop pulling
+		// new jobs and to wait for any in-flight job to finish gracefully.
 		const mediaWorker = startMediaWorker();
+		const notificationWorker = startNotificationWorker();
 
 		const server = app.listen(config.PORT, () => {
 			logger.info(`Server running on port ${config.PORT} [${config.NODE_ENV}]`);
 		});
 
-		// Shutdown order: HTTP → worker → queues → PostgreSQL → Redis.
-		// Worker and queues must close before Redis because in-flight jobs still need both.
-		// Redis must close before the process exits to avoid exhausting Azure connection limits.
+		// Shutdown order: HTTP → workers → queues → PostgreSQL → Redis.
+		// Workers and queues must close before Redis because in-flight jobs still
+		// need the Redis connection. Redis closes last to avoid exhausting Azure
+		// connection limits on repeated restarts.
 		const shutdown = (signal) => async () => {
 			logger.info(`${signal} received — shutting down gracefully`);
 
@@ -40,8 +46,8 @@ const start = async () => {
 					process.exit(1);
 				}
 
-				// Drain the active job (if any) before closing queues — worker.close() blocks
-				// until the current job finishes, respecting the job retry/fail contract.
+				// Drain active jobs before closing — worker.close() blocks until the
+				// current job finishes, respecting the job retry/fail contract.
 				try {
 					await mediaWorker.close();
 					logger.info("Media worker closed");
@@ -49,8 +55,16 @@ const start = async () => {
 					logger.error({ err: workerErr }, "Error closing media worker");
 				}
 
-				// Close all BullMQ Queue connections — uses Promise.allSettled so every
-				// queue gets a close attempt even if one fails.
+				try {
+					await notificationWorker.close();
+					logger.info("Notification worker closed");
+				} catch (workerErr) {
+					logger.error({ err: workerErr }, "Error closing notification worker");
+				}
+
+				// Close all BullMQ Queue connections — Promise.allSettled inside
+				// closeAllQueues() ensures every queue gets a close attempt even if
+				// one fails.
 				try {
 					await closeAllQueues();
 					logger.info("BullMQ queues closed");
@@ -58,7 +72,8 @@ const start = async () => {
 					logger.error({ err: queueErr }, "Error closing BullMQ queues");
 				}
 
-				// Pool.end() waits for in-flight queries to complete before releasing connections.
+				// pool.end() waits for in-flight queries to complete before releasing
+				// connections back to the pool.
 				try {
 					await pool.end();
 					logger.info("PostgreSQL pool closed");
@@ -66,8 +81,9 @@ const start = async () => {
 					logger.error({ err: poolErr }, "Error closing PostgreSQL pool");
 				}
 
-				// redis.close() is the correct node-redis v5 method — flushes pending commands
-				// before tearing down the TCP connection (quit() is deprecated in Redis 7.2+).
+				// redis.close() is the correct node-redis v5 method — flushes pending
+				// commands before tearing down the TCP connection (quit() is deprecated
+				// in Redis 7.2+).
 				try {
 					await redis.close();
 					logger.info("Redis connection closed");

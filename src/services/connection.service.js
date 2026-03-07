@@ -20,15 +20,32 @@
 // information. The WHERE clause itself enforces this: if the caller is not a
 // party, no row is returned and rowCount === 0 → 404.
 //
-// ─── NOTIFICATION HOOKS ──────────────────────────────────────────────────────
+// ─── NOTIFICATION DELIVERY ───────────────────────────────────────────────────
 //
-// Post-commit fire-and-forget pool.query calls insert notification rows.
-// These will be replaced with notificationQueue.add(...) in phase3/notifications.
-// The state machine logic here does not change when that refactor happens.
+// Post-commit notifications are enqueued via BullMQ rather than inserted
+// directly with pool.query. The job survives process crashes; the worker
+// retries up to 5 times with exponential backoff before landing in the
+// BullMQ failed set. queue.add() itself uses .catch() because it can fail
+// if Redis is momentarily unreachable — a missed notification is a UX
+// inconvenience, not a data integrity problem.
 
+import { Queue } from "bullmq";
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { NOTIFICATION_QUEUE_NAME } from "../workers/notificationWorker.js";
+import { config } from "../config/env.js";
+
+// Singleton queue — lightweight until .add() is called, safe at module scope.
+const _redisConn = new URL(config.REDIS_URL);
+const notificationQueue = new Queue(NOTIFICATION_QUEUE_NAME, {
+	connection: {
+		host: _redisConn.hostname,
+		port: parseInt(_redisConn.port || "6379", 10),
+		password: _redisConn.password || undefined,
+		tls: _redisConn.protocol === "rediss:" ? {} : undefined,
+	},
+});
 
 // ─── Confirm connection ───────────────────────────────────────────────────────
 //
@@ -117,41 +134,38 @@ export const confirmConnection = async (callerId, connectionId) => {
 
 	// ── Post-commit notifications ─────────────────────────────────────────────
 	//
-	// Only fire the 'connection_confirmed' notification when the status just
-	// flipped to 'confirmed' (both parties have now confirmed). A single-side
-	// confirmation is silent — there is no actionable event for the other party
-	// until they too need to confirm.
-	//
-	// Both parties receive the notification simultaneously. Two separate INSERT
-	// calls rather than one INSERT ... VALUES ($1, ...), ($2, ...) so that a
-	// failure on one does not silently swallow the other. Both are fire-and-forget
-	// post-commit — a missed notification is a UX inconvenience, not a data
-	// integrity problem.
-	//
-	// TODO(phase3:notifications): replace both pool.query calls with
-	// notificationQueue.add('send-notification', { ... }) once the worker lands.
+	// Only fire when status just flipped to 'confirmed' — a single-side
+	// confirmation is silent. Both parties receive the notification via two
+	// separate queue.add() calls so a Redis failure on one doesn't prevent
+	// the other from being enqueued.
 	if (justConfirmed) {
-		pool.query(
-			`INSERT INTO notifications (recipient_id, notification_type, entity_type, entity_id)
-       VALUES ($1, 'connection_confirmed', 'connection', $2)`,
-			[conn.initiator_id, connectionId],
-		).catch((err) => {
-			logger.error(
-				{ err, connectionId, recipientId: conn.initiator_id },
-				"Failed to insert connection_confirmed notification for initiator",
-			);
-		});
+		notificationQueue
+			.add("send-notification", {
+				recipientId: conn.initiator_id,
+				type: "connection_confirmed",
+				entityType: "connection",
+				entityId: connectionId,
+			})
+			.catch((err) => {
+				logger.error(
+					{ err, connectionId, recipientId: conn.initiator_id },
+					"Failed to enqueue connection_confirmed notification for initiator",
+				);
+			});
 
-		pool.query(
-			`INSERT INTO notifications (recipient_id, notification_type, entity_type, entity_id)
-       VALUES ($1, 'connection_confirmed', 'connection', $2)`,
-			[conn.counterpart_id, connectionId],
-		).catch((err) => {
-			logger.error(
-				{ err, connectionId, recipientId: conn.counterpart_id },
-				"Failed to insert connection_confirmed notification for counterpart",
-			);
-		});
+		notificationQueue
+			.add("send-notification", {
+				recipientId: conn.counterpart_id,
+				type: "connection_confirmed",
+				entityType: "connection",
+				entityId: connectionId,
+			})
+			.catch((err) => {
+				logger.error(
+					{ err, connectionId, recipientId: conn.counterpart_id },
+					"Failed to enqueue connection_confirmed notification for counterpart",
+				);
+			});
 	}
 
 	return {
