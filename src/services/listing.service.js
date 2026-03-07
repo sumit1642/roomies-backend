@@ -16,6 +16,7 @@ import { AppError } from "../middleware/errorHandler.js";
 import { assertPgOwnerVerified } from "../db/utils/pgOwner.js";
 import { findListingsNearPoint } from "../db/utils/spatial.js";
 import { scoreListingsForUser } from "../db/utils/compatibility.js";
+import { expirePendingRequestsForListing } from "./interest.service.js";
 
 const toRupees = (listing) => {
 	if (!listing) return null;
@@ -110,8 +111,6 @@ const fetchListingDetail = async (listingId, client = pool) => {
         '[]'
       ) AS preferences,
 
-      -- Correlated subquery avoids a Cartesian product with the amenities and
-      -- preferences 1:N JOINs, allowing ORDER BY inside the aggregation.
       (
         SELECT COALESCE(
           JSON_AGG(
@@ -178,8 +177,6 @@ export const createListing = async (posterId, posterRoles, body) => {
 		throw new AppError("Only students can create student_room listings", 403);
 	}
 
-	// Fix: also SELECT city from property so PG listings can satisfy the NOT NULL constraint on city.
-	// Previously SELECT 1 was used, which left city as null and caused the INSERT to fail.
 	let propertyCity = null;
 	if (isPgOwner && body.listingType !== "student_room") {
 		await assertPgOwnerVerified(posterId);
@@ -206,7 +203,6 @@ export const createListing = async (posterId, posterRoles, body) => {
 		await client.query("BEGIN");
 
 		const propertyId = body.listingType === "student_room" ? null : body.propertyId;
-		// Fix: PG listings inherit city from the parent property; student listings use body.city.
 		const city = body.listingType === "student_room" ? body.city : propertyCity;
 
 		const { rows } = await client.query(
@@ -571,34 +567,137 @@ export const updateListing = async (posterId, listingId, body) => {
 	}
 };
 
+// ─── Delete listing (soft) ─────────────────────────────────────────────────────
+//
+// The soft-delete and interest request expiry run in the same transaction so
+// they are always consistent: if the soft-delete rolls back, the expiry also
+// rolls back. A listing that is still technically active must not have its
+// pending interest requests showing as expired.
+//
+// The pre-delete check for active interest requests has been REMOVED. Previously
+// this blocked deletion if any active request existed. The revised behaviour:
+// soft-delete the listing AND expire all pending requests atomically. This is
+// simpler for the poster (no manual cleanup required) and correct — deleting a
+// listing is a strong signal that no new interest should be entertained.
+//
+// Accepted requests (already-established connections) are intentionally NOT
+// expired here — the connection already exists and the two parties are in contact
+// via WhatsApp. The listing going away does not invalidate the connection.
 export const deleteListing = async (posterId, listingId) => {
-	const { rows: requestRows } = await pool.query(
-		`SELECT 1
-     FROM interest_requests
-     WHERE listing_id = $1
-       AND status IN ('pending', 'accepted')
-       AND deleted_at IS NULL
-     LIMIT 1`,
-		[listingId],
-	);
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
 
-	if (requestRows.length) {
-		throw new AppError("Decline or withdraw all active interest requests before deleting this listing", 409);
+		const { rowCount } = await client.query(
+			`UPDATE listings
+       SET deleted_at = NOW()
+       WHERE listing_id = $1
+         AND posted_by  = $2
+         AND deleted_at IS NULL`,
+			[listingId, posterId],
+		);
+
+		if (rowCount === 0) {
+			throw new AppError("Listing not found", 404);
+		}
+
+		// Expire all pending interest requests in the same transaction.
+		// Accepted requests are left untouched — their connections remain valid.
+		await expirePendingRequestsForListing(listingId, client);
+
+		await client.query("COMMIT");
+	} catch (err) {
+		await client.query("ROLLBACK");
+		throw err;
+	} finally {
+		client.release();
 	}
 
-	const { rowCount } = await pool.query(
-		`UPDATE listings
-     SET deleted_at = NOW()
+	logger.info({ posterId, listingId }, "Listing soft-deleted");
+	return { listingId, deleted: true };
+};
+
+// ─── Change listing status ─────────────────────────────────────────────────────
+//
+// Handles poster-initiated status transitions: active → filled, active → deactivated,
+// deactivated → active. The filled and deactivated transitions expire pending
+// interest requests in the same transaction.
+//
+// This is a new service function introduced in phase3/interests. Previously there
+// was no way for a poster to change their listing's status without deleting it.
+// Now they can mark a room as filled (taken) or temporarily deactivate it.
+//
+// Allowed transitions (poster-initiated only):
+//   active      → filled        (room has been taken)
+//   active      → deactivated   (temporarily hidden)
+//   deactivated → active        (re-publish)
+//
+// expired → * transitions are handled by the cron job, not by this function.
+// filled → * transitions are terminal — a filled room cannot be re-opened via
+// this endpoint (a new listing should be created instead).
+const ALLOWED_STATUS_TRANSITIONS = {
+	active: ["filled", "deactivated"],
+	deactivated: ["active"],
+};
+
+export const updateListingStatus = async (posterId, listingId, newStatus) => {
+	const { rows: listingRows } = await pool.query(
+		`SELECT status FROM listings
      WHERE listing_id = $1
        AND posted_by  = $2
        AND deleted_at IS NULL`,
 		[listingId, posterId],
 	);
 
-	if (rowCount === 0) throw new AppError("Listing not found", 404);
+	if (!listingRows.length) {
+		throw new AppError("Listing not found", 404);
+	}
 
-	logger.info({ posterId, listingId }, "Listing soft-deleted");
-	return { listingId, deleted: true };
+	const currentStatus = listingRows[0].status;
+	const allowed = ALLOWED_STATUS_TRANSITIONS[currentStatus] ?? [];
+
+	if (!allowed.includes(newStatus)) {
+		throw new AppError(`Cannot change listing status from '${currentStatus}' to '${newStatus}'`, 422);
+	}
+
+	const deactivating = newStatus === "filled" || newStatus === "deactivated";
+
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
+
+		const { rows: updatedRows } = await client.query(
+			`UPDATE listings
+       SET status     = $1,
+           filled_at  = CASE WHEN $1 = 'filled' THEN NOW() ELSE filled_at END
+       WHERE listing_id = $2
+         AND posted_by  = $3
+         AND status     = $4
+         AND deleted_at IS NULL
+       RETURNING listing_id, status`,
+			[newStatus, listingId, posterId, currentStatus],
+		);
+
+		if (!updatedRows.length) {
+			throw new AppError("Listing status has already changed — please refresh", 409);
+		}
+
+		// Expire pending interest requests whenever the listing leaves 'active'.
+		// Accepted requests (established connections) are intentionally untouched.
+		if (deactivating) {
+			await expirePendingRequestsForListing(listingId, client);
+		}
+
+		await client.query("COMMIT");
+	} catch (err) {
+		await client.query("ROLLBACK");
+		throw err;
+	} finally {
+		client.release();
+	}
+
+	logger.info({ posterId, listingId, from: currentStatus, to: newStatus }, "Listing status updated");
+	return { listingId, status: newStatus };
 };
 
 export const getListingPreferences = async (listingId) => {
