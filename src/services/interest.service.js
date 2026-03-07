@@ -1,6 +1,5 @@
 // src/services/interest.service.js
 //
-//
 // ─── THE STATE MACHINE ────────────────────────────────────────────────────────
 //
 // States:  pending → accepted | declined | withdrawn
@@ -16,7 +15,6 @@
 // The ALLOWED_TRANSITIONS map below is the single source of truth for this logic.
 // Any code that needs to know "can actor X move from state Y to state Z?" should
 // consult this map — never inline the logic elsewhere.
-
 //
 // ─── NOTIFICATION HOOKS ──────────────────────────────────────────────────────
 //
@@ -43,12 +41,42 @@ const ALLOWED_TRANSITIONS = {
 
 // Maps listing_type → connection_type as defined by the schema enum.
 // Called inside the accepted transition to derive the correct connection_type.
+// This map is the single source of truth — if a new listing_type is ever added
+// to the enum, add it here and the rest of the system adapts automatically.
 const LISTING_TYPE_TO_CONNECTION_TYPE = {
 	student_room: "student_roommate",
 	pg_room: "pg_stay",
 	hostel_bed: "hostel_stay",
 };
 
+// Maps each actor-driven transition to the notification_type that the OTHER party
+// should receive. This is the single source of truth for notification routing.
+//
+// WHY A MAP INSTEAD OF INLINE CONDITIONALS:
+// The previous code used a ternary that only handled 'declined', causing 'withdrawn'
+// to incorrectly fire 'interest_request_received'. A map makes every case explicit
+// and a missing key is immediately visible rather than silently falling through.
+//
+// 'accepted' is handled separately inside _acceptInterestRequest (post-commit),
+// so it is not in this map.
+const TRANSITION_NOTIFICATION_TYPE = {
+	declined: "interest_request_declined",
+	withdrawn: "interest_request_withdrawn",
+};
+
+// ─── Context query ────────────────────────────────────────────────────────────
+//
+// Fetches an interest request and all the surrounding context the service needs
+// to make decisions: who sent it, who owns the listing, what state is it in,
+// and — critically — what listing_type the listing is so we can derive the
+// connection_type without a second query.
+//
+// WHY listing_type IS HERE AND NOT IN _acceptInterestRequest:
+// The previous implementation fetched listing_type in a separate query inside
+// _acceptInterestRequest. That meant the 'accepted' path cost two DB round-trips
+// before even opening its transaction. Since we already JOIN listings here,
+// adding one column to the SELECT costs nothing extra and eliminates the
+// redundant query on the most performance-critical path in this phase.
 const fetchInterestWithContext = async (interestId, client = pool) => {
 	const { rows } = await client.query(
 		`SELECT
@@ -59,8 +87,9 @@ const fetchInterestWithContext = async (interestId, client = pool) => {
        ir.message,
        ir.created_at,
        ir.updated_at,
-       l.posted_by AS poster_id,
-       l.title     AS listing_title
+       l.posted_by    AS poster_id,
+       l.title        AS listing_title,
+       l.listing_type AS listing_type
      FROM interest_requests ir
      JOIN listings l ON l.listing_id = ir.listing_id
      WHERE ir.interest_id = $1
@@ -110,6 +139,33 @@ const toPosterInterestShape = (row) => ({
 		profilePhotoUrl: row.student_photo_url,
 		averageRating: row.student_rating,
 		ratingCount: row.student_rating_count,
+	},
+});
+
+// Shapes a single interest request for the detail endpoint.
+// Returns all fields a client needs to display a full interest request detail
+// view, regardless of which side (student or poster) is viewing it.
+const toDetailShape = (row) => ({
+	interestId: row.interest_id,
+	listingId: row.listing_id,
+	senderId: row.sender_id,
+	status: row.status,
+	message: row.message,
+	createdAt: row.created_at,
+	updatedAt: row.updated_at,
+	listing: {
+		listingId: row.listing_id,
+		title: row.listing_title,
+		city: row.listing_city,
+		rentPerMonth: row.rent_per_month / 100,
+		roomType: row.room_type,
+		listingType: row.listing_type,
+	},
+	student: {
+		userId: row.sender_id,
+		fullName: row.student_name,
+		profilePhotoUrl: row.student_photo_url,
+		averageRating: row.student_rating,
 	},
 });
 
@@ -222,6 +278,58 @@ export const createInterestRequest = async (studentId, listingId, message) => {
 	};
 };
 
+// ─── Get single interest request (detail view) ────────────────────────────────
+//
+// Returns full detail for one interest request. Access is restricted to the two
+// parties involved — the sender and the listing's poster. A third party receives
+// 404 (not 403) to avoid confirming the resource exists.
+//
+// This endpoint is essential for frontend developers: after a student sends an
+// interest request and receives back an interestId, they need a way to fetch that
+// specific request later to check status, display it in a detail view, or
+// deep-link to it from a notification. Without this endpoint they would have to
+// page through GET /interests/me and find it, which is both slow and fragile.
+export const getInterestRequest = async (callerId, interestId) => {
+	const { rows } = await pool.query(
+		`SELECT
+       ir.interest_id,
+       ir.sender_id,
+       ir.listing_id,
+       ir.status,
+       ir.message,
+       ir.created_at,
+       ir.updated_at,
+       l.posted_by        AS poster_id,
+       l.title            AS listing_title,
+       l.city             AS listing_city,
+       l.rent_per_month,
+       l.room_type,
+       l.listing_type,
+       COALESCE(sp.full_name, u_sender.email) AS student_name,
+       sp.profile_photo_url                   AS student_photo_url,
+       u_sender.average_rating                AS student_rating
+     FROM interest_requests ir
+     JOIN listings l           ON l.listing_id   = ir.listing_id
+     JOIN users u_sender        ON u_sender.user_id = ir.sender_id
+     LEFT JOIN student_profiles sp
+       ON sp.user_id    = ir.sender_id
+      AND sp.deleted_at IS NULL
+     WHERE ir.interest_id = $1
+       AND ir.deleted_at  IS NULL
+       AND (ir.sender_id = $2 OR l.posted_by = $2)`,
+		[interestId, callerId],
+	);
+
+	// No row means either the resource doesn't exist OR the caller is not a party.
+	// 404 in both cases — never 403, which would confirm existence to an
+	// unauthorised caller.
+	if (!rows.length) {
+		throw new AppError("Interest request not found", 404);
+	}
+
+	return toDetailShape(rows[0]);
+};
+
 // ─── Update interest status (state machine transition) ────────────────────────
 
 export const updateInterestStatus = async (callerId, interestId, newStatus) => {
@@ -247,6 +355,8 @@ export const updateInterestStatus = async (callerId, interestId, newStatus) => {
 	// must also roll back — a partial state (accepted interest, no connection)
 	// has no automated recovery path and breaks Phase 4 ratings.
 	if (newStatus === "accepted") {
+		// row.listing_type is now available directly from fetchInterestWithContext —
+		// no second query needed inside _acceptInterestRequest.
 		return await _acceptInterestRequest(row);
 	}
 
@@ -273,16 +383,30 @@ export const updateInterestStatus = async (callerId, interestId, newStatus) => {
 		"Interest request status updated",
 	);
 
-	// TODO(phase3:notifications): replace with notificationQueue.add(...)
-	const notifyUserId = actorRole === "student" ? row.poster_id : row.sender_id;
-	const notificationType = newStatus === "declined" ? "interest_request_declined" : "interest_request_received";
-	pool.query(
-		`INSERT INTO notifications (recipient_id, notification_type, entity_type, entity_id)
-     VALUES ($1, $2, 'interest_request', $3)`,
-		[notifyUserId, notificationType, interestId],
-	).catch((err) => {
-		logger.error({ err, interestId }, "Failed to insert status-change notification");
-	});
+	// Fire notification to the OTHER party.
+	//
+	// TRANSITION_NOTIFICATION_TYPE maps each terminal transition to the correct
+	// enum value. 'accepted' is not here — it's handled inside _acceptInterestRequest.
+	// If a future transition is added without a map entry, the notification is
+	// silently skipped rather than firing the wrong type. The logger.warn below
+	// makes this detectable in monitoring.
+	const notificationType = TRANSITION_NOTIFICATION_TYPE[newStatus];
+	if (notificationType) {
+		const notifyUserId = actorRole === "student" ? row.poster_id : row.sender_id;
+		// TODO(phase3:notifications): replace with notificationQueue.add(...)
+		pool.query(
+			`INSERT INTO notifications (recipient_id, notification_type, entity_type, entity_id)
+       VALUES ($1, $2, 'interest_request', $3)`,
+			[notifyUserId, notificationType, interestId],
+		).catch((err) => {
+			logger.error({ err, interestId, notificationType }, "Failed to insert status-change notification");
+		});
+	} else {
+		logger.warn(
+			{ newStatus, interestId },
+			"No notification type mapped for this transition — skipping notification",
+		);
+	}
 
 	return {
 		interestId: updated.interest_id,
@@ -297,28 +421,25 @@ export const updateInterestStatus = async (callerId, interestId, newStatus) => {
 // Extracted from updateInterestStatus to keep that function readable.
 // Two things happen atomically inside BEGIN/COMMIT:
 //   1. interest_requests.status → 'accepted'  (with AND status='pending' guard)
-//   2. connections row created                (connection_type derived from listing_type)
+//   2. connections row created                 (connection_type derived from listing_type,
+//                                               interest_request_id linked for full audit trail)
 //
 // Post-commit fire-and-forget:
 //   3. Notification INSERT for the student
 //   4. WhatsApp deep-link fetched and returned
+//
+// WHY listing_type COMES FROM row AND NOT A SECOND QUERY:
+// fetchInterestWithContext now selects l.listing_type as part of its JOIN. This
+// means by the time we arrive here, row.listing_type is already populated. The
+// previous implementation ran a second SELECT inside this function before opening
+// the transaction — that was an unnecessary round-trip on the critical accept path.
 const _acceptInterestRequest = async (row) => {
-	// Fetch listing_type to derive connection_type.
-	// row.listing_id is already validated by fetchInterestWithContext.
-	const { rows: listingRows } = await pool.query(
-		`SELECT listing_type FROM listings
-     WHERE listing_id = $1 AND deleted_at IS NULL`,
-		[row.listing_id],
-	);
-
-	if (!listingRows.length) {
-		throw new AppError("Listing not found — cannot accept interest request", 404);
-	}
-
-	const connectionType = LISTING_TYPE_TO_CONNECTION_TYPE[listingRows[0].listing_type];
+	const connectionType = LISTING_TYPE_TO_CONNECTION_TYPE[row.listing_type];
 	if (!connectionType) {
-		// Defensive: a new listing_type without a map entry should surface loudly.
-		throw new AppError(`Unhandled listing type: ${listingRows[0].listing_type}`, 500);
+		// A new listing_type was added to the enum without a corresponding entry
+		// in LISTING_TYPE_TO_CONNECTION_TYPE. Surface this loudly — silent data
+		// corruption (a connection with wrong type) is worse than a 500.
+		throw new AppError(`Unhandled listing type: ${row.listing_type}`, 500);
 	}
 
 	const client = await pool.connect();
@@ -348,17 +469,20 @@ const _acceptInterestRequest = async (row) => {
 
 		// Step 2: Create the connections row.
 		// initiator = student (sender_id), counterpart = poster (poster_id).
-		// Both confirmation flags start FALSE — acceptance of an interest request
-		// means two parties agreed to interact, not that the interaction happened.
-		// The two-sided confirmation (phase3/connections) is the separate step that
-		// sets confirmation_status = 'confirmed'.
+		// interest_request_id links back to the originating request, which is the
+		// deterministic FK the audit trail needs. If a student has withdrawn and
+		// re-applied multiple times, (sender_id, listing_id, status='accepted')
+		// would be ambiguous — interest_request_id is not.
+		// Both confirmation flags start FALSE — acceptance means two parties agreed
+		// to interact, not that the interaction happened. Two-sided confirmation
+		// (phase3/connections) is the separate step that sets status = 'confirmed'.
 		const { rows: connRows } = await client.query(
 			`INSERT INTO connections
-         (initiator_id, counterpart_id, listing_id, connection_type,
-          initiator_confirmed, counterpart_confirmed, confirmation_status)
-       VALUES ($1, $2, $3, $4, FALSE, FALSE, 'pending')
+         (initiator_id, counterpart_id, listing_id, interest_request_id,
+          connection_type, initiator_confirmed, counterpart_confirmed, confirmation_status)
+       VALUES ($1, $2, $3, $4, $5, FALSE, FALSE, 'pending')
        RETURNING connection_id`,
-			[updated.sender_id, row.poster_id, updated.listing_id, connectionType],
+			[updated.sender_id, row.poster_id, updated.listing_id, row.interest_id, connectionType],
 		);
 
 		connectionId = connRows[0].connection_id;
@@ -490,7 +614,11 @@ export const getListingInterests = async (posterId, listingId, filters) => {
 // ─── Get my interest requests (student dashboard) ─────────────────────────────
 
 export const getMyInterestRequests = async (studentId, filters) => {
-	const { status, cursorTime, cursorId, limit } = filters;
+	// Default limit here, not just in the validator, because this function is
+	// the service layer — it must be safe to call directly (e.g. from tests or
+	// other services) without routing through the HTTP validator. A missing limit
+	// would produce `NaN + 1 = NaN` in the LIMIT clause, causing a PostgreSQL error.
+	const { status, cursorTime, cursorId, limit = 20 } = filters;
 
 	const clauses = [`ir.sender_id = $1`, `ir.deleted_at IS NULL`];
 	const params = [studentId];
