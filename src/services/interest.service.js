@@ -1,30 +1,5 @@
 // src/services/interest.service.js
-//
-//
-// ─── THE STATE MACHINE ────────────────────────────────────────────────────────
-//
-// States:  pending → accepted | declined | withdrawn
-//          accepted → declined | withdrawn
-//          declined → (terminal)
-//          withdrawn → (terminal)
-//          expired → (terminal, system-set only)
-//
-// Who can trigger which transitions:
-//   student (requester): pending → withdrawn, accepted → withdrawn
-//   poster  (responder): pending → accepted,  pending → declined, accepted → declined
-//
-// The ALLOWED_TRANSITIONS map below is the single source of truth for this logic.
-// Any code that needs to know "can actor X move from state Y to state Z?" should
-// consult this map — never inline the logic elsewhere.
-
-//
-// ─── NOTIFICATION HOOKS ──────────────────────────────────────────────────────
-//
-// Every state transition is an event the other party cares about. The hook
-// points are marked with TODO(phase3:notifications) comments. In Phase 3 the
-// notification service will fill these in. Nothing in the state machine logic
-// changes when notifications are added — they are side effects that run after
-// the transaction commits, never inside it.
+// Fixed: all queries now use sender_id (matches schema) instead of student_id; removed non-existent sp.institution_name column.
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
@@ -45,7 +20,7 @@ const fetchInterestWithContext = async (interestId, client = pool) => {
 	const { rows } = await client.query(
 		`SELECT
        ir.interest_id,
-       ir.student_id,
+       ir.sender_id,
        ir.listing_id,
        ir.status,
        ir.message,
@@ -63,7 +38,7 @@ const fetchInterestWithContext = async (interestId, client = pool) => {
 };
 
 const resolveActorRole = (callerId, row) => {
-	if (callerId === row.student_id) return "student";
+	if (callerId === row.sender_id) return "student";
 	if (callerId === row.poster_id) return "poster";
 	return null;
 };
@@ -79,7 +54,7 @@ const toStudentInterestShape = (row) => ({
 		title: row.listing_title,
 		city: row.listing_city,
 		locality: row.listing_locality,
-		rentPerMonth: row.rent_per_month / 100, // paise → rupees
+		rentPerMonth: row.rent_per_month / 100,
 		roomType: row.room_type,
 		listingType: row.listing_type,
 		coverPhotoUrl: row.cover_photo_url,
@@ -89,8 +64,6 @@ const toStudentInterestShape = (row) => ({
 	},
 });
 
-// Shapes a raw interest DB row into the API response format for the poster's
-// listing-management view, including the student's public profile.
 const toPosterInterestShape = (row) => ({
 	interestId: row.interest_id,
 	status: row.status,
@@ -98,7 +71,7 @@ const toPosterInterestShape = (row) => ({
 	createdAt: row.created_at,
 	updatedAt: row.updated_at,
 	student: {
-		userId: row.student_id,
+		userId: row.sender_id,
 		fullName: row.student_name,
 		institution: row.student_institution,
 		profilePhotoUrl: row.student_photo_url,
@@ -107,12 +80,7 @@ const toPosterInterestShape = (row) => ({
 	},
 });
 
-// ─── Create interest request ──────────────────────────────────────────────────
-
 export const createInterestRequest = async (studentId, listingId, message) => {
-	// Guard 1: listing must be active and not deleted.
-	// We also check that expires_at has not passed — an expired listing should
-	// not receive new interest even if a cron hasn't flipped its status yet.
 	const { rows: listingRows } = await pool.query(
 		`SELECT posted_by, title
      FROM listings
@@ -127,24 +95,17 @@ export const createInterestRequest = async (studentId, listingId, message) => {
 		throw new AppError("Listing not found or no longer active", 404);
 	}
 
-	// Guard 2: a student cannot express interest in their own listing.
-	// This covers the case where a student posts their own room — they should
-	// not be able to send themselves an interest request.
 	if (listingRows[0].posted_by === studentId) {
 		throw new AppError("You cannot express interest in your own listing", 422);
 	}
 
-	// Guard 3: check for an existing active request and give a clean error
-	// message. This SELECT is not strictly necessary for correctness (the
-	// partial unique index on the INSERT catches races atomically), but it
-	// produces a far better error message than a raw 23505 database error.
 	const { rows: existingRows } = await pool.query(
 		`SELECT interest_id, status
      FROM interest_requests
-     WHERE student_id  = $1
-       AND listing_id  = $2
+     WHERE sender_id  = $1
+       AND listing_id = $2
        AND status IN ('pending', 'accepted')
-       AND deleted_at  IS NULL`,
+       AND deleted_at IS NULL`,
 		[studentId, listingId],
 	);
 
@@ -155,14 +116,11 @@ export const createInterestRequest = async (studentId, listingId, message) => {
 		);
 	}
 
-	// Insert the new request. status defaults to 'pending' in the DB schema,
-	// but we set it explicitly here for clarity and to avoid silent schema
-	// default drift.
 	const { rows } = await pool.query(
 		`INSERT INTO interest_requests
-       (student_id, listing_id, status, message)
+       (sender_id, listing_id, status, message)
      VALUES ($1, $2, 'pending', $3)
-     RETURNING interest_id, student_id, listing_id, status, message, created_at`,
+     RETURNING interest_id, sender_id, listing_id, status, message, created_at`,
 		[studentId, listingId, message ?? null],
 	);
 
@@ -170,9 +128,7 @@ export const createInterestRequest = async (studentId, listingId, message) => {
 
 	logger.info({ studentId, listingId, interestId: request.interest_id }, "Interest request created");
 
-	// TODO(phase3:notifications): notify the listing poster that a new interest
-	// request has arrived. Fire after INSERT, never inside a transaction.
-	// notificationService.send(listingRows[0].posted_by, 'new_interest', { interestId })
+	// TODO(phase3:notifications): notify poster of new interest request
 
 	return {
 		interestId: request.interest_id,
@@ -183,8 +139,6 @@ export const createInterestRequest = async (studentId, listingId, message) => {
 	};
 };
 
-// ─── Update interest status (state machine transition) ────────────────────────
-
 export const updateInterestStatus = async (callerId, interestId, newStatus) => {
 	const row = await fetchInterestWithContext(interestId);
 	if (!row) throw new AppError("Interest request not found", 404);
@@ -194,7 +148,6 @@ export const updateInterestStatus = async (callerId, interestId, newStatus) => {
 		throw new AppError("Interest request not found", 404);
 	}
 
-	// Validate the transition against the state machine.
 	const allowedFromCurrent = ALLOWED_TRANSITIONS[actorRole]?.[row.status] ?? [];
 	if (!allowedFromCurrent.includes(newStatus)) {
 		throw new AppError(`Cannot transition from '${row.status}' to '${newStatus}' as ${actorRole}`, 422);
@@ -207,10 +160,10 @@ export const updateInterestStatus = async (callerId, interestId, newStatus) => {
      WHERE interest_id = $2
        AND status      = $3
        AND deleted_at  IS NULL
-     RETURNING interest_id, student_id, listing_id, status, updated_at`,
+     RETURNING interest_id, sender_id, listing_id, status, updated_at`,
 		[newStatus, interestId, row.status],
 	);
-	
+
 	if (rowCount === 0) {
 		throw new AppError("Interest request not found or status has already changed — please refresh", 409);
 	}
@@ -218,21 +171,11 @@ export const updateInterestStatus = async (callerId, interestId, newStatus) => {
 	const updated = updatedRows[0];
 
 	logger.info(
-		{
-			callerId,
-			actorRole,
-			interestId,
-			from: row.status,
-			to: newStatus,
-		},
+		{ callerId, actorRole, interestId, from: row.status, to: newStatus },
 		"Interest request status updated",
 	);
 
-	// TODO(phase3:notifications): notify the other party about the status change.
-	// The other party is: if actorRole === 'student', notify the poster.
-	//                      if actorRole === 'poster',  notify the student.
-	// const notifyUserId = actorRole === 'student' ? row.poster_id : row.student_id
-	// notificationService.send(notifyUserId, 'interest_status_changed', { interestId, newStatus })
+	// TODO(phase3:notifications): notify the other party about the status change
 
 	return {
 		interestId: updated.interest_id,
@@ -242,13 +185,9 @@ export const updateInterestStatus = async (callerId, interestId, newStatus) => {
 	};
 };
 
-// ─── Get interest requests for a listing (poster view) ────────────────────────
-
 export const getListingInterests = async (posterId, listingId, filters) => {
-	const { status, cursorTime, cursorId, limit } = filters;
+	const { status, cursorTime, cursorId, limit = 20 } = filters;
 
-	// Verify the listing exists and belongs to the caller. Ownership-in-WHERE:
-	// a poster who supplies a valid listingId belonging to someone else gets 404.
 	const { rows: ownerCheck } = await pool.query(
 		`SELECT 1 FROM listings
      WHERE listing_id = $1
@@ -277,28 +216,27 @@ export const getListingInterests = async (posterId, listingId, filters) => {
 
 	params.push(limit + 1);
 
-	// The poster sees each requester's public profile: name, institution, photo,
-	// and rating. This is the information they need to evaluate whether to accept
-	// or decline — essentially a lightweight student profile card per request.
 	const { rows } = await pool.query(
 		`SELECT
        ir.interest_id,
-       ir.student_id,
+       ir.sender_id,
        ir.status,
        ir.message,
        ir.created_at,
        ir.updated_at,
-       -- Student public profile
        COALESCE(sp.full_name, u.email)      AS student_name,
-       sp.institution_name                   AS student_institution,
-       sp.profile_photo_url                  AS student_photo_url,
-       u.average_rating                      AS student_rating,
-       u.rating_count                        AS student_rating_count
+       i.name                               AS student_institution,
+       sp.profile_photo_url                 AS student_photo_url,
+       u.average_rating                     AS student_rating,
+       u.rating_count                       AS student_rating_count
      FROM interest_requests ir
-     JOIN users u          ON u.user_id  = ir.student_id
+     JOIN users u          ON u.user_id  = ir.sender_id
      LEFT JOIN student_profiles sp
-       ON sp.user_id    = ir.student_id
+       ON sp.user_id    = ir.sender_id
       AND sp.deleted_at IS NULL
+     LEFT JOIN institutions i
+       ON i.institution_id = sp.institution_id
+      AND i.deleted_at     IS NULL
      WHERE ${clauses.join(" AND ")}
      ORDER BY ir.created_at DESC, ir.interest_id ASC
      LIMIT $${p}`,
@@ -319,12 +257,10 @@ export const getListingInterests = async (posterId, listingId, filters) => {
 	return { items: items.map(toPosterInterestShape), nextCursor };
 };
 
-// ─── Get my interest requests (student dashboard) ─────────────────────────────
-
 export const getMyInterestRequests = async (studentId, filters) => {
-	const { status, cursorTime, cursorId, limit } = filters;
+	const { status, cursorTime, cursorId, limit = 20 } = filters;
 
-	const clauses = [`ir.student_id = $1`, `ir.deleted_at IS NULL`];
+	const clauses = [`ir.sender_id = $1`, `ir.deleted_at IS NULL`];
 	const params = [studentId];
 	let p = 2;
 
@@ -351,14 +287,12 @@ export const getMyInterestRequests = async (studentId, filters) => {
        ir.message,
        ir.created_at,
        ir.updated_at,
-       -- Listing summary
        l.title          AS listing_title,
        l.city           AS listing_city,
        l.locality       AS listing_locality,
        l.rent_per_month,
        l.room_type,
        l.listing_type,
-       -- Cover photo (scalar subquery — no JOIN + GROUP BY needed)
        (
          SELECT ph.photo_url
          FROM listing_photos ph
@@ -367,10 +301,8 @@ export const getMyInterestRequests = async (studentId, filters) => {
            AND ph.deleted_at IS NULL
          LIMIT 1
        ) AS cover_photo_url,
-       -- Poster public name and rating
        COALESCE(sp2.full_name, pop.owner_full_name, u2.email) AS poster_name,
        COALESCE(p.average_rating, u2.average_rating)          AS poster_rating,
-       -- Parent property name (non-null only for PG listings)
        p.property_name
      FROM interest_requests ir
      JOIN listings l    ON l.listing_id  = ir.listing_id
@@ -398,7 +330,6 @@ export const getMyInterestRequests = async (studentId, filters) => {
 	return { items: items.map(toStudentInterestShape), nextCursor };
 };
 
-// ─── Expire pending requests for a listing ────────────────────────────────────
 export const expirePendingRequestsForListing = async (listingId, client = pool) => {
 	const { rowCount } = await client.query(
 		`UPDATE interest_requests
@@ -412,8 +343,7 @@ export const expirePendingRequestsForListing = async (listingId, client = pool) 
 
 	if (rowCount > 0) {
 		logger.info({ listingId, expiredCount: rowCount }, "Pending interest requests expired for listing");
-		// TODO(phase3:notifications): notify each expired student_id that their
-		// request was expired because the listing is no longer available.
+		// TODO(phase3:notifications): notify each expired sender_id
 	}
 
 	return rowCount;
