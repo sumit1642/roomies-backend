@@ -1,5 +1,14 @@
 // src/services/listing.service.js
-// Fixed: PG listings now fetch and insert city from the parent property row to satisfy the NOT NULL constraint.
+//
+// ─── THE PAISE RULE ───────────────────────────────────────────────────────────
+//
+// rent_per_month and deposit_amount are stored in PAISE (smallest INR unit)
+// in the database. 1 rupee = 100 paise. Rs 8,500/month → stored as 850,000.
+//
+// This file is the ONLY place where the conversion happens:
+//   write path:  rupees × 100  before any INSERT or UPDATE
+//   read path:   paise  ÷ 100  after any SELECT, before returning to caller
+// ─────────────────────────────────────────────────────────────────────────────
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
@@ -101,6 +110,8 @@ const fetchListingDetail = async (listingId, client = pool) => {
         '[]'
       ) AS preferences,
 
+      -- Correlated subquery avoids a Cartesian product with the amenities and
+      -- preferences 1:N JOINs, allowing ORDER BY inside the aggregation.
       (
         SELECT COALESCE(
           JSON_AGG(
@@ -167,6 +178,8 @@ export const createListing = async (posterId, posterRoles, body) => {
 		throw new AppError("Only students can create student_room listings", 403);
 	}
 
+	// Fix: also SELECT city from property so PG listings can satisfy the NOT NULL constraint on city.
+	// Previously SELECT 1 was used, which left city as null and caused the INSERT to fail.
 	let propertyCity = null;
 	if (isPgOwner && body.listingType !== "student_room") {
 		await assertPgOwnerVerified(posterId);
@@ -188,14 +201,13 @@ export const createListing = async (posterId, posterRoles, body) => {
 	const rentPaise = body.rentPerMonth * 100;
 	const depositPaise = body.depositAmount * 100;
 
-	const isStudentListing = body.listingType === "student_room";
-
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
 
-		const propertyId = isStudentListing ? null : body.propertyId;
-		const city = isStudentListing ? body.city : propertyCity;
+		const propertyId = body.listingType === "student_room" ? null : body.propertyId;
+		// Fix: PG listings inherit city from the parent property; student listings use body.city.
+		const city = body.listingType === "student_room" ? body.city : propertyCity;
 
 		const { rows } = await client.query(
 			`INSERT INTO listings (
@@ -244,13 +256,13 @@ export const createListing = async (posterId, posterRoles, body) => {
 				body.preferredGender ?? null,
 				body.availableFrom,
 				body.availableUntil ?? null,
-				isStudentListing ? body.addressLine : null,
+				body.listingType === "student_room" ? body.addressLine : null,
 				city,
-				isStudentListing ? (body.locality ?? null) : null,
-				isStudentListing ? (body.landmark ?? null) : null,
-				isStudentListing ? (body.pincode ?? null) : null,
-				isStudentListing ? (body.latitude ?? null) : null,
-				isStudentListing ? (body.longitude ?? null) : null,
+				body.listingType === "student_room" ? (body.locality ?? null) : null,
+				body.listingType === "student_room" ? (body.landmark ?? null) : null,
+				body.listingType === "student_room" ? (body.pincode ?? null) : null,
+				body.listingType === "student_room" ? (body.latitude ?? null) : null,
+				body.listingType === "student_room" ? (body.longitude ?? null) : null,
 			],
 		);
 
