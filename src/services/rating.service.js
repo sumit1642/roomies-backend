@@ -47,6 +47,12 @@ const notificationQueue = new Queue(NOTIFICATION_QUEUE_NAME, {
 		password: _redisConn.password || undefined,
 		tls: _redisConn.protocol === "rediss:" ? {} : undefined,
 	},
+	defaultJobOptions: {
+		attempts: 5,
+		backoff: { type: "exponential", delay: 2000 },
+		removeOnComplete: 100,
+		removeOnFail: 200,
+	},
 });
 
 const _enqueueNotification = (payload) => {
