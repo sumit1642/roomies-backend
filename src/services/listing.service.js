@@ -667,14 +667,23 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 		await client.query("BEGIN");
 
 		const { rows: updatedRows } = await client.query(
-			`UPDATE listings
+			`UPDATE listings l
        SET status     = $1,
-           filled_at  = CASE WHEN $1 = 'filled' THEN NOW() ELSE filled_at END
-       WHERE listing_id = $2
-         AND posted_by  = $3
-         AND status     = $4
-         AND deleted_at IS NULL
-       RETURNING listing_id, status`,
+           filled_at  = CASE WHEN $1 = 'filled' THEN NOW() ELSE l.filled_at END
+       WHERE l.listing_id = $2
+         AND l.posted_by  = $3
+         AND l.status     = $4
+         AND l.deleted_at IS NULL
+         AND (
+           $1 <> 'active'
+           OR EXISTS (
+             SELECT 1
+             FROM properties p
+             WHERE p.property_id = l.property_id
+               AND p.deleted_at IS NULL
+           )
+         )
+       RETURNING l.listing_id, l.status`,
 			[newStatus, listingId, posterId, currentStatus],
 		);
 

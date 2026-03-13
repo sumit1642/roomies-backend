@@ -386,55 +386,61 @@ export const updateProperty = async (ownerId, propertyId, body) => {
 
 // ─── Delete property (soft) ───────────────────────────────────────────────────
 //
-// The active-listings gate must run before the soft-delete. Deleting a property
-// that has active listings would leave those listings orphaned in search results
-// until the nightly expiry cron catches them — potentially hours of confusing
-// state for students who have already saved or expressed interest in them.
-//
-// The gate query and the soft-delete are NOT in a transaction. This is an
-// intentional decision: the gate query is a read, and the soft-delete is a
-// single-row UPDATE. The risk of a listing becoming active between the gate
-// check and the UPDATE is real but acceptable here — the ON DELETE RESTRICT
-// FK from listings.property_id to properties.property_id will prevent a
-// hard-delete, and the soft-delete does not remove the listing rows themselves,
-// so any race condition results in a property with deleted_at set but still
-// having active listings (a brief inconsistency that the admin or cron can fix).
-// Wrapping this in a transaction would hold a lock across two queries for
-// marginal safety improvement in a low-frequency operation.
-//
-// A future improvement would be to use SELECT ... FOR UPDATE on the property row
-// inside a transaction to make the gate + delete atomic. That is deferred to
-// Phase 5 when operational tooling is in scope.
+// The active-listing gate and the soft-delete must be atomic. We lock the target
+// property row (SELECT ... FOR UPDATE), then check for active listings and set
+// deleted_at in the same transaction. This closes the race where a concurrent
+// listing mutation could slip between a standalone pre-check and the delete.
 
 export const deleteProperty = async (ownerId, propertyId) => {
 	await assertOwnerVerified(ownerId);
 
-	// Gate: reject if any active listing exists under this property
-	const { rows: listingRows } = await pool.query(
-		`SELECT 1
-     FROM listings
-     WHERE property_id = $1
-       AND status      = 'active'
-       AND deleted_at IS NULL
-     LIMIT 1`,
-		[propertyId],
-	);
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
 
-	if (listingRows.length) {
-		throw new AppError("Deactivate or remove all active listings before deleting this property", 409);
-	}
+		// Lock target property row to prevent concurrent mutations while we
+		// verify listing state and perform the soft-delete.
+		const { rows: propertyRows } = await client.query(
+			`SELECT property_id
+       FROM properties
+       WHERE property_id = $1
+         AND owner_id    = $2
+         AND deleted_at IS NULL
+       FOR UPDATE`,
+			[propertyId, ownerId],
+		);
 
-	const { rowCount } = await pool.query(
-		`UPDATE properties
-     SET deleted_at = NOW()
-     WHERE property_id = $1
-       AND owner_id    = $2
-       AND deleted_at IS NULL`,
-		[propertyId, ownerId],
-	);
+		if (!propertyRows.length) {
+			throw new AppError("Property not found", 404);
+		}
 
-	if (rowCount === 0) {
-		throw new AppError("Property not found", 404);
+		const { rows: listingRows } = await client.query(
+			`SELECT 1
+       FROM listings
+       WHERE property_id = $1
+         AND status      = 'active'
+         AND deleted_at IS NULL
+       LIMIT 1`,
+			[propertyId],
+		);
+
+		if (listingRows.length) {
+			throw new AppError("Deactivate or remove all active listings before deleting this property", 409);
+		}
+
+		await client.query(
+			`UPDATE properties
+       SET deleted_at = NOW()
+       WHERE property_id = $1`,
+			[propertyId],
+		);
+
+		await client.query("COMMIT");
+	} catch (err) {
+		await client.query("ROLLBACK");
+		throw err;
+	} finally {
+		client.release();
 	}
 
 	logger.info({ ownerId, propertyId }, "Property soft-deleted");

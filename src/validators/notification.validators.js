@@ -35,7 +35,7 @@ export const getFeedSchema = z.object({
 				}, z.boolean())
 				.optional(),
 
-			cursorTime: z.string().optional(),
+			cursorTime: z.iso.datetime({ offset: true }).optional(),
 			cursorId: z.uuid({ error: "cursorId must be a valid UUID" }).optional(),
 			limit: z.coerce.number().int().min(1).max(100).default(20),
 		})

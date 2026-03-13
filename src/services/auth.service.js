@@ -82,6 +82,8 @@ const storeRefreshToken = async (userId, refreshToken) => {
 
 const OTP_TTL = 600; // 10 minutes in seconds
 const OTP_MAX_ATTEMPTS = 5;
+const OTP_IP_WINDOW_SECONDS = 15 * 60;
+const OTP_IP_MAX_ATTEMPTS = 50;
 
 const generateOtp = () =>
 	// crypto.randomInt is cryptographically secure — Math.random() is not.
@@ -326,9 +328,32 @@ export const sendOtp = async (userId, email) => {
 	logger.info({ userId }, "OTP sent");
 };
 
-export const verifyOtp = async (userId, otp) => {
+export const verifyOtp = async (userId, otp, ipAddress) => {
 	const attemptsKey = `otpAttempts:${userId}`;
 	const otpKey = `otp:${userId}`;
+	const ipAttemptsKey = `ipAttempts:${ipAddress}`;
+
+	// Coarse IP limiter runs first to stop distributed parallel attempts before
+	// the per-user OTP counter is checked.
+	let ipAttempts;
+	try {
+		ipAttempts = await redis.incr(ipAttemptsKey);
+
+		// Ensure limiter keys always have TTL. If INCR succeeds but EXPIRE failed in
+		// a prior request, restore TTL now to avoid permanent lockouts.
+		const ttl = await redis.ttl(ipAttemptsKey);
+		if (ttl < 0) {
+			await redis.expire(ipAttemptsKey, OTP_IP_WINDOW_SECONDS);
+		}
+	} catch (err) {
+		logger.error({ err: err.message, userId, ipAddress }, "OTP verify IP limiter failed closed");
+		throw new AppError("OTP verification is temporarily unavailable", 429);
+	}
+
+	if (ipAttempts > OTP_IP_MAX_ATTEMPTS) {
+		logger.warn({ userId, ipAddress, ipAttempts }, "OTP verify IP rate limit exceeded");
+		throw new AppError("Too many OTP verification attempts from this IP — please wait 15 minutes", 429);
+	}
 
 	// Check attempt count before doing anything else
 	const attempts = parseInt((await redis.get(attemptsKey)) ?? "0", 10);
