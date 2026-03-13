@@ -95,7 +95,7 @@ export const sendOtp = async (req, res, next) => {
 
 export const verifyOtp = async (req, res, next) => {
 	try {
-		await authService.verifyOtp(req.user.userId, req.body.otp);
+		await authService.verifyOtp(req.user.userId, req.body.otp, req.ip);
 		res.json({ status: "success", message: "Email verified successfully" });
 	} catch (err) {
 		next(err);
