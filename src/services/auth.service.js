@@ -338,7 +338,11 @@ export const verifyOtp = async (userId, otp, ipAddress) => {
 	let ipAttempts;
 	try {
 		ipAttempts = await redis.incr(ipAttemptsKey);
-		if (ipAttempts === 1) {
+
+		// Ensure limiter keys always have TTL. If INCR succeeds but EXPIRE failed in
+		// a prior request, restore TTL now to avoid permanent lockouts.
+		const ttl = await redis.ttl(ipAttemptsKey);
+		if (ttl < 0) {
 			await redis.expire(ipAttemptsKey, OTP_IP_WINDOW_SECONDS);
 		}
 	} catch (err) {
