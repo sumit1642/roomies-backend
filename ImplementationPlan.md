@@ -153,7 +153,7 @@ Keyset cursor. Fetch `limit + 1` rows to detect next page. Cursor fields must bo
 ### Security Decisions (Permanent)
 - `DUMMY_HASH` in `auth.service.js` is a pre-computed bcrypt hash of `"dummy"` at 10 rounds. **Never remove. Never replace with a runtime `bcrypt.hash()` call.**
 - `INACTIVE_STATUSES` is module-scope, allocated once.
-- OTP verify has no IP rate limiter — service-layer attempt counter (`otpAttempts:{userId}`, max 5) is the only throttle.
+- OTP verify now applies dual throttles: IP-level Redis counter (`ipAttempts:{ip}`, 50/15min, checked first, fail-closed with logging) and service-layer per-user counter (`otpAttempts:{userId}`, max 5).
 - Silent refresh is cookie-only — expired Bearer token always 401.
 - `404` not `403` for party-membership checks on connections and ratings — never confirm resource existence to non-parties.
 
@@ -532,7 +532,7 @@ Cron jobs via `node-cron`, registered and started in `server.js` alongside the e
 
 `email-queue` BullMQ worker introduced here — same factory pattern as `notificationWorker.js`. 5-attempt exponential backoff. Concurrency appropriate to SMTP provider rate limits. Email jobs enqueued from the `expiryWarning` cron job and any future transactional email needs.
 
-**`deleteProperty` hardening (carry forward from Phase 2):** The current implementation checks for active listings before soft-delete but does not wrap both in a transaction, creating a small race window. Phase 5 should harden this with `SELECT ... FOR UPDATE` on the property row inside the transaction.
+**`deleteProperty` hardening:** Implemented in service layer. Active-listing check and property soft-delete now run inside one transaction with `SELECT ... FOR UPDATE` row lock on the target property before listing checks.
 
 ### `phase5/admin`
 
