@@ -60,6 +60,12 @@ const notificationQueue = new Queue(NOTIFICATION_QUEUE_NAME, {
 		password: _redisConn.password || undefined,
 		tls: _redisConn.protocol === "rediss:" ? {} : undefined,
 	},
+	defaultJobOptions: {
+		attempts: 5,
+		backoff: { type: "exponential", delay: 2000 },
+		removeOnComplete: 100,
+		removeOnFail: 200,
+	},
 });
 
 // ─── Internal helper: enqueue notification (fire-and-forget) ─────────────────
@@ -164,6 +170,11 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 // exist but don't belong to the caller return 403 (unlike connections, which
 // use 404 for both — interest requests are more discoverable so 403 is safe).
 export const transitionInterestRequest = async (callerId, interestRequestId, targetStatus) => {
+	const ALLOWED_STATUSES = new Set(["accepted", "declined", "withdrawn"]);
+	if (!ALLOWED_STATUSES.has(targetStatus)) {
+		throw new AppError(`Invalid target status: ${targetStatus}`, 400);
+	}
+
 	if (targetStatus === "accepted") {
 		return _acceptInterestRequest(callerId, interestRequestId);
 	}
@@ -270,6 +281,7 @@ const _acceptInterestRequest = async (posterId, interestRequestId) => {
          l.poster_id,
          l.connection_type,
          u_poster.phone AS poster_phone,
+         u_student.phone AS student_phone,
          COALESCE(sp.full_name, u_student.email) AS student_name
        FROM interest_requests ir
        JOIN listings l
@@ -353,8 +365,8 @@ const _acceptInterestRequest = async (posterId, interestRequestId) => {
 		// Build a WhatsApp deep-link so the poster can contact the student
 		// immediately. The link is returned in the response body; it is not stored.
 		const whatsAppLink =
-			ir.poster_phone ?
-				_buildWhatsAppLink(ir.poster_phone, `Hi ${ir.student_name}, your interest request has been accepted!`)
+			ir.student_phone ?
+				_buildWhatsAppLink(ir.student_phone, `Hi ${ir.student_name}, your interest request has been accepted!`)
 			:	null;
 
 		return {

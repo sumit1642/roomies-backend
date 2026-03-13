@@ -27,7 +27,13 @@ import { z } from "zod";
 export const getFeedSchema = z.object({
 	query: z
 		.object({
-			isRead: z.coerce.boolean().optional(),
+			isRead: z
+				.preprocess((val) => {
+					if (typeof val === "string") return val.toLowerCase() === "true";
+					if (typeof val === "number") return Boolean(val);
+					return val;
+				}, z.boolean())
+				.optional(),
 
 			cursorTime: z.string().optional(),
 			cursorId: z.uuid({ error: "cursorId must be a valid UUID" }).optional(),

@@ -68,27 +68,37 @@ export const submitRatingSchema = z.object({
 			.number()
 			.int()
 			.min(1, { error: "cleanlinessScore must be between 1 and 5" })
-			.max(5)
+			.max(5, { error: "cleanlinessScore must be between 1 and 5" })
 			.optional(),
 
 		communicationScore: z.coerce
 			.number()
 			.int()
 			.min(1, { error: "communicationScore must be between 1 and 5" })
-			.max(5)
+			.max(5, { error: "communicationScore must be between 1 and 5" })
 			.optional(),
 
 		reliabilityScore: z.coerce
 			.number()
 			.int()
 			.min(1, { error: "reliabilityScore must be between 1 and 5" })
-			.max(5)
+			.max(5, { error: "reliabilityScore must be between 1 and 5" })
 			.optional(),
 
-		valueScore: z.coerce.number().int().min(1, { error: "valueScore must be between 1 and 5" }).max(5).optional(),
+		valueScore: z.coerce
+			.number()
+			.int()
+			.min(1, { error: "valueScore must be between 1 and 5" })
+			.max(5, { error: "valueScore must be between 1 and 5" })
+			.optional(),
 
 		// Maps to review_text in the DB. Optional, max 2000 characters.
-		comment: z.string().max(2000).optional(),
+		comment: z
+			.string()
+			.trim()
+			.min(1, { message: "comment cannot be empty" })
+			.max(2000, { message: "comment must not exceed 2000 characters" })
+			.optional(),
 	}),
 });
 

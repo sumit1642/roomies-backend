@@ -12,7 +12,6 @@
 -- statement idempotent.
 -- =============================================================================
 
-
 -- =============================================================================
 -- SECTION 1 — EXTENSIONS
 -- PostgreSQL ships lean and lets you opt into extra capabilities via
@@ -28,7 +27,6 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 -- for every primary key. UUIDs don't reveal how many rows exist and
 -- can't be guessed by incrementing a number.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
 
 -- =============================================================================
 -- SECTION 2 — ENUMS
@@ -154,7 +152,6 @@ CREATE TYPE amenity_category_enum AS ENUM (
     'comfort'    -- AC, gym, common room, housekeeping
 );
 
-
 -- =============================================================================
 -- SECTION 3 — SHARED TRIGGER FUNCTIONS
 -- Logic lives in a separate reusable FUNCTION first, then a TRIGGER attaches
@@ -192,7 +189,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-
 -- =============================================================================
 -- ZONE 1 — IDENTITY ZONE
 -- Answers: who is this person and how much do we trust them?
@@ -203,7 +199,6 @@ $$ LANGUAGE plpgsql;
 -- Creation order:
 -- institutions → users → user_roles → profile tables → preferences
 -- =============================================================================
-
 
 -- -----------------------------------------------------------------------------
 -- TABLE: institutions
@@ -219,33 +214,30 @@ CREATE TABLE IF NOT EXISTS institutions
     city           VARCHAR(100) NOT NULL,
     state          VARCHAR(100) NOT NULL,
 
-    -- The domain portion of a college email, e.g. 'iitb.ac.in'.
-    -- No inline UNIQUE here — see the partial index below for why.
-    email_domain   VARCHAR(100) NOT NULL,
+-- The domain portion of a college email, e.g. 'iitb.ac.in'.
+-- No inline UNIQUE here — see the partial index below for why.
+email_domain VARCHAR(100) NOT NULL,
 
-    -- VARCHAR instead of enum because India has too many institution
-    -- types to enumerate: deemed university, autonomous college, IIT,
-    -- NIT, IIIT, private university, etc.
-    type           VARCHAR(50),
+-- VARCHAR instead of enum because India has too many institution
+-- types to enumerate: deemed university, autonomous college, IIT,
+-- NIT, IIIT, private university, etc.
+type VARCHAR(50),
+created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-
-    -- NULL means the record is active. A timestamp means it was deleted
-    -- at that point in time but the row is kept for historical integrity.
-    deleted_at     TIMESTAMPTZ
-);
+-- NULL means the record is active. A timestamp means it was deleted
+-- at that point in time but the row is kept for historical integrity.
+deleted_at TIMESTAMPTZ );
 
 -- A partial unique index only enforces uniqueness on rows WHERE deleted_at IS NULL.
 -- A domain can be re-used after the old institution is soft-deleted — correct behavior.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_institutions_email_domain
-    ON institutions (email_domain)
-    WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_institutions_email_domain ON institutions (email_domain)
+WHERE
+    deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_institutions_updated_at
     BEFORE UPDATE ON institutions
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 
 -- -----------------------------------------------------------------------------
 -- TABLE: users
@@ -258,25 +250,23 @@ CREATE TABLE IF NOT EXISTS users
 (
     user_id           UUID                PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    -- Nullable because a user who signs in via Google OAuth for the first time
-    -- may not provide an email immediately. No inline UNIQUE — soft-deleted
-    -- users should be able to re-register.
-    email             VARCHAR(255),
-    phone             VARCHAR(20),
+-- Nullable because a user who signs in via Google OAuth for the first time
+-- may not provide an email immediately. No inline UNIQUE — soft-deleted
+-- users should be able to re-register.
+email VARCHAR(255), phone VARCHAR(20),
 
-    -- NULL for OAuth-only users who have no password.
-    password_hash     VARCHAR(255),
+-- NULL for OAuth-only users who have no password.
+password_hash VARCHAR(255),
 
-    -- Stores the unique ID from Google's OAuth system.
-    google_id         VARCHAR(255),
+-- Stores the unique ID from Google's OAuth system.
+google_id VARCHAR(255),
+account_status account_status_enum NOT NULL DEFAULT 'active',
+is_email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+is_phone_verified BOOLEAN NOT NULL DEFAULT FALSE,
 
-    account_status    account_status_enum NOT NULL DEFAULT 'active',
-    is_email_verified BOOLEAN             NOT NULL DEFAULT FALSE,
-    is_phone_verified BOOLEAN             NOT NULL DEFAULT FALSE,
-
-    -- Denormalized rating cache — updated via trigger whenever a rating is
-    -- submitted. Trading storage for query speed on search result cards.
-    average_rating    NUMERIC(3, 2)       NOT NULL DEFAULT 0.00,
+-- Denormalized rating cache — updated via trigger whenever a rating is
+-- submitted. Trading storage for query speed on search result cards.
+average_rating    NUMERIC(3, 2)       NOT NULL DEFAULT 0.00,
     rating_count      INTEGER             NOT NULL DEFAULT 0,
 
     created_at        TIMESTAMPTZ         NOT NULL DEFAULT NOW(),
@@ -287,26 +277,28 @@ CREATE TABLE IF NOT EXISTS users
 -- Partial unique indexes covering only non-deleted, non-null rows.
 -- Multiple NULL emails are allowed simultaneously (OAuth users without email)
 -- because in SQL, NULL != NULL.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email
-    ON users (email)
-    WHERE email IS NOT NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (email)
+WHERE
+    email IS NOT NULL
+    AND deleted_at IS NULL;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone
-    ON users (phone)
-    WHERE phone IS NOT NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users (phone)
+WHERE
+    phone IS NOT NULL
+    AND deleted_at IS NULL;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id
-    ON users (google_id)
-    WHERE google_id IS NOT NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users (google_id)
+WHERE
+    google_id IS NOT NULL
+    AND deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_users_account_status
-    ON users (account_status)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_users_account_status ON users (account_status)
+WHERE
+    deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_users_updated_at
     BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 
 -- -----------------------------------------------------------------------------
 -- TABLE: user_roles
@@ -319,16 +311,13 @@ CREATE TABLE IF NOT EXISTS user_roles
     role_name   role_enum   NOT NULL,
     assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    -- Composite PK: (user_id + role_name) must be unique.
-    -- PostgreSQL auto-creates an index on this, so "what roles does user X have?"
-    -- is already indexed.
-    PRIMARY KEY (user_id, role_name)
-);
+-- Composite PK: (user_id + role_name) must be unique.
+-- PostgreSQL auto-creates an index on this, so "what roles does user X have?"
+-- is already indexed.
+PRIMARY KEY (user_id, role_name) );
 
 -- Reverse index for the admin query "give me all users with the pg_owner role".
-CREATE INDEX IF NOT EXISTS idx_user_roles_role_name
-    ON user_roles (role_name);
-
+CREATE INDEX IF NOT EXISTS idx_user_roles_role_name ON user_roles (role_name);
 
 -- -----------------------------------------------------------------------------
 -- TABLE: student_profiles
@@ -339,26 +328,23 @@ CREATE TABLE IF NOT EXISTS student_profiles
 (
     profile_id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    -- UNIQUE here is what makes this a one-to-one relationship with users.
-    user_id             UUID         NOT NULL UNIQUE
-                                     REFERENCES users (user_id) ON DELETE RESTRICT,
+-- UNIQUE here is what makes this a one-to-one relationship with users.
+user_id UUID NOT NULL UNIQUE REFERENCES users (user_id) ON DELETE RESTRICT,
 
-    -- ON DELETE SET NULL: if an institution row is deleted, we null out this
-    -- reference rather than deleting the student's profile along with it.
-    institution_id      UUID         REFERENCES institutions (institution_id)
-                                     ON DELETE SET NULL,
+-- ON DELETE SET NULL: if an institution row is deleted, we null out this
+-- reference rather than deleting the student's profile along with it.
+institution_id UUID REFERENCES institutions (institution_id) ON DELETE SET NULL,
+full_name VARCHAR(255) NOT NULL,
+date_of_birth DATE,
+gender gender_enum,
+profile_photo_url TEXT,
+bio TEXT,
+course VARCHAR(255),
+year_of_study SMALLINT,
 
-    full_name           VARCHAR(255) NOT NULL,
-    date_of_birth       DATE,
-    gender              gender_enum,
-    profile_photo_url   TEXT,
-    bio                 TEXT,
-    course              VARCHAR(255),
-    year_of_study       SMALLINT,
-
-    -- We never store the raw 12-digit Aadhaar number. The UIDAI API returns a
-    -- tokenized reference after OTP verification — that token is all we store.
-    is_aadhaar_verified BOOLEAN      NOT NULL DEFAULT FALSE,
+-- We never store the raw 12-digit Aadhaar number. The UIDAI API returns a
+-- tokenized reference after OTP verification — that token is all we store.
+is_aadhaar_verified BOOLEAN      NOT NULL DEFAULT FALSE,
     aadhaar_reference   VARCHAR(255) UNIQUE,
 
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -366,18 +352,17 @@ CREATE TABLE IF NOT EXISTS student_profiles
     deleted_at          TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_student_profiles_user_id
-    ON student_profiles (user_id)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_student_profiles_user_id ON student_profiles (user_id)
+WHERE
+    deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_student_profiles_institution
-    ON student_profiles (institution_id)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_student_profiles_institution ON student_profiles (institution_id)
+WHERE
+    deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_student_profiles_updated_at
     BEFORE UPDATE ON student_profiles
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 
 -- -----------------------------------------------------------------------------
 -- TABLE: pg_owner_profiles
@@ -385,6 +370,7 @@ CREATE OR REPLACE TRIGGER trg_student_profiles_updated_at
 -- documents and wait for manual admin review.
 -- State machine: unverified → pending → verified (or rejected).
 -- -----------------------------------------------------------------------------
+
 CREATE TABLE IF NOT EXISTS pg_owner_profiles
 (
     profile_id           UUID                     PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -395,9 +381,9 @@ CREATE TABLE IF NOT EXISTS pg_owner_profiles
     owner_full_name      VARCHAR(255)             NOT NULL,
     business_description TEXT,
 
-    -- Public-facing contact number shown on listings — deliberately separate
-    -- from the personal phone stored in users so owners control what's visible.
-    business_phone       VARCHAR(20),
+-- Public-facing contact number shown on listings — deliberately separate
+-- from the personal phone stored in users so owners control what's visible.
+business_phone       VARCHAR(20),
     operating_since      SMALLINT,
 
     verification_status  verification_status_enum NOT NULL DEFAULT 'unverified',
@@ -410,19 +396,18 @@ CREATE TABLE IF NOT EXISTS pg_owner_profiles
     deleted_at           TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_pg_owner_profiles_user_id
-    ON pg_owner_profiles (user_id)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_pg_owner_profiles_user_id ON pg_owner_profiles (user_id)
+WHERE
+    deleted_at IS NULL;
 
 -- Admins query by verification_status constantly to work their review queue.
-CREATE INDEX IF NOT EXISTS idx_pg_owner_profiles_verification_status
-    ON pg_owner_profiles (verification_status)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_pg_owner_profiles_verification_status ON pg_owner_profiles (verification_status)
+WHERE
+    deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_pg_owner_profiles_updated_at
     BEFORE UPDATE ON pg_owner_profiles
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 
 -- -----------------------------------------------------------------------------
 -- TABLE: user_preferences
@@ -435,14 +420,14 @@ CREATE TABLE IF NOT EXISTS user_preferences
     preference_id    UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id          UUID         NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
 
-    -- Example keys:   'smoking', 'food_habit', 'sleep_schedule', 'alcohol',
-    --                 'cleanliness_level', 'noise_tolerance', 'guest_policy',
-    --                 'has_pets', 'pet_allergies', 'has_vehicle'
-    preference_key   VARCHAR(100) NOT NULL,
+-- Example keys:   'smoking', 'food_habit', 'sleep_schedule', 'alcohol',
+--                 'cleanliness_level', 'noise_tolerance', 'guest_policy',
+--                 'has_pets', 'pet_allergies', 'has_vehicle'
+preference_key VARCHAR(100) NOT NULL,
 
-    -- Example values: 'non_smoker', 'vegetarian', 'night_owl', 'early_bird',
-    --                 'okay', 'not_okay', '3' (for a 1–5 scale)
-    preference_value VARCHAR(100) NOT NULL,
+-- Example values: 'non_smoker', 'vegetarian', 'night_owl', 'early_bird',
+--                 'okay', 'not_okay', '3' (for a 1–5 scale)
+preference_value VARCHAR(100) NOT NULL,
 
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -450,18 +435,18 @@ CREATE TABLE IF NOT EXISTS user_preferences
     CONSTRAINT uq_user_preference UNIQUE (user_id, preference_key)
 );
 
-CREATE INDEX IF NOT EXISTS idx_user_preferences_user_id
-    ON user_preferences (user_id);
+CREATE INDEX IF NOT EXISTS idx_user_preferences_user_id ON user_preferences (user_id);
 
 -- This composite index directly powers compatibility scoring. The scoring query
 -- JOINs this table against listing_preferences on both key AND value together.
-CREATE INDEX IF NOT EXISTS idx_user_preferences_key_value
-    ON user_preferences (preference_key, preference_value);
+CREATE INDEX IF NOT EXISTS idx_user_preferences_key_value ON user_preferences (
+    preference_key,
+    preference_value
+);
 
 CREATE OR REPLACE TRIGGER trg_user_preferences_updated_at
     BEFORE UPDATE ON user_preferences
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 
 -- -----------------------------------------------------------------------------
 -- TABLE: verification_requests
@@ -469,34 +454,28 @@ CREATE OR REPLACE TRIGGER trg_user_preferences_updated_at
 -- A separate table (rather than just columns on the profile) means we always
 -- have a full history of every submission and every decision.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS verification_requests
-(
-    request_id    UUID                     PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID                     NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
-
-    document_type document_type_enum       NOT NULL,
-    document_url  TEXT                     NOT NULL,
-
-    status        verification_status_enum NOT NULL DEFAULT 'pending',
-    admin_notes   TEXT,
-
-    submitted_at  TIMESTAMPTZ              NOT NULL DEFAULT NOW(),
-    reviewed_at   TIMESTAMPTZ,
-    reviewed_by   UUID                     REFERENCES users (user_id) ON DELETE SET NULL,
-
-    deleted_at    TIMESTAMPTZ
+CREATE TABLE IF NOT EXISTS verification_requests (
+    request_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
+    user_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
+    document_type document_type_enum NOT NULL,
+    document_url TEXT NOT NULL,
+    status verification_status_enum NOT NULL DEFAULT 'pending',
+    admin_notes TEXT,
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reviewed_at TIMESTAMPTZ,
+    reviewed_by UUID REFERENCES users (user_id) ON DELETE SET NULL,
+    deleted_at TIMESTAMPTZ
 );
 
 -- Composite index powers the admin queue view:
 -- "show me all pending requests ordered by oldest first."
-CREATE INDEX IF NOT EXISTS idx_verification_requests_status_submitted
-    ON verification_requests (status, submitted_at)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_verification_requests_status_submitted ON verification_requests (status, submitted_at)
+WHERE
+    deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_verification_requests_user_id
-    ON verification_requests (user_id)
-    WHERE deleted_at IS NULL;
-
+CREATE INDEX IF NOT EXISTS idx_verification_requests_user_id ON verification_requests (user_id)
+WHERE
+    deleted_at IS NULL;
 
 -- =============================================================================
 -- ZONE 2 — LISTINGS ZONE
@@ -506,7 +485,6 @@ CREATE INDEX IF NOT EXISTS idx_verification_requests_user_id
 --
 -- Creation order: amenities → properties → junction tables → listings → children
 -- =============================================================================
-
 
 -- -----------------------------------------------------------------------------
 -- TABLE: amenities
@@ -520,9 +498,9 @@ CREATE TABLE IF NOT EXISTS amenities
     name       VARCHAR(100)          NOT NULL UNIQUE,
     category   amenity_category_enum NOT NULL,
 
-    -- Stores a string like 'wifi-icon' that maps to a React icon component.
-    -- Keeping this in the DB means the frontend never needs a hardcoded map.
-    icon_name  VARCHAR(100),
+-- Stores a string like 'wifi-icon' that maps to a React icon component.
+-- Keeping this in the DB means the frontend never needs a hardcoded map.
+icon_name  VARCHAR(100),
 
     created_at TIMESTAMPTZ           NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ           NOT NULL DEFAULT NOW()
@@ -532,13 +510,13 @@ CREATE OR REPLACE TRIGGER trg_amenities_updated_at
     BEFORE UPDATE ON amenities
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
-
 -- -----------------------------------------------------------------------------
 -- TABLE: properties
 -- The physical PG or hostel building. Only PG owners create these.
 -- A property is the parent; listings (individual rooms) are children.
 -- Address split into separate columns for independent filtering and indexing.
 -- -----------------------------------------------------------------------------
+
 CREATE TABLE IF NOT EXISTS properties
 (
     property_id    UUID                 PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -554,20 +532,18 @@ CREATE TABLE IF NOT EXISTS properties
     landmark       VARCHAR(255),
     pincode        VARCHAR(10),
 
-    -- Plain decimal lat/lng for display purposes (shown in the UI, passed to maps).
-    latitude       NUMERIC(10, 7),
-    longitude      NUMERIC(10, 7),
+-- Plain decimal lat/lng for display purposes (shown in the UI, passed to maps).
+latitude NUMERIC(10, 7), longitude NUMERIC(10, 7),
 
-    -- PostGIS geometry column used exclusively for spatial queries like
-    -- "find properties within 3km". Auto-synced with lat/lng via trigger.
-    location       GEOMETRY(Point, 4326),
+-- PostGIS geometry column used exclusively for spatial queries like
+-- "find properties within 3km". Auto-synced with lat/lng via trigger.
+location GEOMETRY (POINT, 4326),
+house_rules TEXT,
+total_rooms SMALLINT,
+status property_status_enum NOT NULL DEFAULT 'active',
 
-    house_rules    TEXT,
-    total_rooms    SMALLINT,
-    status         property_status_enum NOT NULL DEFAULT 'active',
-
-    -- Denormalized rating cache — same pattern as users.average_rating.
-    average_rating NUMERIC(3, 2)        NOT NULL DEFAULT 0.00,
+-- Denormalized rating cache — same pattern as users.average_rating.
+average_rating NUMERIC(3, 2)        NOT NULL DEFAULT 0.00,
     rating_count   INTEGER              NOT NULL DEFAULT 0,
 
     created_at     TIMESTAMPTZ          NOT NULL DEFAULT NOW(),
@@ -577,21 +553,22 @@ CREATE TABLE IF NOT EXISTS properties
 
 -- GiST index is required by PostGIS for geometry columns.
 -- A regular B-Tree index cannot index spatial data.
-CREATE INDEX IF NOT EXISTS idx_properties_location
-    ON properties USING GIST (location)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_properties_location ON properties USING GIST (location)
+WHERE
+    deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_properties_city
-    ON properties (city)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_properties_city ON properties (city)
+WHERE
+    deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_properties_owner_id
-    ON properties (owner_id)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_properties_owner_id ON properties (owner_id)
+WHERE
+    deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_properties_status
-    ON properties (status)
-    WHERE status = 'active' AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_properties_status ON properties (status)
+WHERE
+    status = 'active'
+    AND deleted_at IS NULL;
 
 -- Fires only when latitude or longitude changes, recomputes the geometry.
 CREATE OR REPLACE TRIGGER trg_properties_sync_location
@@ -603,7 +580,6 @@ CREATE OR REPLACE TRIGGER trg_properties_updated_at
     BEFORE UPDATE ON properties
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
-
 -- -----------------------------------------------------------------------------
 -- TABLE: property_amenities
 -- Junction table: many-to-many between properties and amenities.
@@ -614,17 +590,15 @@ CREATE TABLE IF NOT EXISTS property_amenities
     -- CASCADE: if a property is deleted, its amenity links go with it.
     property_id UUID NOT NULL REFERENCES properties (property_id) ON DELETE CASCADE,
 
-    -- RESTRICT: prevents deleting an amenity that is still in use.
-    amenity_id  UUID NOT NULL REFERENCES amenities (amenity_id) ON DELETE RESTRICT,
+-- RESTRICT: prevents deleting an amenity that is still in use.
+amenity_id  UUID NOT NULL REFERENCES amenities (amenity_id) ON DELETE RESTRICT,
 
     PRIMARY KEY (property_id, amenity_id)
 );
 
 -- The PK index covers "what amenities does this property have?".
 -- This reverse index covers "which properties have wifi?" — used in search filters.
-CREATE INDEX IF NOT EXISTS idx_property_amenities_amenity_id
-    ON property_amenities (amenity_id);
-
+CREATE INDEX IF NOT EXISTS idx_property_amenities_amenity_id ON property_amenities (amenity_id);
 
 -- -----------------------------------------------------------------------------
 -- TABLE: listings
@@ -639,36 +613,33 @@ CREATE TABLE IF NOT EXISTS listings
     listing_id              UUID                PRIMARY KEY DEFAULT gen_random_uuid(),
     posted_by               UUID                NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
 
-    -- NULL = student listing.  UUID = PG owner's room under a property.
-    property_id             UUID                REFERENCES properties (property_id) ON DELETE RESTRICT,
+-- NULL = student listing.  UUID = PG owner's room under a property.
+property_id UUID REFERENCES properties (property_id) ON DELETE RESTRICT,
+listing_type listing_type_enum NOT NULL,
+title VARCHAR(255) NOT NULL,
+description TEXT,
 
-    listing_type            listing_type_enum   NOT NULL,
-    title                   VARCHAR(255)        NOT NULL,
-    description             TEXT,
+-- Stored in PAISE. Rs 8,500/month = 850000. Always divide by 100 before display.
+rent_per_month INTEGER NOT NULL,
+deposit_amount INTEGER NOT NULL DEFAULT 0,
+rent_includes_utilities BOOLEAN NOT NULL DEFAULT FALSE,
+is_negotiable BOOLEAN NOT NULL DEFAULT FALSE,
+room_type room_type_enum NOT NULL,
+bed_type bed_type_enum,
+total_capacity SMALLINT NOT NULL DEFAULT 1,
+current_occupants SMALLINT NOT NULL DEFAULT 0,
 
-    -- Stored in PAISE. Rs 8,500/month = 850000. Always divide by 100 before display.
-    rent_per_month          INTEGER             NOT NULL,
-    deposit_amount          INTEGER             NOT NULL DEFAULT 0,
-    rent_includes_utilities BOOLEAN             NOT NULL DEFAULT FALSE,
-    is_negotiable           BOOLEAN             NOT NULL DEFAULT FALSE,
+-- Prevents current_occupants from ever exceeding total_capacity.
+CONSTRAINT chk_occupancy CHECK (
+    current_occupants <= total_capacity
+),
+preferred_gender gender_enum,
+available_from DATE NOT NULL,
+available_until DATE,
 
-    room_type               room_type_enum      NOT NULL,
-    bed_type                bed_type_enum,
-
-    total_capacity          SMALLINT            NOT NULL DEFAULT 1,
-    current_occupants       SMALLINT            NOT NULL DEFAULT 0,
-
-    -- Prevents current_occupants from ever exceeding total_capacity.
-    CONSTRAINT chk_occupancy CHECK (current_occupants <= total_capacity),
-
-    preferred_gender        gender_enum,
-
-    available_from          DATE                NOT NULL,
-    available_until         DATE,
-
-    -- Address fields only populated for student listings. PG listings
-    -- inherit their location from the parent property row.
-    address_line            VARCHAR(500),
+-- Address fields only populated for student listings. PG listings
+-- inherit their location from the parent property row.
+address_line            VARCHAR(500),
     city                    VARCHAR(100)        NOT NULL,
     locality                VARCHAR(100),
     landmark                VARCHAR(255),
@@ -688,31 +659,34 @@ CREATE TABLE IF NOT EXISTS listings
     deleted_at              TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_listings_location
-    ON listings USING GIST (location)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_listings_location ON listings USING GIST (location)
+WHERE
+    deleted_at IS NULL;
 
 -- Composite index: city + status together because nearly every search query
 -- filters on both simultaneously.
-CREATE INDEX IF NOT EXISTS idx_listings_city_status
-    ON listings (city, status)
-    WHERE status = 'active' AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_listings_city_status ON listings (city, status)
+WHERE
+    status = 'active'
+    AND deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_listings_rent
-    ON listings (rent_per_month)
-    WHERE status = 'active' AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_listings_rent ON listings (rent_per_month)
+WHERE
+    status = 'active'
+    AND deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_listings_posted_by
-    ON listings (posted_by)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_listings_posted_by ON listings (posted_by)
+WHERE
+    deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_listings_property_id
-    ON listings (property_id)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_listings_property_id ON listings (property_id)
+WHERE
+    deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_listings_available_from
-    ON listings (available_from)
-    WHERE status = 'active' AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_listings_available_from ON listings (available_from)
+WHERE
+    status = 'active'
+    AND deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_listings_sync_location
     BEFORE INSERT OR UPDATE OF latitude, longitude
@@ -723,35 +697,31 @@ CREATE OR REPLACE TRIGGER trg_listings_updated_at
     BEFORE UPDATE ON listings
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
-
 -- -----------------------------------------------------------------------------
 -- TABLE: listing_photos
 -- Stores multiple photos per listing with one designated as the cover image.
 -- The partial unique index enforces at most one cover photo per listing at the
 -- database level — not just application layer.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS listing_photos
-(
-    photo_id      UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    listing_id    UUID        NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
-
-    photo_url     TEXT        NOT NULL,
-    is_cover      BOOLEAN     NOT NULL DEFAULT FALSE,
-    display_order SMALLINT    NOT NULL DEFAULT 0,
-
-    uploaded_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at    TIMESTAMPTZ
+CREATE TABLE IF NOT EXISTS listing_photos (
+    photo_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
+    listing_id UUID NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
+    photo_url TEXT NOT NULL,
+    is_cover BOOLEAN NOT NULL DEFAULT FALSE,
+    display_order SMALLINT NOT NULL DEFAULT 0,
+    uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_listing_photos_listing_id
-    ON listing_photos (listing_id)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_listing_photos_listing_id ON listing_photos (listing_id)
+WHERE
+    deleted_at IS NULL;
 
 -- Partial unique index: uniqueness is only enforced among rows where is_cover IS TRUE.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_photos_one_cover
-    ON listing_photos (listing_id)
-    WHERE is_cover = TRUE AND deleted_at IS NULL;
-
+CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_photos_one_cover ON listing_photos (listing_id)
+WHERE
+    is_cover = TRUE
+    AND deleted_at IS NULL;
 
 -- -----------------------------------------------------------------------------
 -- TABLE: listing_preferences
@@ -759,30 +729,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_photos_one_cover
 -- WANTS. Compatibility score = count of matching (key, value) pairs between
 -- user_preferences and listing_preferences.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS listing_preferences
-(
-    preference_id    UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    listing_id       UUID         NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
-
-    preference_key   VARCHAR(100) NOT NULL,
+CREATE TABLE IF NOT EXISTS listing_preferences (
+    preference_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
+    listing_id UUID NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
+    preference_key VARCHAR(100) NOT NULL,
     preference_value VARCHAR(100) NOT NULL,
-
-    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_listing_preference UNIQUE (listing_id, preference_key)
 );
 
-CREATE INDEX IF NOT EXISTS idx_listing_preferences_listing_id
-    ON listing_preferences (listing_id);
+CREATE INDEX IF NOT EXISTS idx_listing_preferences_listing_id ON listing_preferences (listing_id);
 
-CREATE INDEX IF NOT EXISTS idx_listing_preferences_key_value
-    ON listing_preferences (preference_key, preference_value);
+CREATE INDEX IF NOT EXISTS idx_listing_preferences_key_value ON listing_preferences (
+    preference_key,
+    preference_value
+);
 
 CREATE OR REPLACE TRIGGER trg_listing_preferences_updated_at
     BEFORE UPDATE ON listing_preferences
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 
 -- -----------------------------------------------------------------------------
 -- TABLE: listing_amenities
@@ -790,44 +756,36 @@ CREATE OR REPLACE TRIGGER trg_listing_preferences_updated_at
 -- attached bathroom even when other rooms in the same property don't.
 -- Separate from property_amenities which covers building-wide facilities.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS listing_amenities
-(
+CREATE TABLE IF NOT EXISTS listing_amenities (
     listing_id UUID NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
     amenity_id UUID NOT NULL REFERENCES amenities (amenity_id) ON DELETE RESTRICT,
-
     PRIMARY KEY (listing_id, amenity_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_listing_amenities_amenity_id
-    ON listing_amenities (amenity_id);
-
+CREATE INDEX IF NOT EXISTS idx_listing_amenities_amenity_id ON listing_amenities (amenity_id);
 
 -- -----------------------------------------------------------------------------
 -- TABLE: saved_listings
 -- The bookmark/shortlist feature. Composite PK prevents double-saving.
 -- Reverse index lets us show posters how many people saved their listing.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS saved_listings
-(
-    user_id    UUID        NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
-    listing_id UUID        NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
-
-    saved_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+CREATE TABLE IF NOT EXISTS saved_listings (
+    user_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
+    listing_id UUID NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
+    saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ,
-
     PRIMARY KEY (user_id, listing_id)
 );
 
 -- "Show me all listings I have saved" — forward lookup from user.
-CREATE INDEX IF NOT EXISTS idx_saved_listings_user_id
-    ON saved_listings (user_id)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_saved_listings_user_id ON saved_listings (user_id)
+WHERE
+    deleted_at IS NULL;
 
 -- "How many users saved this listing?" — reverse lookup from listing.
-CREATE INDEX IF NOT EXISTS idx_saved_listings_listing_id
-    ON saved_listings (listing_id)
-    WHERE deleted_at IS NULL;
-
+CREATE INDEX IF NOT EXISTS idx_saved_listings_listing_id ON saved_listings (listing_id)
+WHERE
+    deleted_at IS NULL;
 
 -- =============================================================================
 -- ZONE 3 — INTERACTION ZONE
@@ -846,7 +804,6 @@ CREATE INDEX IF NOT EXISTS idx_saved_listings_listing_id
 -- Creation order: interest_requests → connections → notifications
 -- =============================================================================
 
-
 -- -----------------------------------------------------------------------------
 -- TABLE: interest_requests
 -- Created when a user taps "I'm interested" on a listing.
@@ -859,14 +816,14 @@ CREATE TABLE IF NOT EXISTS interest_requests
 (
     request_id  UUID                 PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    -- The user who saw the listing and expressed interest.
-    sender_id   UUID                 NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
+-- The user who saw the listing and expressed interest.
+sender_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
 
-    -- The listing they're interested in.
-    listing_id  UUID                 NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
+-- The listing they're interested in.
+listing_id UUID NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
 
-    -- Optional intro message: "Hi, I'm a 3rd year CS student, non-smoker..."
-    message     TEXT,
+-- Optional intro message: "Hi, I'm a 3rd year CS student, non-smoker..."
+message     TEXT,
 
     status      request_status_enum  NOT NULL DEFAULT 'pending',
 
@@ -877,24 +834,24 @@ CREATE TABLE IF NOT EXISTS interest_requests
 
 -- Prevents a user from spamming the same listing with multiple active requests.
 -- The partial index only covers rows where status is pending or accepted.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_interest_requests_no_duplicates
-    ON interest_requests (sender_id, listing_id)
-    WHERE status IN ('pending', 'accepted') AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_interest_requests_no_duplicates ON interest_requests (sender_id, listing_id)
+WHERE
+    status IN ('pending', 'accepted')
+    AND deleted_at IS NULL;
 
 -- Used to load "all requests for this listing" on the poster's dashboard.
-CREATE INDEX IF NOT EXISTS idx_interest_requests_listing_id
-    ON interest_requests (listing_id, status)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_interest_requests_listing_id ON interest_requests (listing_id, status)
+WHERE
+    deleted_at IS NULL;
 
 -- Used to load "all requests I have sent" on the sender's dashboard.
-CREATE INDEX IF NOT EXISTS idx_interest_requests_sender_id
-    ON interest_requests (sender_id, status)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_interest_requests_sender_id ON interest_requests (sender_id, status)
+WHERE
+    deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_interest_requests_updated_at
     BEFORE UPDATE ON interest_requests
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 
 -- -----------------------------------------------------------------------------
 -- TABLE: connections
@@ -915,24 +872,22 @@ CREATE TABLE IF NOT EXISTS connections
 (
     connection_id         UUID                     PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    -- For student_roommate: initiator = whoever sent the interest request.
-    -- For pg_stay: initiator = student, counterpart = PG owner.
-    initiator_id          UUID                     NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
-    counterpart_id        UUID                     NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
+-- For student_roommate: initiator = whoever sent the interest request.
+-- For pg_stay: initiator = student, counterpart = PG owner.
+initiator_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
+counterpart_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
 
-    -- The listing that brought these two parties together. Nullable for
-    -- admin-created connections.
-    listing_id            UUID                     REFERENCES listings (listing_id) ON DELETE SET NULL,
+-- The listing that brought these two parties together. Nullable for
+-- admin-created connections.
+listing_id UUID REFERENCES listings (listing_id) ON DELETE SET NULL,
+connection_type connection_type_enum NOT NULL,
 
-    connection_type       connection_type_enum     NOT NULL,
+-- Actual dates of the real-world interaction.
+-- A 6-month stay is more credible signal than a 2-day visit.
+start_date DATE, end_date DATE,
 
-    -- Actual dates of the real-world interaction.
-    -- A 6-month stay is more credible signal than a 2-day visit.
-    start_date            DATE,
-    end_date              DATE,
-
-    -- Independent confirmation flags — each party flips their own boolean.
-    initiator_confirmed   BOOLEAN                  NOT NULL DEFAULT FALSE,
+-- Independent confirmation flags — each party flips their own boolean.
+initiator_confirmed   BOOLEAN                  NOT NULL DEFAULT FALSE,
     counterpart_confirmed BOOLEAN                  NOT NULL DEFAULT FALSE,
 
     confirmation_status   confirmation_status_enum NOT NULL DEFAULT 'pending',
@@ -946,23 +901,28 @@ CREATE TABLE IF NOT EXISTS connections
 
 -- Used to check "does a confirmed connection exist between these two users?"
 -- before allowing a rating to be submitted. This is the eligibility gate query.
-CREATE INDEX IF NOT EXISTS idx_connections_initiator_id
-    ON connections (initiator_id, confirmation_status)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_connections_initiator_id ON connections (
+    initiator_id,
+    confirmation_status
+)
+WHERE
+    deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_connections_counterpart_id
-    ON connections (counterpart_id, confirmation_status)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_connections_counterpart_id ON connections (
+    counterpart_id,
+    confirmation_status
+)
+WHERE
+    deleted_at IS NULL;
 
 -- Used to load all connections related to a specific listing.
-CREATE INDEX IF NOT EXISTS idx_connections_listing_id
-    ON connections (listing_id)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_connections_listing_id ON connections (listing_id)
+WHERE
+    deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_connections_updated_at
     BEFORE UPDATE ON connections
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 
 -- -----------------------------------------------------------------------------
 -- TABLE: notifications
@@ -979,19 +939,20 @@ CREATE TABLE IF NOT EXISTS notifications
 (
     notification_id   UUID                     PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    -- NULL allowed for system-generated notifications with no human actor.
-    actor_id          UUID                     REFERENCES users (user_id) ON DELETE SET NULL,
+-- NULL allowed for system-generated notifications with no human actor.
+actor_id UUID REFERENCES users (user_id) ON DELETE SET NULL,
+recipient_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
+notification_type notification_type_enum NOT NULL,
 
-    recipient_id      UUID                     NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
+-- Polymorphic reference: describes what object this notification is about.
+entity_type VARCHAR(50), entity_id UUID,
 
-    notification_type notification_type_enum   NOT NULL,
+-- Short human-readable message shown in the notification UI.
+message TEXT,
 
-    -- Polymorphic reference: describes what object this notification is about.
-    entity_type       VARCHAR(50),
-    entity_id         UUID,
-
-    -- Short human-readable message shown in the notification UI.
-    message           TEXT,
+-- BullMQ job ID — used with a UNIQUE index to make worker retries
+-- idempotent via ON CONFLICT (idempotency_key) DO NOTHING.
+idempotency_key   VARCHAR(100)             UNIQUE,
 
     is_read           BOOLEAN                  NOT NULL DEFAULT FALSE,
 
@@ -1001,15 +962,15 @@ CREATE TABLE IF NOT EXISTS notifications
 
 -- Primary query for the notification bell: all unread notifications for a user,
 -- newest first. Partial index on is_read=FALSE keeps it small and fast.
-CREATE INDEX IF NOT EXISTS idx_notifications_recipient_unread
-    ON notifications (recipient_id, created_at DESC)
-    WHERE is_read = FALSE AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_notifications_recipient_unread ON notifications (recipient_id, created_at DESC)
+WHERE
+    is_read = FALSE
+    AND deleted_at IS NULL;
 
 -- Used for loading the full notification history page (read + unread).
-CREATE INDEX IF NOT EXISTS idx_notifications_recipient_all
-    ON notifications (recipient_id, created_at DESC)
-    WHERE deleted_at IS NULL;
-
+CREATE INDEX IF NOT EXISTS idx_notifications_recipient_all ON notifications (recipient_id, created_at DESC)
+WHERE
+    deleted_at IS NULL;
 
 -- =============================================================================
 -- ZONE 4 — REPUTATION ZONE
@@ -1023,7 +984,6 @@ CREATE INDEX IF NOT EXISTS idx_notifications_recipient_all
 --   → Updates users.average_rating and users.rating_count (Zone 1)
 --   → Updates properties.average_rating and properties.rating_count (Zone 2)
 -- =============================================================================
-
 
 -- -----------------------------------------------------------------------------
 -- TABLE: ratings
@@ -1043,35 +1003,39 @@ CREATE INDEX IF NOT EXISTS idx_notifications_recipient_all
 -- Integrity check happens in application code since a standard FK can only
 -- reference one table.
 -- -----------------------------------------------------------------------------
+
 CREATE TABLE IF NOT EXISTS ratings
 (
     rating_id      UUID                 PRIMARY KEY DEFAULT gen_random_uuid(),
 
     reviewer_id    UUID                 NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
 
-    -- NOT NULL is the entire anti-fake-review system in one constraint.
-    -- If no confirmed connection exists, PostgreSQL rejects the INSERT.
-    connection_id  UUID                 NOT NULL REFERENCES connections (connection_id) ON DELETE RESTRICT,
+-- NOT NULL is the entire anti-fake-review system in one constraint.
+-- If no confirmed connection exists, PostgreSQL rejects the INSERT.
+connection_id UUID NOT NULL REFERENCES connections (connection_id) ON DELETE RESTRICT,
+reviewee_type reviewee_type_enum NOT NULL,
+reviewee_id UUID NOT NULL,
 
-    reviewee_type  reviewee_type_enum   NOT NULL,
-    reviewee_id    UUID                 NOT NULL,
+-- Required — this is what gets cached in average_rating via trigger.
+overall_score SMALLINT NOT NULL CHECK (overall_score BETWEEN 1 AND 5),
 
-    -- Required — this is what gets cached in average_rating via trigger.
-    overall_score  SMALLINT             NOT NULL
-        CHECK (overall_score BETWEEN 1 AND 5),
+-- Nullable — not every dimension applies to every review type.
+cleanliness_score SMALLINT CHECK (
+    cleanliness_score BETWEEN 1 AND 5
+),
+communication_score SMALLINT CHECK (
+    communication_score BETWEEN 1 AND 5
+),
+reliability_score SMALLINT CHECK (
+    reliability_score BETWEEN 1 AND 5
+),
+value_score SMALLINT CHECK (value_score BETWEEN 1 AND 5),
+review_text TEXT,
 
-    -- Nullable — not every dimension applies to every review type.
-    cleanliness_score   SMALLINT        CHECK (cleanliness_score BETWEEN 1 AND 5),
-    communication_score SMALLINT        CHECK (communication_score BETWEEN 1 AND 5),
-    reliability_score   SMALLINT        CHECK (reliability_score BETWEEN 1 AND 5),
-    value_score         SMALLINT        CHECK (value_score BETWEEN 1 AND 5),
-
-    review_text    TEXT,
-
-    -- Controls visibility without deleting the row. When an admin resolves a
-    -- report as 'resolved_removed', is_visible = FALSE. The row is preserved
-    -- for audit history and report references.
-    is_visible     BOOLEAN              NOT NULL DEFAULT TRUE,
+-- Controls visibility without deleting the row. When an admin resolves a
+-- report as 'resolved_removed', is_visible = FALSE. The row is preserved
+-- for audit history and report references.
+is_visible     BOOLEAN              NOT NULL DEFAULT TRUE,
 
     created_at     TIMESTAMPTZ          NOT NULL DEFAULT NOW(),
     updated_at     TIMESTAMPTZ          NOT NULL DEFAULT NOW(),
@@ -1079,18 +1043,26 @@ CREATE TABLE IF NOT EXISTS ratings
 );
 
 -- One rating per (reviewer, connection, reviewee) combination.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ratings_one_per_connection
-    ON ratings (reviewer_id, connection_id, reviewee_id)
-    WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ratings_one_per_connection ON ratings (
+    reviewer_id,
+    connection_id,
+    reviewee_id
+)
+WHERE
+    deleted_at IS NULL;
 
 -- Used to load "all reviews about this user" on their public profile page.
-CREATE INDEX IF NOT EXISTS idx_ratings_reviewee
-    ON ratings (reviewee_id, reviewee_type, is_visible)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_ratings_reviewee ON ratings (
+    reviewee_id,
+    reviewee_type,
+    is_visible
+)
+WHERE
+    deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_ratings_reviewer_id
-    ON ratings (reviewer_id)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_ratings_reviewer_id ON ratings (reviewer_id)
+WHERE
+    deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_ratings_updated_at
     BEFORE UPDATE ON ratings
@@ -1157,7 +1129,6 @@ CREATE OR REPLACE TRIGGER trg_ratings_update_aggregates
     ON ratings
     FOR EACH ROW EXECUTE FUNCTION update_rating_aggregates();
 
-
 -- -----------------------------------------------------------------------------
 -- TABLE: rating_reports
 -- Moderation queue for flagged ratings.
@@ -1165,49 +1136,41 @@ CREATE OR REPLACE TRIGGER trg_ratings_update_aggregates
 -- Both outcomes are preserved — patterns in report data improve future
 -- automated flagging.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS rating_reports
-(
-    report_id   UUID                 PRIMARY KEY DEFAULT gen_random_uuid(),
-
-    reporter_id UUID                 NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
-
-    rating_id   UUID                 NOT NULL REFERENCES ratings (rating_id) ON DELETE RESTRICT,
-
-    reason      report_reason_enum   NOT NULL,
-
+CREATE TABLE IF NOT EXISTS rating_reports (
+    report_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
+    reporter_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
+    rating_id UUID NOT NULL REFERENCES ratings (rating_id) ON DELETE RESTRICT,
+    reason report_reason_enum NOT NULL,
     explanation TEXT,
-
-    status      report_status_enum   NOT NULL DEFAULT 'open',
-
+    status report_status_enum NOT NULL DEFAULT 'open',
     admin_notes TEXT,
     reviewed_at TIMESTAMPTZ,
-    reviewed_by UUID                 REFERENCES users (user_id) ON DELETE SET NULL,
-
-    created_at  TIMESTAMPTZ          NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ          NOT NULL DEFAULT NOW(),
-    deleted_at  TIMESTAMPTZ
+    reviewed_by UUID REFERENCES users (user_id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ
 );
 
 -- Prevents the same user from filing duplicate open reports against the same rating.
 -- Resolved reports don't block re-reporting.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_rating_reports_no_duplicates
-    ON rating_reports (reporter_id, rating_id)
-    WHERE status = 'open' AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rating_reports_no_duplicates ON rating_reports (reporter_id, rating_id)
+WHERE
+    status = 'open'
+    AND deleted_at IS NULL;
 
 -- Admin moderation queue: all open reports sorted oldest first.
-CREATE INDEX IF NOT EXISTS idx_rating_reports_status_created
-    ON rating_reports (status, created_at)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_rating_reports_status_created ON rating_reports (status, created_at)
+WHERE
+    deleted_at IS NULL;
 
 -- "All reports filed against this rating" — for admin rating detail view.
-CREATE INDEX IF NOT EXISTS idx_rating_reports_rating_id
-    ON rating_reports (rating_id)
-    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_rating_reports_rating_id ON rating_reports (rating_id)
+WHERE
+    deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_rating_reports_updated_at
     BEFORE UPDATE ON rating_reports
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 
 -- =============================================================================
 -- PHASE 3 / INTERESTS — SCHEMA MIGRATION

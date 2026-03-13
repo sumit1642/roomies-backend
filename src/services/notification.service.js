@@ -48,7 +48,8 @@ import { AppError } from "../middleware/errorHandler.js";
 // This lets the client use a single endpoint for both the bell dropdown (unread
 // only) and the full notification history page.
 export const getFeed = async (userId, filters) => {
-	const { isRead, cursorTime, cursorId, limit = 20 } = filters;
+	const { isRead, cursorTime, cursorId, limit: rawLimit = 20 } = filters;
+	const limit = Math.min(Math.max(1, rawLimit), 100); // clamp to 1-100
 
 	const clauses = [`n.recipient_id = $1`, `n.deleted_at IS NULL`];
 	const params = [userId];
@@ -173,8 +174,12 @@ export const markRead = async (userId, { notificationIds, all }) => {
 		return { updated: rowCount };
 	}
 
-	// Selective mark-read. notificationIds is guaranteed non-empty by the Zod
-	// schema (min(1)), so the ANY($2::uuid[]) clause always has at least one UUID.
+	if (!Array.isArray(notificationIds) || notificationIds.length === 0) {
+		throw new AppError("notificationIds must be a non-empty array when all is not true", 400);
+	}
+
+	// Selective mark-read. notificationIds is validated above (and by the Zod
+	// schema), so the ANY($2::uuid[]) clause always has at least one UUID.
 	const { rowCount } = await pool.query(
 		`UPDATE notifications
      SET is_read = TRUE

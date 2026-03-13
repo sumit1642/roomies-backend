@@ -26,16 +26,15 @@
 // connection pool exhaustion: 10 concurrent inserts against a pool of 20
 // leaves comfortable headroom for the HTTP request handlers.
 //
-// ─── ON CONFLICT DO NOTHING ──────────────────────────────────────────────────
+// ─── ON CONFLICT (idempotency_key) DO NOTHING ────────────────────────────────
 //
 // Protects against the retry-after-crash duplicate scenario: the worker INSERT
 // succeeded on attempt 1, but the process crashed before BullMQ received the
 // job completion acknowledgement, so BullMQ retried the job. Without this
 // guard the retry would insert a duplicate notification row. With it, the retry
-// becomes a silent no-op. This is a belt-and-suspenders measure — the
-// notifications table has no unique constraint to define "duplicate" precisely,
-// so this guard catches the specific retry-duplicate case rather than providing
-// strict global deduplication.
+// becomes a silent no-op. The notifications table has a UNIQUE index on
+// idempotency_key (populated with the BullMQ job ID), so the conflict target
+// is precise — legitimately distinct notifications always have distinct job IDs.
 
 import { Worker } from "bullmq";
 import { pool } from "../db/client.js";
@@ -101,17 +100,18 @@ export const startNotificationWorker = () => {
 				);
 			}
 
-			// ON CONFLICT DO NOTHING: see module-level comment for the reasoning.
-			// The notifications table has no unique constraint, so this guard is
-			// specifically for the retry-after-crash scenario rather than global
-			// deduplication. It makes retries safe without silently swallowing
-			// legitimately distinct notifications of the same type to the same user.
+			// ON CONFLICT (idempotency_key) DO NOTHING: see module-level comment.
+			// The idempotency_key stores the BullMQ job ID. If the worker crashes
+			// after a successful INSERT but before acknowledging the job, BullMQ
+			// retries with the same job.id — the UNIQUE constraint catches the
+			// duplicate and the retry becomes a silent no-op. Legitimately distinct
+			// notifications always have distinct job IDs.
 			await pool.query(
 				`INSERT INTO notifications
-           (recipient_id, notification_type, entity_type, entity_id, message)
-         VALUES ($1, $2::notification_type_enum, $3, $4, $5)
-         ON CONFLICT DO NOTHING`,
-				[recipientId, type, entityType ?? null, entityId ?? null, message],
+           (recipient_id, notification_type, entity_type, entity_id, message, idempotency_key)
+         VALUES ($1, $2::notification_type_enum, $3, $4, $5, $6)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+				[recipientId, type, entityType ?? null, entityId ?? null, message, job.id],
 			);
 
 			logger.debug({ recipientId, type, entityId }, "Notification worker: notification inserted");
@@ -142,6 +142,8 @@ export const startNotificationWorker = () => {
 		logger.error({ err }, "Notification worker: worker-level error");
 	});
 
+	// Caller (server.js) is responsible for calling worker.close() on process
+	// termination to drain in-flight jobs before disconnecting from Redis.
 	logger.info("Notification delivery worker started");
 	return worker;
 };
