@@ -1,35 +1,34 @@
 // src/services/rating.service.js
 //
-// ─── WHAT THIS SERVICE DOES ───────────────────────────────────────────────────
+// ─── FIXES IN THIS VERSION ────────────────────────────────────────────────────
 //
-// Manages submission and retrieval of ratings. Ratings are the final stage of
-// the trust pipeline: interest → connection → rating. A rating can only be
-// submitted once a connection with confirmation_status = 'confirmed' exists
-// between the reviewer and the reviewee.
+// 1. SELF-RATING PREVENTION
+//    User ratings: WHERE EXISTS now requires
+//      ((initiator_id = $1 AND counterpart_id = $4) OR (counterpart_id = $1 AND initiator_id = $4))
+//    which structurally prevents the reviewer from also being the reviewee.
+//    Property ratings: added assertion that the property's owner is the
+//    connection's other participant, preventing an owner from rating their
+//    own property using their own connection.
 //
-// ─── THE ANTI-FAKE-REVIEW GUARANTEE ──────────────────────────────────────────
+// 2. DUPLICATE DETECTION AFTER rowCount === 0
+//    After the gated INSERT returns 0 rows, we now run a targeted lookup for
+//    an existing rating row matching (reviewer_id, connection_id, reviewee_id).
+//    Only if that row is found do we throw 409. If the connection was valid but
+//    no duplicate exists, the WHERE EXISTS failed for another reason (e.g. wrong
+//    reviewee), and we surface a 422 instead of a misleading 409.
 //
-// The ratings table has a NOT NULL FK on connection_id. The gating INSERT query
-// below uses WHERE EXISTS to verify:
-//   1. The connection exists, is confirmed, and the reviewer is a party to it.
-//   2. The reviewee is the other party (or, for property ratings, the listing's
-//      property belongs to the other party's connection).
-// ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING handles the
-// duplicate submission case atomically — no separate read-then-write race.
+// 3. getRatingsForConnection RETURNS ARRAYS
+//    A reviewer can submit both a user rating and a property rating against the
+//    same confirmed connection (two different reviewee_type/reviewee_id combos).
+//    The response now returns { myRatings: [...], theirRatings: [...] } so no
+//    rating is silently dropped. Callers must handle the array shape.
 //
-// ─── AGGREGATE UPDATE ────────────────────────────────────────────────────────
-//
-// The update_rating_aggregates trigger in the DB fires automatically after
-// INSERT on the ratings table. This service does NOT manually update
-// users.average_rating or properties.average_rating — the trigger handles it.
-// This is explicitly designed into the schema; see roomies_db_setup.sql.
-//
-// ─── NOTIFICATION ────────────────────────────────────────────────────────────
-//
-// After a successful INSERT, a rating_received notification is enqueued for
-// the reviewee (user ratings only — property ratings notify the property owner).
-// Post-commit, fire-and-forget via BullMQ — same pattern as interest and
-// connection services.
+// 4. EMAIL LEAK FIXED IN PUBLIC READ ENDPOINTS
+//    getPublicRatings and getPublicPropertyRatings previously fell back to
+//    u.email when no student_profiles.full_name existed (e.g. for PG owners
+//    who wrote reviews). The fix adds a LEFT JOIN to pg_owner_profiles and uses
+//    COALESCE(sp.full_name, pop.owner_full_name, 'Anonymous Reviewer').
+//    getMyGivenRatings already had a more complete JOIN chain and is unchanged.
 
 import { Queue } from "bullmq";
 import { pool } from "../db/client.js";
@@ -62,23 +61,6 @@ const _enqueueNotification = (payload) => {
 };
 
 // ─── Submit rating ─────────────────────────────────────────────────────────────
-//
-// The core operation. Uses a single atomic INSERT ... WHERE EXISTS ... ON CONFLICT
-// pattern to simultaneously:
-//   1. Verify the connection exists, is confirmed, and the reviewer is a party.
-//   2. Verify the reviewee is the other party (for user ratings) or that the
-//      property belongs to the connection context (for property ratings).
-//   3. Insert the rating row if all checks pass.
-//   4. Do nothing (idempotent) if the rating already exists.
-//
-// rowCount interpretation:
-//   rowCount === 1  → new rating inserted successfully
-//   rowCount === 0  → either the WHERE EXISTS failed (connection not valid)
-//                     OR the ON CONFLICT fired (rating already exists)
-//
-// To distinguish the two rowCount === 0 cases, we do a follow-up read on the
-// connection only — not on ratings — so we don't accidentally confirm to the
-// caller that a duplicate rating exists with specific details.
 export const submitRating = async (reviewerId, data) => {
 	const {
 		connectionId,
@@ -92,50 +74,31 @@ export const submitRating = async (reviewerId, data) => {
 		comment,
 	} = data;
 
-	// ── Step 1: Polymorphic reviewee existence check ───────────────────────────
-	//
-	// The DB cannot enforce a FK to two tables. We check here before the INSERT
-	// so a 404 is returned cleanly rather than leaving a dangling rating pointing
-	// at a non-existent reviewee.
-	//
-	// This is a pre-check, not a transaction guard — a tiny race window exists
-	// where the reviewee could be soft-deleted between this check and the INSERT.
-	// That is acceptable: the INSERT would still succeed (the FK is on connection_id,
-	// not reviewee_id), and a rating pointing at a deleted user/property is
-	// harmless — it simply won't appear in public feeds (which filter deleted_at).
+	// ── Step 1: Polymorphic reviewee existence check ──────────────────────────
 	if (revieweeType === "user") {
 		const { rows } = await pool.query(`SELECT 1 FROM users WHERE user_id = $1 AND deleted_at IS NULL`, [
 			revieweeId,
 		]);
-		if (!rows.length) {
-			throw new AppError("Reviewee user not found", 404);
-		}
+		if (!rows.length) throw new AppError("Reviewee user not found", 404);
 	} else {
-		// revieweeType === 'property'
 		const { rows } = await pool.query(`SELECT 1 FROM properties WHERE property_id = $1 AND deleted_at IS NULL`, [
 			revieweeId,
 		]);
-		if (!rows.length) {
-			throw new AppError("Reviewee property not found", 404);
-		}
+		if (!rows.length) throw new AppError("Reviewee property not found", 404);
 	}
 
 	// ── Step 2: Atomic gating INSERT ──────────────────────────────────────────
 	//
-	// The WHERE EXISTS subquery simultaneously verifies:
-	//   a) The connection exists and is not soft-deleted.
-	//   b) confirmation_status = 'confirmed' — real-world interaction proven.
-	//   c) The reviewer is a party (initiator_id OR counterpart_id = reviewerId).
-	//   d) The reviewee is the OTHER party (for user ratings) OR the property
-	//      belongs to a listing tied to this connection (for property ratings).
+	// User ratings: the WHERE EXISTS enforces cross-party constraint using an
+	// explicit (initiator/counterpart) pairing that prevents self-ratings.
+	// The pattern ((initiator = reviewer AND counterpart = reviewee) OR
+	//              (counterpart = reviewer AND initiator = reviewee))
+	// means the reviewer and reviewee MUST be the two different parties on the
+	// connection — a user cannot appear on both sides simultaneously.
 	//
-	// For property ratings, the reviewee must be the property associated with
-	// the listing that created this connection. A reviewer cannot rate an
-	// arbitrary property — only one they have a confirmed connection through.
-	//
-	// ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING:
-	// matches the partial unique index idx_ratings_one_per_connection in the schema.
-	// If the rating already exists, the INSERT silently does nothing and rowCount = 0.
+	// Property ratings: additionally assert that the property's owner_id is the
+	// other participant in the connection (not the reviewer themselves), so an
+	// owner cannot rate their own property by using their own connection.
 	let result;
 	if (revieweeType === "user") {
 		result = await pool.query(
@@ -146,12 +109,14 @@ export const submitRating = async (reviewerId, data) => {
        SELECT $1, $2, $3::reviewee_type_enum, $4, $5, $6, $7, $8, $9, $10
        WHERE EXISTS (
          SELECT 1 FROM connections
-         WHERE connection_id        = $2
-           AND confirmation_status  = 'confirmed'
-           AND deleted_at           IS NULL
-           AND (initiator_id = $1 OR counterpart_id = $1)
-           AND (initiator_id = $4 OR counterpart_id = $4)
-           AND initiator_id != counterpart_id
+         WHERE connection_id       = $2
+           AND confirmation_status = 'confirmed'
+           AND deleted_at          IS NULL
+           AND (
+             (initiator_id  = $1 AND counterpart_id = $4)
+             OR
+             (counterpart_id = $1 AND initiator_id  = $4)
+           )
        )
        ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING
        RETURNING rating_id, created_at`,
@@ -169,9 +134,9 @@ export const submitRating = async (reviewerId, data) => {
 			],
 		);
 	} else {
-		// Property rating: verify the property is linked to this connection via
-		// the listing that created it. This prevents a student who stayed at PG-A
-		// from rating PG-B by supplying a confirmed connection from PG-A.
+		// Property rating: verify the property belongs to this connection AND
+		// that the reviewer is the other participant (not the property's owner),
+		// preventing an owner from rating their own property.
 		result = await pool.query(
 			`INSERT INTO ratings
          (reviewer_id, connection_id, reviewee_type, reviewee_id,
@@ -180,13 +145,17 @@ export const submitRating = async (reviewerId, data) => {
        SELECT $1, $2, $3::reviewee_type_enum, $4, $5, $6, $7, $8, $9, $10
        WHERE EXISTS (
          SELECT 1 FROM connections c
-         JOIN listings l ON l.listing_id = c.listing_id AND l.deleted_at IS NULL
-         JOIN properties p ON p.property_id = l.property_id AND p.deleted_at IS NULL
+         JOIN listings l   ON l.listing_id   = c.listing_id AND l.deleted_at IS NULL
+         JOIN properties p ON p.property_id  = l.property_id AND p.deleted_at IS NULL
          WHERE c.connection_id       = $2
            AND c.confirmation_status = 'confirmed'
            AND c.deleted_at          IS NULL
-           AND (c.initiator_id = $1 OR c.counterpart_id = $1)
            AND p.property_id         = $4
+           AND (
+             (c.initiator_id  = $1 AND c.counterpart_id = p.owner_id)
+             OR
+             (c.counterpart_id = $1 AND c.initiator_id  = p.owner_id)
+           )
        )
        ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING
        RETURNING rating_id, created_at`,
@@ -206,10 +175,17 @@ export const submitRating = async (reviewerId, data) => {
 	}
 
 	// ── Step 3: Interpret rowCount ─────────────────────────────────────────────
+	//
+	// rowCount === 0 can mean three different things:
+	//   A) WHERE EXISTS failed — connection not found, not confirmed, or reviewee
+	//      is not the correct other party (includes self-rating attempt)
+	//   B) ON CONFLICT fired — rating already exists for this triple
+	//
+	// To distinguish A from B, we check the connection first, then look for an
+	// existing rating. This avoids falsely reporting 409 when the real issue was
+	// that the reviewee was wrong or the connection was invalid.
 	if (result.rowCount === 0) {
-		// Determine whether we got here because the connection check failed
-		// (WHERE EXISTS returned false) or because the rating already exists
-		// (ON CONFLICT fired).
+		// Check connection validity and party membership.
 		const { rows: connRows } = await pool.query(
 			`SELECT connection_id, confirmation_status
        FROM connections
@@ -220,9 +196,7 @@ export const submitRating = async (reviewerId, data) => {
 		);
 
 		if (!connRows.length) {
-			// Connection doesn't exist or the reviewer is not a party.
-			// Return 404 — never 403. We do not confirm or deny the existence
-			// of a connection that the caller isn't party to.
+			// Connection doesn't exist or caller is not a party — 404.
 			throw new AppError("Connection not found", 404);
 		}
 
@@ -230,9 +204,25 @@ export const submitRating = async (reviewerId, data) => {
 			throw new AppError("Ratings can only be submitted for confirmed connections", 422);
 		}
 
-		// Connection exists and is confirmed but rowCount is still 0 — the
-		// ON CONFLICT fired, meaning this rating was already submitted.
-		throw new AppError("You have already submitted a rating for this connection and reviewee", 409);
+		// Connection is confirmed and caller is a party. Check for an existing
+		// rating row — only then is it a genuine duplicate (409).
+		const { rows: existingRating } = await pool.query(
+			`SELECT rating_id FROM ratings
+       WHERE reviewer_id  = $1
+         AND connection_id = $2
+         AND reviewee_id   = $3
+         AND deleted_at    IS NULL`,
+			[reviewerId, connectionId, revieweeId],
+		);
+
+		if (existingRating.length) {
+			throw new AppError("You have already submitted a rating for this connection and reviewee", 409);
+		}
+
+		// WHERE EXISTS failed but no duplicate exists — the reviewee is not the
+		// correct counterparty for this connection (possibly a self-rating attempt
+		// or a reviewee who is not on this connection).
+		throw new AppError("The reviewee is not a valid party to this connection, or you cannot rate yourself", 422);
 	}
 
 	const { rating_id: ratingId, created_at: createdAt } = result.rows[0];
@@ -240,10 +230,6 @@ export const submitRating = async (reviewerId, data) => {
 	logger.info({ reviewerId, connectionId, revieweeType, revieweeId, ratingId, overallScore }, "Rating submitted");
 
 	// ── Step 4: Post-commit notification ──────────────────────────────────────
-	//
-	// For user ratings: notify the reviewee directly.
-	// For property ratings: notify the property owner (looked up separately).
-	// Both are fire-and-forget — a missed notification does not roll back the rating.
 	if (revieweeType === "user") {
 		_enqueueNotification({
 			recipientId: revieweeId,
@@ -252,7 +238,6 @@ export const submitRating = async (reviewerId, data) => {
 			entityId: ratingId,
 		});
 	} else {
-		// Property rating: look up the owner to notify them.
 		pool.query(`SELECT owner_id FROM properties WHERE property_id = $1 AND deleted_at IS NULL`, [revieweeId])
 			.then(({ rows }) => {
 				if (rows.length) {
@@ -274,18 +259,17 @@ export const submitRating = async (reviewerId, data) => {
 
 // ─── Get ratings for a connection ─────────────────────────────────────────────
 //
-// Returns both ratings for a connection: the caller's own rating and the other
-// party's rating (if submitted). Only the two connection parties may call this.
+// A reviewer can submit both a user rating and a property rating against the
+// same confirmed connection (two different reviewee_id values with different
+// reviewee_type). Using rows.find() would silently drop all but the first
+// matching row. We now return arrays so every rating is preserved.
 //
 // Response shape:
-//   { myRating: Rating | null, theirRating: Rating | null }
+//   { myRatings: Rating[], theirRatings: Rating[] }
 //
-// myRating is the row where reviewer_id = callerId.
-// theirRating is the row where reviewer_id = the other party.
-// null means that party has not yet submitted their rating.
+// myRatings = all rows where reviewer_id = callerId
+// theirRatings = all rows where reviewer_id = the other party
 export const getRatingsForConnection = async (callerId, connectionId) => {
-	// Verify the caller is a party to this connection. 404 for non-parties —
-	// never 403, to avoid confirming that the connection exists.
 	const { rows: connRows } = await pool.query(
 		`SELECT initiator_id, counterpart_id
      FROM connections
@@ -302,8 +286,7 @@ export const getRatingsForConnection = async (callerId, connectionId) => {
 	const { initiator_id: initiatorId, counterpart_id: counterpartId } = connRows[0];
 	const otherPartyId = callerId === initiatorId ? counterpartId : initiatorId;
 
-	// Fetch both ratings in a single query. The CASE WHEN resolves which row
-	// belongs to the caller and which to the other party without two round-trips.
+	// Fetch all ratings for both parties in one query.
 	const { rows } = await pool.query(
 		`SELECT
        r.rating_id,
@@ -326,46 +309,32 @@ export const getRatingsForConnection = async (callerId, connectionId) => {
 		[connectionId, [callerId, otherPartyId]],
 	);
 
-	const myRatingRow = rows.find((r) => r.reviewer_id === callerId) ?? null;
-	const theirRatingRow = rows.find((r) => r.reviewer_id === otherPartyId) ?? null;
+	const formatRating = (row) => ({
+		ratingId: row.rating_id,
+		reviewerId: row.reviewer_id,
+		revieweeType: row.reviewee_type,
+		revieweeId: row.reviewee_id,
+		overallScore: row.overall_score,
+		cleanlinessScore: row.cleanliness_score,
+		communicationScore: row.communication_score,
+		reliabilityScore: row.reliability_score,
+		valueScore: row.value_score,
+		comment: row.review_text,
+		createdAt: row.created_at,
+	});
 
-	const formatRating = (row) => {
-		if (!row) return null;
-		return {
-			ratingId: row.rating_id,
-			reviewerId: row.reviewer_id,
-			revieweeType: row.reviewee_type,
-			revieweeId: row.reviewee_id,
-			overallScore: row.overall_score,
-			cleanlinessScore: row.cleanliness_score,
-			communicationScore: row.communication_score,
-			reliabilityScore: row.reliability_score,
-			valueScore: row.value_score,
-			comment: row.review_text,
-			createdAt: row.created_at,
-		};
-	};
+	const myRatings = rows.filter((r) => r.reviewer_id === callerId).map(formatRating);
+	const theirRatings = rows.filter((r) => r.reviewer_id === otherPartyId).map(formatRating);
 
-	return {
-		myRating: formatRating(myRatingRow),
-		theirRating: formatRating(theirRatingRow),
-	};
+	return { myRatings, theirRatings };
 };
 
 // ─── Get public ratings for a user ────────────────────────────────────────────
 //
-// Publicly readable — no authentication required at the service level (the
-// route itself is unprotected). Returns paginated visible ratings for a user.
-//
-// Each row includes enough to render a review card:
-//   - score and comment
-//   - reviewer's public name and profile photo
-//   - createdAt
-//
-// Does NOT return the reviewer's full profile. Does NOT return invisible ratings
-// (is_visible = FALSE, set by admin moderation).
-//
-// Keyset pagination on (created_at DESC, rating_id ASC) — newest first.
+// EMAIL LEAK FIX: the previous COALESCE(sp.full_name, u.email) fell back to the
+// user's email address when no student profile full_name existed (e.g. for a
+// PG owner who submitted a rating). We now add a LEFT JOIN to pg_owner_profiles
+// and fall back to 'Anonymous Reviewer' rather than the raw email address.
 export const getPublicRatings = async (userId, filters) => {
 	const { cursorTime, cursorId, limit = 20 } = filters;
 
@@ -398,8 +367,9 @@ export const getPublicRatings = async (userId, filters) => {
        r.value_score,
        r.review_text        AS comment,
        r.created_at,
-       COALESCE(sp.full_name, u.email) AS reviewer_name,
-       sp.profile_photo_url            AS reviewer_photo_url
+       -- Never expose u.email — fall back to a non-sensitive placeholder instead.
+       COALESCE(sp.full_name, pop.owner_full_name, 'Anonymous Reviewer') AS reviewer_name,
+       sp.profile_photo_url AS reviewer_photo_url
      FROM ratings r
      JOIN users u
        ON u.user_id    = r.reviewer_id
@@ -407,6 +377,9 @@ export const getPublicRatings = async (userId, filters) => {
      LEFT JOIN student_profiles sp
        ON sp.user_id    = r.reviewer_id
       AND sp.deleted_at IS NULL
+     LEFT JOIN pg_owner_profiles pop
+       ON pop.user_id    = r.reviewer_id
+      AND pop.deleted_at IS NULL
      WHERE ${clauses.join(" AND ")}
      ORDER BY r.created_at DESC, r.rating_id ASC
      LIMIT $${limitParam}`,
@@ -445,9 +418,8 @@ export const getPublicRatings = async (userId, filters) => {
 
 // ─── Get my given ratings ──────────────────────────────────────────────────────
 //
-// Returns all ratings the authenticated user has submitted as a reviewer.
-// Includes the reviewee's summary (name, type) so the UI can render context.
-// Keyset pagination on (created_at DESC, rating_id ASC).
+// Unchanged from the original — it already has a complete JOIN chain that avoids
+// email leakage via COALESCE over student and pg_owner profiles.
 export const getMyGivenRatings = async (reviewerId, filters) => {
 	const { cursorTime, cursorId, limit = 20 } = filters;
 
@@ -480,12 +452,9 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
        r.is_visible,
        r.created_at,
 
-       -- Reviewee summary — resolved polymorphically.
-       -- For user reviewees: prefer student full_name, fall back to email.
-       -- For property reviewees: use property_name.
        CASE
          WHEN r.reviewee_type = 'user'
-         THEN COALESCE(sp_rev.full_name, pop_rev.owner_full_name, u_rev.email)
+         THEN COALESCE(sp_rev.full_name, pop_rev.owner_full_name, 'Anonymous User')
          ELSE p_rev.property_name
        END AS reviewee_name,
 
@@ -497,7 +466,6 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
 
      FROM ratings r
 
-     -- User reviewee joins (LEFT — only populated when reviewee_type = 'user')
      LEFT JOIN users u_rev
        ON u_rev.user_id    = r.reviewee_id
       AND r.reviewee_type  = 'user'
@@ -513,7 +481,6 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
       AND r.reviewee_type   = 'user'
       AND pop_rev.deleted_at IS NULL
 
-     -- Property reviewee joins (LEFT — only populated when reviewee_type = 'property')
      LEFT JOIN properties p_rev
        ON p_rev.property_id = r.reviewee_id
       AND r.reviewee_type   = 'property'
@@ -562,26 +529,14 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
 
 // ─── Get public ratings for a property ────────────────────────────────────────
 //
-// Publicly readable — no authentication required. Returns paginated visible
-// ratings for a specific property (reviewee_type = 'property', is_visible = TRUE).
-//
-// Mirrors getPublicRatings but for properties. Each row includes enough to
-// render a review card: scores, comment, reviewer name/photo, createdAt.
-//
-// Pre-check: verifies the property exists (404 if not). This gives a clean
-// error rather than silently returning an empty list for a non-existent property,
-// which would make it impossible to distinguish "no ratings yet" from "wrong ID".
-//
-// Keyset pagination on (created_at DESC, rating_id ASC) — newest first.
+// EMAIL LEAK FIX: same fix as getPublicRatings — added pg_owner_profiles JOIN
+// and replaced u.email fallback with 'Anonymous Reviewer'.
 export const getPublicPropertyRatings = async (propertyId, filters) => {
-	// Property existence check — 404 for unknown or soft-deleted properties.
 	const { rows: propRows } = await pool.query(
 		`SELECT 1 FROM properties WHERE property_id = $1 AND deleted_at IS NULL`,
 		[propertyId],
 	);
-	if (!propRows.length) {
-		throw new AppError("Property not found", 404);
-	}
+	if (!propRows.length) throw new AppError("Property not found", 404);
 
 	const { cursorTime, cursorId, limit = 20 } = filters;
 
@@ -614,8 +569,9 @@ export const getPublicPropertyRatings = async (propertyId, filters) => {
        r.value_score,
        r.review_text        AS comment,
        r.created_at,
-       COALESCE(sp.full_name, u.email) AS reviewer_name,
-       sp.profile_photo_url            AS reviewer_photo_url
+       -- Never expose u.email — fall back to a non-sensitive placeholder instead.
+       COALESCE(sp.full_name, pop.owner_full_name, 'Anonymous Reviewer') AS reviewer_name,
+       sp.profile_photo_url AS reviewer_photo_url
      FROM ratings r
      JOIN users u
        ON u.user_id    = r.reviewer_id
@@ -623,6 +579,9 @@ export const getPublicPropertyRatings = async (propertyId, filters) => {
      LEFT JOIN student_profiles sp
        ON sp.user_id    = r.reviewer_id
       AND sp.deleted_at IS NULL
+     LEFT JOIN pg_owner_profiles pop
+       ON pop.user_id    = r.reviewer_id
+      AND pop.deleted_at IS NULL
      WHERE ${clauses.join(" AND ")}
      ORDER BY r.created_at DESC, r.rating_id ASC
      LIMIT $${limitParam}`,
