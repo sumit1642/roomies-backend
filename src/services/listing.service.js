@@ -567,22 +567,6 @@ export const updateListing = async (posterId, listingId, body) => {
 	}
 };
 
-// ─── Delete listing (soft) ─────────────────────────────────────────────────────
-//
-// The soft-delete and interest request expiry run in the same transaction so
-// they are always consistent: if the soft-delete rolls back, the expiry also
-// rolls back. A listing that is still technically active must not have its
-// pending interest requests showing as expired.
-//
-// The pre-delete check for active interest requests has been REMOVED. Previously
-// this blocked deletion if any active request existed. The revised behaviour:
-// soft-delete the listing AND expire all pending requests atomically. This is
-// simpler for the poster (no manual cleanup required) and correct — deleting a
-// listing is a strong signal that no new interest should be entertained.
-//
-// Accepted requests (already-established connections) are intentionally NOT
-// expired here — the connection already exists and the two parties are in contact
-// via WhatsApp. The listing going away does not invalidate the connection.
 export const deleteListing = async (posterId, listingId) => {
 	const client = await pool.connect();
 	try {
@@ -601,8 +585,6 @@ export const deleteListing = async (posterId, listingId) => {
 			throw new AppError("Listing not found", 404);
 		}
 
-		// Expire all pending interest requests in the same transaction.
-		// Accepted requests are left untouched — their connections remain valid.
 		await expirePendingRequestsForListing(listingId, client);
 
 		await client.query("COMMIT");
@@ -619,22 +601,18 @@ export const deleteListing = async (posterId, listingId) => {
 
 // ─── Change listing status ─────────────────────────────────────────────────────
 //
-// Handles poster-initiated status transitions: active → filled, active → deactivated,
-// deactivated → active. The filled and deactivated transitions expire pending
-// interest requests in the same transaction.
+// ─── FIX: STUDENT_ROOM REACTIVATION ──────────────────────────────────────────
 //
-// This is a new service function introduced in phase3/interests. Previously there
-// was no way for a poster to change their listing's status without deleting it.
-// Now they can mark a room as filled (taken) or temporarily deactivate it.
+// The previous WHERE clause included:
+//   AND ($1 <> 'active' OR EXISTS (SELECT 1 FROM properties p WHERE ...))
 //
-// Allowed transitions (poster-initiated only):
-//   active      → filled        (room has been taken)
-//   active      → deactivated   (temporarily hidden)
-//   deactivated → active        (re-publish)
+// This blocked student_room reactivation because student listings have
+// property_id = NULL, so the EXISTS subquery always returns false, and when
+// $1 = 'active' the whole condition became false — producing a spurious 409.
 //
-// expired → * transitions are handled by the cron job, not by this function.
-// filled → * transitions are terminal — a filled room cannot be re-opened via
-// this endpoint (a new listing should be created instead).
+// Fix: add OR l.property_id IS NULL so student listings (which are always
+// property-less by design) can freely transition to 'active'. PG listings
+// still require the property to exist before they can be reactivated.
 const ALLOWED_STATUS_TRANSITIONS = {
 	active: ["filled", "deactivated"],
 	deactivated: ["active"],
@@ -676,6 +654,7 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
          AND l.deleted_at IS NULL
          AND (
            $1 <> 'active'
+           OR l.property_id IS NULL
            OR EXISTS (
              SELECT 1
              FROM properties p
@@ -691,8 +670,6 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 			throw new AppError("Listing status has already changed — please refresh", 409);
 		}
 
-		// Expire pending interest requests whenever the listing leaves 'active'.
-		// Accepted requests (established connections) are intentionally untouched.
 		if (deactivating) {
 			await expirePendingRequestsForListing(listingId, client);
 		}
