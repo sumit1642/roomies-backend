@@ -19,10 +19,6 @@ if (envFile) {
 	//   2. .env is loaded second — only fills in variables NOT already set by
 	//      .env.local, acting as a project-wide fallback (e.g. for CI pipelines
 	//      or bare `node src/server.js` invocations without an npm script).
-	//
-	// This means .env.local always takes precedence over .env for local dev,
-	// and a missing .env.local falls back gracefully to .env rather than crashing
-	// before Zod gets to validate the environment and emit a clear error.
 	dotenv.config({ path: ".env.local" });
 	dotenv.config({ path: ".env" });
 }
@@ -44,19 +40,53 @@ const envSchema = z.object({
 	GOOGLE_CLIENT_ID: z.string().optional(),
 	GOOGLE_CLIENT_SECRET: z.string().optional(),
 
-	// Email (SMTP)
+	// Email (SMTP) — used by Nodemailer in development (Ethereal Mail)
 	SMTP_HOST: z.string().min(1, { error: "SMTP_HOST is required" }),
 	SMTP_PORT: z.coerce.number().int().positive().default(587),
 	SMTP_USER: z.string().min(1, { error: "SMTP_USER is required" }),
 	SMTP_PASS: z.string().min(1, { error: "SMTP_PASS is required" }),
 	SMTP_FROM: z.email({ error: "SMTP_FROM must be a valid email address" }),
 
-	// Storage
+	// Storage adapter selector.
+	// 'local'  → LocalDiskAdapter  (development — writes to /uploads on disk)
+	// 'azure'  → AzureBlobAdapter  (production — writes to Azure Blob Storage)
+	// Switching adapters requires only an env var change — no code changes.
 	STORAGE_ADAPTER: z.enum(["local", "azure"]).default("local"),
 
-	// CORS — comma-separated list of allowed origins in production
-	// e.g. "https://roomies.in,https://www.roomies.in"
-	// Not required in development (origin:true is used instead)
+	// ─── Azure Blob Storage ────────────────────────────────────────────────────
+	// Required when STORAGE_ADAPTER=azure. Optional otherwise so that local dev
+	// boots cleanly without Azure credentials.
+	//
+	// AZURE_STORAGE_CONNECTION_STRING:
+	//   Full connection string from Azure Portal → Storage Account →
+	//   Security + networking → Access keys → key1 → Connection string.
+	//   Format: DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...
+	//
+	// AZURE_STORAGE_CONTAINER:
+	//   The blob container name you created inside your storage account.
+	//   Example: "roomies-uploads"
+	//   Container must exist before deployment — create it in the Azure portal
+	//   or with the Azure CLI: az storage container create --name roomies-uploads
+	AZURE_STORAGE_CONNECTION_STRING: z.string().optional(),
+	AZURE_STORAGE_CONTAINER: z.string().optional(),
+
+	// ─── Azure Communication Services (Phase 5 email worker) ─────────────────
+	// Required when the email-queue BullMQ worker switches from Nodemailer/Ethereal
+	// to ACS for production email delivery. Optional for all current phases.
+	//
+	// ACS_CONNECTION_STRING:
+	//   From Azure Portal → Communication Services → Keys → Connection string.
+	//
+	// ACS_FROM_EMAIL:
+	//   A verified sender address in your ACS resource.
+	//   Must be verified in Azure Portal → Communication Services → Email →
+	//   Domains before ACS will send mail from it.
+	ACS_CONNECTION_STRING: z.string().optional(),
+	ACS_FROM_EMAIL: z.email({ error: "ACS_FROM_EMAIL must be a valid email address" }).optional(),
+
+	// CORS — comma-separated list of allowed origins in production.
+	// Example: "https://roomies.in,https://www.roomies.in"
+	// Not required in development (origin:true is used instead).
 	ALLOWED_ORIGINS: z.string().optional(),
 });
 
@@ -71,7 +101,9 @@ if (!parsed.success) {
 	process.exit(1);
 }
 
-// Parse ALLOWED_ORIGINS into an array once at startup so app.js never touches process.env directly
+// Parse ALLOWED_ORIGINS into an array once at startup so app.js never touches
+// process.env directly. An empty array is the safe default — app.js has a
+// startup guard that crashes loudly if ALLOWED_ORIGINS is empty in production.
 export const config = {
 	...parsed.data,
 	ALLOWED_ORIGINS: parsed.data.ALLOWED_ORIGINS ? parsed.data.ALLOWED_ORIGINS.split(",").map((o) => o.trim()) : [],
