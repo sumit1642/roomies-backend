@@ -71,61 +71,143 @@ const notificationQueue = new Queue(NOTIFICATION_QUEUE_NAME, {
 //   - A double-confirm from the same party is idempotent (flag was already
 //     TRUE, no change, but the UPDATE still succeeds with the row returned).
 //
-// The WHERE clause `AND (initiator_id = $2 OR counterpart_id = $2)` is the
-// access control gate. It is not a separate check — it is part of the UPDATE
-// itself, so access verification and state mutation are truly atomic.
+// ─── TRANSITION DETECTION — CONCURRENCY-SAFE ─────────────────────────────────
+//
+// The previous implementation read previousStatus with a bare pool.query SELECT
+// and then ran the UPDATE as a separate bare pool.query. Because both statements
+// ran outside any transaction, two concurrent confirms (initiator and counterpart
+// calling at almost the same moment) could both read previousStatus = 'pending'
+// before either UPDATE committed, causing both to evaluate
+// justTransitionedToConfirmed = true and enqueue duplicate notifications.
+//
+// The fix wraps both statements in an explicit transaction and uses
+// SELECT … FOR UPDATE to acquire a row-level lock before reading previousStatus.
+// PostgreSQL serializes all FOR UPDATE requests on the same row, so the second
+// concurrent request blocks until the first transaction commits. When it
+// resumes, it reads the post-commit previousStatus = 'confirmed', evaluates
+// justTransitionedToConfirmed = false, and does not enqueue notifications.
+//
+// Why a transaction rather than a single-statement CTE? A single UPDATE cannot
+// observe the pre-mutation value of the row it is updating inside the same
+// statement — the RETURNING clause reflects the post-mutation state only. A CTE
+// such as WITH prev AS (SELECT … FOR UPDATE) UPDATE … RETURNING would still read
+// the pre-lock snapshot for the CTE part in many planner paths. The explicit
+// BEGIN / SELECT FOR UPDATE / UPDATE / COMMIT pattern is the clearest, most
+// portable, and most correct way to achieve this in PostgreSQL.
 export const confirmConnection = async (callerId, connectionId) => {
-	// A single atomic UPDATE that simultaneously:
-	//   1. Flips the correct party's confirmation flag to TRUE
-	//   2. Sets confirmation_status = 'confirmed' if both flags are now TRUE
-	//   3. Enforces access control (caller must be initiator or counterpart)
-	//
-	// Why no transaction wrapper? This is a single statement. PostgreSQL
-	// guarantees each statement is atomic regardless of an explicit transaction
-	// wrapper. Adding BEGIN/COMMIT around a single UPDATE adds latency (two extra
-	// round-trips) with zero additional safety.
-	const { rowCount, rows } = await pool.query(
-		`UPDATE connections
-     SET
-       initiator_confirmed   = CASE
-                                 WHEN initiator_id = $2
-                                 THEN TRUE
-                                 ELSE initiator_confirmed
-                               END,
-       counterpart_confirmed = CASE
-                                 WHEN counterpart_id = $2
-                                 THEN TRUE
-                                 ELSE counterpart_confirmed
-                               END,
-       confirmation_status   = CASE
-                                 WHEN (initiator_confirmed  OR initiator_id  = $2)
-                                  AND (counterpart_confirmed OR counterpart_id = $2)
-                                 THEN 'confirmed'::confirmation_status_enum
-                                 ELSE confirmation_status
-                               END,
-       updated_at = NOW()
-     WHERE connection_id = $1
-       AND (initiator_id = $2 OR counterpart_id = $2)
-       AND deleted_at IS NULL
-     RETURNING
-       connection_id,
-       initiator_id,
-       counterpart_id,
-       initiator_confirmed,
-       counterpart_confirmed,
-       confirmation_status,
-       updated_at`,
-		[connectionId, callerId],
-	);
+	// client is declared outside try so the finally block can reference it, but
+	// pool.connect() is called inside try so that if the pool is exhausted or the
+	// database is unreachable the thrown error is caught normally and finally does
+	// not attempt client.release() on an undefined variable.
+	let client;
+	let conn;
+	let previousStatus;
 
-	// rowCount === 0 means either the connection does not exist OR the caller is
-	// not a party. 404 in both cases — never 403, which would confirm existence.
-	if (rowCount === 0) {
-		throw new AppError("Connection not found", 404);
+	try {
+		client = await pool.connect();
+		await client.query("BEGIN");
+
+		// Step 1: Lock the row for this transaction. The FOR UPDATE clause
+		// means concurrent transactions that also attempt FOR UPDATE on the
+		// same connection_id will block here until this transaction commits or
+		// rolls back. The access-control predicate (initiator_id / counterpart_id)
+		// is included so a non-party caller simply gets zero rows and we surface
+		// a 404 without ever acquiring a lock on a row the caller has no business
+		// touching.
+		const { rows: prevRows } = await client.query(
+			`SELECT confirmation_status
+       FROM connections
+       WHERE connection_id = $1
+         AND (initiator_id = $2 OR counterpart_id = $2)
+         AND deleted_at IS NULL
+       FOR UPDATE`,
+			[connectionId, callerId],
+		);
+
+		if (!prevRows.length) {
+			// Not found or caller is not a party — roll back and surface 404.
+			await client.query("ROLLBACK");
+			throw new AppError("Connection not found", 404);
+		}
+
+		// Capture the status that was current at the moment we acquired the lock.
+		// Any concurrent transaction that already held this lock has now committed,
+		// so this value reflects the fully-committed state of the row.
+		previousStatus = prevRows[0].confirmation_status;
+
+		// Step 2: Atomic UPDATE — flips the calling party's flag and sets
+		// confirmation_status = 'confirmed' when both flags are true, all within
+		// the same lock scope. Party membership is enforced again in the WHERE
+		// clause for defence-in-depth (the FOR UPDATE above already verified it).
+		const { rowCount, rows } = await client.query(
+			`UPDATE connections
+       SET
+         initiator_confirmed   = CASE
+                                   WHEN initiator_id = $2
+                                   THEN TRUE
+                                   ELSE initiator_confirmed
+                                 END,
+         counterpart_confirmed = CASE
+                                   WHEN counterpart_id = $2
+                                   THEN TRUE
+                                   ELSE counterpart_confirmed
+                                 END,
+         confirmation_status   = CASE
+                                   WHEN (initiator_confirmed  OR initiator_id  = $2)
+                                    AND (counterpart_confirmed OR counterpart_id = $2)
+                                   THEN 'confirmed'::confirmation_status_enum
+                                   ELSE confirmation_status
+                                 END,
+         updated_at = NOW()
+       WHERE connection_id = $1
+         AND (initiator_id = $2 OR counterpart_id = $2)
+         AND deleted_at IS NULL
+       RETURNING
+         connection_id,
+         initiator_id,
+         counterpart_id,
+         initiator_confirmed,
+         counterpart_confirmed,
+         confirmation_status,
+         updated_at`,
+			[connectionId, callerId],
+		);
+
+		// This should never be zero at this point because the FOR UPDATE above
+		// already verified the row exists and the caller is a party, but guard
+		// anyway so a data-race between SELECT and UPDATE (e.g. concurrent
+		// soft-delete) surfaces cleanly as a 404 rather than a TypeError.
+		if (rowCount === 0) {
+			await client.query("ROLLBACK");
+			throw new AppError("Connection not found", 404);
+		}
+
+		conn = rows[0];
+		await client.query("COMMIT");
+	} catch (err) {
+		// Attempt a rollback only when a client was actually acquired. If
+		// pool.connect() itself threw, client is undefined and there is no
+		// open transaction to roll back — attempting client.query() here would
+		// throw a TypeError that would replace the original error in the call stack.
+		if (client) {
+			try {
+				await client.query("ROLLBACK");
+			} catch (_) {
+				// Ignore — connection may already be in an error state.
+			}
+		}
+		throw err;
+	} finally {
+		// Same guard: only release if pool.connect() succeeded.
+		if (client) client.release();
 	}
 
-	const conn = rows[0];
-	const justConfirmed = conn.confirmation_status === "confirmed";
+	// A genuine transition: the row was NOT confirmed when we locked it, and IS
+	// confirmed after the UPDATE. Because the lock serializes concurrent requests,
+	// only one transaction can observe this transition — the second concurrent
+	// request will read previousStatus = 'confirmed' after the first commits, so
+	// justTransitionedToConfirmed will be false for it.
+	const justTransitionedToConfirmed = previousStatus !== "confirmed" && conn.confirmation_status === "confirmed";
 
 	logger.info(
 		{
@@ -134,17 +216,17 @@ export const confirmConnection = async (callerId, connectionId) => {
 			initiatorConfirmed: conn.initiator_confirmed,
 			counterpartConfirmed: conn.counterpart_confirmed,
 			confirmationStatus: conn.confirmation_status,
+			previousStatus,
 		},
-		justConfirmed ? "Connection confirmed by both parties" : "Connection confirmation recorded",
+		justTransitionedToConfirmed ? "Connection confirmed by both parties" : "Connection confirmation recorded",
 	);
 
 	// ── Post-commit notifications ─────────────────────────────────────────────
 	//
-	// Only fire when status just flipped to 'confirmed' — a single-side
-	// confirmation is silent. Both parties receive the notification via two
-	// separate queue.add() calls so a Redis failure on one doesn't prevent
-	// the other from being enqueued.
-	if (justConfirmed) {
+	// Only fire when the status JUST transitioned to 'confirmed' for the first
+	// time. A single-side confirmation is silent. Re-confirming an already
+	// confirmed connection does not re-send notifications.
+	if (justTransitionedToConfirmed) {
 		notificationQueue
 			.add("send-notification", {
 				recipientId: conn.initiator_id,
@@ -187,18 +269,6 @@ export const confirmConnection = async (callerId, connectionId) => {
 //
 // Returns full detail for one connection. Access is restricted to the two
 // parties — the WHERE clause enforces this. Third parties get 404.
-//
-// The response shape includes:
-//   - Both confirmation flags, so each party can see whether the other has
-//     confirmed yet (drives UI state like "waiting for X to confirm")
-//   - The other party's public profile summary (name, photo, rating)
-//   - The listing summary (title, city, rent, type)
-//   - connection_id in the response so Phase 4 can reference it for ratings
-//
-// The "other party" summary resolves dynamically: if the caller is the
-// initiator, the response shows the counterpart's profile, and vice versa.
-// This is done with CASE WHEN in the SELECT so the query returns the correct
-// profile without a second round-trip.
 export const getConnection = async (callerId, connectionId) => {
 	const { rows } = await pool.query(
 		`SELECT
@@ -217,7 +287,6 @@ export const getConnection = async (callerId, connectionId) => {
        c.updated_at,
 
        -- Listing summary — may be NULL if the listing was hard-deleted
-       -- (connection.listing_id is SET NULL ON DELETE in the schema)
        l.title             AS listing_title,
        l.city              AS listing_city,
        l.rent_per_month    AS listing_rent_per_month,
@@ -225,15 +294,11 @@ export const getConnection = async (callerId, connectionId) => {
        l.listing_type      AS listing_type,
 
        -- The "other party" profile — resolved relative to the caller.
-       -- If caller = initiator → other = counterpart, and vice versa.
-       -- CASE WHEN picks the correct user_id to join against.
        CASE WHEN c.initiator_id = $2
             THEN c.counterpart_id
             ELSE c.initiator_id
        END AS other_party_id,
 
-       -- Full name: prefer profile name over email fallback, same pattern
-       -- as interest service (COALESCE across student and pg_owner profiles).
        COALESCE(sp_other.full_name, pop_other.owner_full_name, u_other.email)
          AS other_party_name,
 
@@ -243,14 +308,9 @@ export const getConnection = async (callerId, connectionId) => {
 
      FROM connections c
 
-     -- Listing join: LEFT because listing_id is nullable (admin-created connections)
-     -- and because ON DELETE SET NULL means the listing row may be gone.
      LEFT JOIN listings l
        ON l.listing_id = c.listing_id
 
-     -- Other-party user join: resolved dynamically via CASE WHEN.
-     -- The inline subquery approach avoids two separate joins (one for each role)
-     -- and keeps the SELECT list clean.
      JOIN users u_other
        ON u_other.user_id = CASE WHEN c.initiator_id = $2
                                  THEN c.counterpart_id
@@ -258,9 +318,6 @@ export const getConnection = async (callerId, connectionId) => {
                             END
        AND u_other.deleted_at IS NULL
 
-     -- Profile joins for the other party — both LEFT because a user can be
-     -- either a student or a PG owner (or both), and we want whichever name
-     -- is available without failing if one profile type is missing.
      LEFT JOIN student_profiles sp_other
        ON sp_other.user_id    = u_other.user_id
       AND sp_other.deleted_at IS NULL
@@ -298,7 +355,6 @@ export const getConnection = async (callerId, connectionId) => {
 					listingId: row.listing_id,
 					title: row.listing_title,
 					city: row.listing_city,
-					// Paise → rupees, same conversion rule as listing service
 					rentPerMonth: row.listing_rent_per_month != null ? row.listing_rent_per_month / 100 : null,
 					roomType: row.listing_room_type,
 					listingType: row.listing_type,
@@ -315,20 +371,6 @@ export const getConnection = async (callerId, connectionId) => {
 };
 
 // ─── Get my connections (dashboard feed) ─────────────────────────────────────
-//
-// Returns all connections the authenticated user is a party to (either as
-// initiator or counterpart), newest first. Supports optional filtering by
-// confirmation_status and connection_type.
-//
-// Keyset pagination: compound cursor (created_at DESC, connection_id ASC).
-// The secondary sort on connection_id ASC provides a stable tiebreaker for
-// rows with identical created_at values (common in automated tests where rows
-// are inserted in the same millisecond). The cursor clause mirrors the ORDER BY
-// exactly using PostgreSQL row value comparison.
-//
-// The LIMIT + 1 trick detects whether a next page exists without a separate
-// COUNT(*) query, which is expensive on large tables and stale by the time it
-// returns. Fetching one extra row costs a single extra row of I/O — negligible.
 export const getMyConnections = async (userId, filters) => {
 	const { confirmationStatus, connectionType, cursorTime, cursorId, limit = 20 } = filters;
 
@@ -350,10 +392,6 @@ export const getMyConnections = async (userId, filters) => {
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (hasCursor) {
-		// Row value comparison that mirrors ORDER BY (created_at DESC, connection_id ASC).
-		// "Give me rows that come AFTER this cursor position in the sort order" means:
-		//   created_at is strictly earlier (older, since we sort DESC), OR
-		//   created_at is equal AND connection_id is strictly greater (tiebreaker ASC).
 		clauses.push(`(c.created_at < $${p} OR (c.created_at = $${p} AND c.connection_id > $${p + 1}::uuid))`);
 		params.push(cursorTime, cursorId);
 		p += 2;
@@ -376,14 +414,12 @@ export const getMyConnections = async (userId, filters) => {
        c.created_at,
        c.updated_at,
 
-       -- Listing summary for the dashboard card
        c.listing_id,
        l.title          AS listing_title,
        l.city           AS listing_city,
        l.rent_per_month AS listing_rent_per_month,
        l.listing_type   AS listing_type,
 
-       -- Other party resolved dynamically
        CASE WHEN c.initiator_id = $1
             THEN c.counterpart_id
             ELSE c.initiator_id
