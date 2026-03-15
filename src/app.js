@@ -15,7 +15,7 @@ export const app = express();
 // Explicit proxy trust policy so req.ip is accurate behind reverse proxies
 // (used by OTP verify IP throttling). In production we run behind a proxy; in
 // local development we keep direct socket IP behavior.
-app.set("trust proxy", config.NODE_ENV === "production");
+app.set("trust proxy", config.NODE_ENV === "production" ? 1 : false);
 
 // ─── Security headers ──────────────────────────────────────────────────────
 app.use(helmet());
