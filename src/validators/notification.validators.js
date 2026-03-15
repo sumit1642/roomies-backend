@@ -1,35 +1,35 @@
 // src/validators/notification.validators.js
 //
-// Validation schemas for the three notification HTTP endpoints.
+// ─── FIXES IN THIS VERSION ────────────────────────────────────────────────────
 //
-// The notification system has no creation endpoint exposed over HTTP — rows are
-// written exclusively by the notification worker. All three schemas here are
-// therefore read or mutation schemas, never creation schemas.
+// 1. isRead COERCION — was converting any non-"true" string (e.g. "yes", "1",
+//    "TRUE") silently to false. The fix narrows the preprocess to only convert
+//    the exact lowercase string "true" and the exact lowercase string "false",
+//    leaving any other string untouched so z.boolean() rejects it with a 400.
+//
+// 2. MUTUAL EXCLUSION for all + notificationIds — the previous refine allowed
+//    a client to send both fields simultaneously, which is semantically
+//    ambiguous. The fix requires exactly one mode: either all:true OR a
+//    non-empty notificationIds array, never both at the same time.
 
 import { z } from "zod";
 
 // ─── Notification feed ────────────────────────────────────────────────────────
-// GET /api/v1/notifications
-//
-// The paginated in-app notification feed for the authenticated user.
-// Keyset pagination on (created_at DESC, notification_id ASC) — same compound
-// cursor pattern used throughout the codebase.
-//
-// isRead is an optional filter so the client can request only unread
-// notifications (e.g. for a dropdown preview) or all notifications (for the
-// full history page) with the same endpoint. z.coerce.boolean() handles the
-// query string reality that ?isRead=true arrives as the string "true", not
-// the boolean true.
-//
-// The both-or-neither cursor refinement is standard across all paginated
-// endpoints — a cursorTime without a cursorId gives no stable row to resume
-// from, so Zod rejects the partial cursor before it reaches the service.
 export const getFeedSchema = z.object({
 	query: z
 		.object({
+			// Only the exact strings "true" and "false" (case-insensitive) are
+			// accepted. Any other string (e.g. "1", "yes", "on") is passed through
+			// unchanged so z.boolean() can reject it with a 400 Validation error.
+			// Numbers are still coerced to boolean for API clients that send 0/1.
 			isRead: z
 				.preprocess((val) => {
-					if (typeof val === "string") return val.toLowerCase() === "true";
+					if (typeof val === "string") {
+						if (val.toLowerCase() === "true") return true;
+						if (val.toLowerCase() === "false") return false;
+						// Leave unrecognised strings unchanged — z.boolean() will reject them.
+						return val;
+					}
 					if (typeof val === "number") return Boolean(val);
 					return val;
 				}, z.boolean())
@@ -50,20 +50,14 @@ export const getFeedSchema = z.object({
 });
 
 // ─── Mark notifications as read ───────────────────────────────────────────────
-// POST /api/v1/notifications/mark-read
 //
-// Two modes, controlled by which field is present in the body:
-//
-//   { notificationIds: [uuid, ...] }  — mark specific notifications as read
-//   { all: true }                     — mark all unread notifications as read
-//
-// The cross-field refinement enforces that at least one mode is specified.
-// An empty body (or { all: false } with no notificationIds) is rejected so the
-// client cannot accidentally send a no-op request and receive a misleading 200.
-//
-// { all: false } with no notificationIds is intentionally rejected — there is
-// no meaningful action to take for that input. If the client wants to do
-// nothing, it should simply not call the endpoint.
+// The two modes are mutually exclusive — sending both simultaneously is
+// ambiguous and rejected. The refine returns true only when exactly one of the
+// two modes is active (XOR logic):
+//   only { all: true }               → valid
+//   only { notificationIds: [...] }  → valid
+//   both fields at once              → invalid (400)
+//   neither field                    → invalid (400)
 export const markReadSchema = z.object({
 	body: z
 		.object({
@@ -72,19 +66,19 @@ export const markReadSchema = z.object({
 				.min(1, { error: "notificationIds must contain at least one ID" })
 				.optional(),
 
-			// all: true clears every unread notification for the user in one query.
-			// all: false is accepted by the schema but rejected by the refinement
-			// below unless notificationIds is also present, which is an unusual but
-			// technically valid combination (the service handles it by running the
-			// selective update, not the bulk update).
 			all: z.boolean().optional(),
 		})
 		.refine(
-			(data) => data.all === true || (Array.isArray(data.notificationIds) && data.notificationIds.length > 0),
+			(data) => {
+				const hasAll = data.all === true;
+				const hasIds = Array.isArray(data.notificationIds) && data.notificationIds.length > 0;
+				// Exactly one mode must be active — XOR.
+				return hasAll !== hasIds;
+			},
 			{
 				error:
-					"Provide either { all: true } to mark all notifications as read, " +
-					"or { notificationIds: [...] } to mark specific ones",
+					"Provide exactly one mode: either { all: true } to mark all notifications as read, " +
+					"or { notificationIds: [...] } to mark specific ones — not both simultaneously",
 			},
 		),
 });
