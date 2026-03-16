@@ -1,22 +1,33 @@
 // src/validators/rating.validators.js
 //
-// ─── FIX IN THIS VERSION ──────────────────────────────────────────────────────
+// ─── FIX: cursorTime validated as strict ISO 8601 datetime ───────────────────
+// Previously accepted any string; now uses z.iso.datetime({ offset: true })
+// consistent with every other paginated endpoint.
 //
-// cursorTime was validated as z.string().optional() which accepted any arbitrary
-// string. A malformed timestamp would then reach the service layer and cause
-// a PostgreSQL error (or silently produce wrong pagination results) instead of
-// a clean 400 from the validator. The fix uses z.iso.datetime({ offset: true })
-// which enforces valid ISO 8601 format including timezone offset, consistent
-// with every other paginated endpoint in the codebase.
+// ─── FIX: shared dimensionScoreSchema ────────────────────────────────────────
+// cleanlinessScore, communicationScore, reliabilityScore, and valueScore all
+// share the same validation rule (optional integer 1–5). Extracting them into
+// a single schema removes the repetition and ensures any future change
+// (e.g. extending the scale to 1–10) only needs to happen in one place.
 
 import { z } from "zod";
 
-// ─── Shared pagination sub-schema ─────────────────────────────────────────────
+// ─── Shared sub-schemas ───────────────────────────────────────────────────────
+
+// Reusable optional 1–5 dimension score. Used for all four dimension fields on
+// a rating submission. Keeping the error message generic ("Score must be between
+// 1 and 5") means we don't encode the field name in the schema — the path in
+// the Zod issue already tells the caller which field failed.
+const dimensionScoreSchema = z.coerce
+	.number()
+	.int()
+	.min(1, { error: "Score must be between 1 and 5" })
+	.max(5, { error: "Score must be between 1 and 5" })
+	.optional();
+
+// Keyset pagination used by all four read endpoints.
 const paginationQuerySchema = z
 	.object({
-		// Validated as a strict ISO 8601 datetime with timezone offset.
-		// Invalid timestamps now produce a 400 at the Zod layer instead of
-		// reaching the SQL layer as malformed input.
 		cursorTime: z.iso.datetime({ offset: true }).optional(),
 		cursorId: z.uuid({ error: "cursorId must be a valid UUID" }).optional(),
 		limit: z.coerce.number().int().min(1).max(100).default(20),
@@ -47,33 +58,10 @@ export const submitRatingSchema = z.object({
 			.min(1, { error: "overallScore must be between 1 and 5" })
 			.max(5, { error: "overallScore must be between 1 and 5" }),
 
-		cleanlinessScore: z.coerce
-			.number()
-			.int()
-			.min(1, { error: "cleanlinessScore must be between 1 and 5" })
-			.max(5, { error: "cleanlinessScore must be between 1 and 5" })
-			.optional(),
-
-		communicationScore: z.coerce
-			.number()
-			.int()
-			.min(1, { error: "communicationScore must be between 1 and 5" })
-			.max(5, { error: "communicationScore must be between 1 and 5" })
-			.optional(),
-
-		reliabilityScore: z.coerce
-			.number()
-			.int()
-			.min(1, { error: "reliabilityScore must be between 1 and 5" })
-			.max(5, { error: "reliabilityScore must be between 1 and 5" })
-			.optional(),
-
-		valueScore: z.coerce
-			.number()
-			.int()
-			.min(1, { error: "valueScore must be between 1 and 5" })
-			.max(5, { error: "valueScore must be between 1 and 5" })
-			.optional(),
+		cleanlinessScore: dimensionScoreSchema,
+		communicationScore: dimensionScoreSchema,
+		reliabilityScore: dimensionScoreSchema,
+		valueScore: dimensionScoreSchema,
 
 		comment: z
 			.string()
