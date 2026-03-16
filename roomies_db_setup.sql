@@ -37,91 +37,91 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- Tracks whether a user account is usable or has been actioned by an admin.
 CREATE TYPE account_status_enum AS ENUM (
     'active', 'suspended', 'banned', 'deactivated'
-);
+    );
 
 -- The role a user plays on the platform. A user can hold multiple roles
 -- simultaneously (handled via the user_roles junction table, not this column).
 CREATE TYPE role_enum AS ENUM (
     'student', 'pg_owner', 'admin'
-);
+    );
 
 -- Used on both user profiles and listing preferences for roommate matching.
 CREATE TYPE gender_enum AS ENUM (
     'male', 'female', 'other', 'prefer_not_to_say'
-);
+    );
 
 -- Tracks where a PG owner is in the manual document verification workflow.
 CREATE TYPE verification_status_enum AS ENUM (
     'unverified', 'pending', 'verified', 'rejected'
-);
+    );
 
 -- Distinguishes whether a listing was posted by a student or a PG owner.
 CREATE TYPE listing_type_enum AS ENUM (
     'student_room', 'pg_room', 'hostel_bed'
-);
+    );
 
 -- The physical configuration of the room being offered.
 CREATE TYPE room_type_enum AS ENUM (
     'single', 'double', 'triple', 'entire_flat'
-);
+    );
 
 -- The type of bed in the room — relevant for student roommate searches.
 CREATE TYPE bed_type_enum AS ENUM (
     'single_bed', 'double_bed', 'bunk_bed'
-);
+    );
 
 -- The lifecycle state of a listing from creation to removal.
 CREATE TYPE listing_status_enum AS ENUM (
-    'active',       -- visible and accepting interest requests
-    'filled',       -- room has been taken, no longer accepting requests
-    'expired',      -- passed the auto-expiry date (60 days by default)
-    'deactivated'   -- manually hidden by the poster
-);
+    'active', -- visible and accepting interest requests
+    'filled', -- room has been taken, no longer accepting requests
+    'expired', -- passed the auto-expiry date (60 days by default)
+    'deactivated' -- manually hidden by the poster
+    );
 
 -- The category of a PG owner's physical property (the building itself).
 CREATE TYPE property_type_enum AS ENUM (
     'pg', 'hostel', 'shared_apartment'
-);
+    );
 
 -- The operational state of a PG property.
 CREATE TYPE property_status_enum AS ENUM (
     'active', 'inactive', 'under_review'
-);
+    );
 
 -- Tracks where an interest request is in its conversation lifecycle.
 CREATE TYPE request_status_enum AS ENUM (
     'pending', 'accepted', 'declined', 'withdrawn'
-);
+    );
 
 -- The nature of the real-world interaction recorded in the connections table.
 -- This is what determines rating eligibility.
 CREATE TYPE connection_type_enum AS ENUM (
-    'student_roommate',  -- two students lived together
-    'pg_stay',           -- student stayed at a PG
-    'hostel_stay',       -- student stayed in a hostel
-    'visit_only'         -- student visited but did not stay
-);
+    'student_roommate', -- two students lived together
+    'pg_stay', -- student stayed at a PG
+    'hostel_stay', -- student stayed in a hostel
+    'visit_only' -- student visited but did not stay
+    );
 
 -- Whether both parties have confirmed that the real-world interaction happened.
 -- A rating can only be submitted once this reaches 'confirmed'.
 CREATE TYPE confirmation_status_enum AS ENUM (
     'pending', 'confirmed', 'denied', 'expired'
-);
+    );
 
 -- Who or what is being reviewed — a person (student) or a place (PG property).
 CREATE TYPE reviewee_type_enum AS ENUM (
     'user', 'property'
-);
+    );
 
 -- Why a user flagged a rating for admin review.
 CREATE TYPE report_reason_enum AS ENUM (
     'fake', 'abusive', 'conflict_of_interest', 'other'
-);
+    );
 
 -- The outcome of an admin's review of a flagged rating.
 CREATE TYPE report_status_enum AS ENUM (
     'open', 'resolved_removed', 'resolved_kept'
-);
+    );
 
 -- Every possible event type the notification system can fire.
 -- Adding a new notification type later:
@@ -138,19 +138,19 @@ CREATE TYPE notification_type_enum AS ENUM (
     'verification_approved',
     'verification_rejected',
     'new_message'
-);
+    );
 
 -- The kinds of documents a PG owner can upload to prove their identity.
 CREATE TYPE document_type_enum AS ENUM (
     'property_document', 'rental_agreement', 'owner_id', 'trade_license'
-);
+    );
 
 -- Groups amenities into visual sections on the frontend listing page.
 CREATE TYPE amenity_category_enum AS ENUM (
-    'utility',   -- wifi, power backup, water supply
-    'safety',    -- CCTV, security guard, gated entry
-    'comfort'    -- AC, gym, common room, housekeeping
-);
+    'utility', -- wifi, power backup, water supply
+    'safety', -- CCTV, security guard, gated entry
+    'comfort' -- AC, gym, common room, housekeeping
+    );
 
 -- =============================================================================
 -- SECTION 3 — SHARED TRIGGER FUNCTIONS
@@ -163,7 +163,8 @@ CREATE TYPE amenity_category_enum AS ENUM (
 -- Automatically stamps the updated_at column on every row UPDATE.
 -- NEW refers to the incoming row data after the update.
 CREATE OR REPLACE FUNCTION set_updated_at()
-    RETURNS TRIGGER AS $$
+    RETURNS TRIGGER AS
+$$
 BEGIN
     NEW.updated_at = NOW();
     RETURN NEW;
@@ -175,13 +176,14 @@ $$ LANGUAGE plpgsql;
 -- trigger derives the spatial geometry automatically.
 -- ST_MakePoint takes (longitude, latitude) — X axis first, then Y axis.
 CREATE OR REPLACE FUNCTION sync_location_geometry()
-    RETURNS TRIGGER AS $$
+    RETURNS TRIGGER AS
+$$
 BEGIN
     IF NEW.latitude IS NOT NULL AND NEW.longitude IS NOT NULL THEN
         NEW.location = ST_SetSRID(
-            ST_MakePoint(NEW.longitude, NEW.latitude),
-            4326  -- WGS84: the coordinate system used by GPS and Google Maps
-        );
+                ST_MakePoint(NEW.longitude, NEW.latitude),
+                4326 -- WGS84: the coordinate system used by GPS and Google Maps
+                       );
     ELSE
         NEW.location = NULL;
     END IF;
@@ -209,7 +211,7 @@ $$ LANGUAGE plpgsql;
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS institutions
 (
-    institution_id UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    institution_id UUID PRIMARY KEY      DEFAULT gen_random_uuid(),
     name           VARCHAR(255) NOT NULL,
     city           VARCHAR(100) NOT NULL,
     state          VARCHAR(100) NOT NULL,
@@ -236,8 +238,10 @@ WHERE
     deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_institutions_updated_at
-    BEFORE UPDATE ON institutions
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON institutions
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: users
@@ -248,7 +252,7 @@ CREATE OR REPLACE TRIGGER trg_institutions_updated_at
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS users
 (
-    user_id           UUID                PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id           UUID PRIMARY KEY             DEFAULT gen_random_uuid(),
 
 -- Nullable because a user who signs in via Google OAuth for the first time
 -- may not provide an email immediately. No inline UNIQUE — soft-deleted
@@ -266,6 +270,8 @@ is_phone_verified BOOLEAN NOT NULL DEFAULT FALSE,
 
 -- Denormalized rating cache — updated via trigger whenever a rating is
 -- submitted. Trading storage for query speed on search result cards.
+
+
 average_rating    NUMERIC(3, 2)       NOT NULL DEFAULT 0.00,
     rating_count      INTEGER             NOT NULL DEFAULT 0,
 
@@ -297,8 +303,10 @@ WHERE
     deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_users_updated_at
-    BEFORE UPDATE ON users
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON users
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: user_roles
@@ -326,7 +334,7 @@ CREATE INDEX IF NOT EXISTS idx_user_roles_role_name ON user_roles (role_name);
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS student_profiles
 (
-    profile_id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    profile_id          UUID PRIMARY KEY      DEFAULT gen_random_uuid(),
 
 -- UNIQUE here is what makes this a one-to-one relationship with users.
 user_id UUID NOT NULL UNIQUE REFERENCES users (user_id) ON DELETE RESTRICT,
@@ -344,6 +352,8 @@ year_of_study SMALLINT,
 
 -- We never store the raw 12-digit Aadhaar number. The UIDAI API returns a
 -- tokenized reference after OTP verification — that token is all we store.
+
+
 is_aadhaar_verified BOOLEAN      NOT NULL DEFAULT FALSE,
     aadhaar_reference   VARCHAR(255) UNIQUE,
 
@@ -361,8 +371,10 @@ WHERE
     deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_student_profiles_updated_at
-    BEFORE UPDATE ON student_profiles
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON student_profiles
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: pg_owner_profiles
@@ -371,11 +383,12 @@ CREATE OR REPLACE TRIGGER trg_student_profiles_updated_at
 -- State machine: unverified → pending → verified (or rejected).
 -- -----------------------------------------------------------------------------
 
+
 CREATE TABLE IF NOT EXISTS pg_owner_profiles
 (
-    profile_id           UUID                     PRIMARY KEY DEFAULT gen_random_uuid(),
+    profile_id           UUID PRIMARY KEY                  DEFAULT gen_random_uuid(),
     user_id              UUID                     NOT NULL UNIQUE
-                                                  REFERENCES users (user_id) ON DELETE RESTRICT,
+        REFERENCES users (user_id) ON DELETE RESTRICT,
 
     business_name        VARCHAR(255)             NOT NULL,
     owner_full_name      VARCHAR(255)             NOT NULL,
@@ -383,13 +396,15 @@ CREATE TABLE IF NOT EXISTS pg_owner_profiles
 
 -- Public-facing contact number shown on listings — deliberately separate
 -- from the personal phone stored in users so owners control what's visible.
+
+
 business_phone       VARCHAR(20),
     operating_since      SMALLINT,
 
     verification_status  verification_status_enum NOT NULL DEFAULT 'unverified',
     rejection_reason     TEXT,
     verified_at          TIMESTAMPTZ,
-    verified_by          UUID REFERENCES users (user_id) ON DELETE SET NULL,
+    verified_by          UUID                     REFERENCES users (user_id) ON DELETE SET NULL,
 
     created_at           TIMESTAMPTZ              NOT NULL DEFAULT NOW(),
     updated_at           TIMESTAMPTZ              NOT NULL DEFAULT NOW(),
@@ -406,8 +421,10 @@ WHERE
     deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_pg_owner_profiles_updated_at
-    BEFORE UPDATE ON pg_owner_profiles
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON pg_owner_profiles
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: user_preferences
@@ -417,7 +434,7 @@ CREATE OR REPLACE TRIGGER trg_pg_owner_profiles_updated_at
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS user_preferences
 (
-    preference_id    UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    preference_id    UUID PRIMARY KEY      DEFAULT gen_random_uuid(),
     user_id          UUID         NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
 
 -- Example keys:   'smoking', 'food_habit', 'sleep_schedule', 'alcohol',
@@ -427,6 +444,8 @@ preference_key VARCHAR(100) NOT NULL,
 
 -- Example values: 'non_smoker', 'vegetarian', 'night_owl', 'early_bird',
 --                 'okay', 'not_okay', '3' (for a 1–5 scale)
+
+
 preference_value VARCHAR(100) NOT NULL,
 
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -445,8 +464,10 @@ CREATE INDEX IF NOT EXISTS idx_user_preferences_key_value ON user_preferences (
 );
 
 CREATE OR REPLACE TRIGGER trg_user_preferences_updated_at
-    BEFORE UPDATE ON user_preferences
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON user_preferences
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: verification_requests
@@ -494,12 +515,14 @@ WHERE
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS amenities
 (
-    amenity_id UUID                  PRIMARY KEY DEFAULT gen_random_uuid(),
+    amenity_id UUID PRIMARY KEY               DEFAULT gen_random_uuid(),
     name       VARCHAR(100)          NOT NULL UNIQUE,
     category   amenity_category_enum NOT NULL,
 
 -- Stores a string like 'wifi-icon' that maps to a React icon component.
 -- Keeping this in the DB means the frontend never needs a hardcoded map.
+
+
 icon_name  VARCHAR(100),
 
     created_at TIMESTAMPTZ           NOT NULL DEFAULT NOW(),
@@ -507,8 +530,10 @@ icon_name  VARCHAR(100),
 );
 
 CREATE OR REPLACE TRIGGER trg_amenities_updated_at
-    BEFORE UPDATE ON amenities
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON amenities
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: properties
@@ -517,9 +542,10 @@ CREATE OR REPLACE TRIGGER trg_amenities_updated_at
 -- Address split into separate columns for independent filtering and indexing.
 -- -----------------------------------------------------------------------------
 
+
 CREATE TABLE IF NOT EXISTS properties
 (
-    property_id    UUID                 PRIMARY KEY DEFAULT gen_random_uuid(),
+    property_id    UUID PRIMARY KEY              DEFAULT gen_random_uuid(),
     owner_id       UUID                 NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
 
     property_name  VARCHAR(255)         NOT NULL,
@@ -543,6 +569,8 @@ total_rooms SMALLINT,
 status property_status_enum NOT NULL DEFAULT 'active',
 
 -- Denormalized rating cache — same pattern as users.average_rating.
+
+
 average_rating NUMERIC(3, 2)        NOT NULL DEFAULT 0.00,
     rating_count   INTEGER              NOT NULL DEFAULT 0,
 
@@ -574,11 +602,14 @@ WHERE
 CREATE OR REPLACE TRIGGER trg_properties_sync_location
     BEFORE INSERT OR UPDATE OF latitude, longitude
     ON properties
-    FOR EACH ROW EXECUTE FUNCTION sync_location_geometry();
+    FOR EACH ROW
+EXECUTE FUNCTION sync_location_geometry();
 
 CREATE OR REPLACE TRIGGER trg_properties_updated_at
-    BEFORE UPDATE ON properties
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON properties
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: property_amenities
@@ -591,6 +622,8 @@ CREATE TABLE IF NOT EXISTS property_amenities
     property_id UUID NOT NULL REFERENCES properties (property_id) ON DELETE CASCADE,
 
 -- RESTRICT: prevents deleting an amenity that is still in use.
+
+
 amenity_id  UUID NOT NULL REFERENCES amenities (amenity_id) ON DELETE RESTRICT,
 
     PRIMARY KEY (property_id, amenity_id)
@@ -610,7 +643,7 @@ CREATE INDEX IF NOT EXISTS idx_property_amenities_amenity_id ON property_ameniti
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS listings
 (
-    listing_id              UUID                PRIMARY KEY DEFAULT gen_random_uuid(),
+    listing_id              UUID PRIMARY KEY             DEFAULT gen_random_uuid(),
     posted_by               UUID                NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
 
 -- NULL = student listing.  UUID = PG owner's room under a property.
@@ -639,6 +672,8 @@ available_until DATE,
 
 -- Address fields only populated for student listings. PG listings
 -- inherit their location from the parent property row.
+
+
 address_line            VARCHAR(500),
     city                    VARCHAR(100)        NOT NULL,
     locality                VARCHAR(100),
@@ -691,11 +726,14 @@ WHERE
 CREATE OR REPLACE TRIGGER trg_listings_sync_location
     BEFORE INSERT OR UPDATE OF latitude, longitude
     ON listings
-    FOR EACH ROW EXECUTE FUNCTION sync_location_geometry();
+    FOR EACH ROW
+EXECUTE FUNCTION sync_location_geometry();
 
 CREATE OR REPLACE TRIGGER trg_listings_updated_at
-    BEFORE UPDATE ON listings
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON listings
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: listing_photos
@@ -747,8 +785,10 @@ CREATE INDEX IF NOT EXISTS idx_listing_preferences_key_value ON listing_preferen
 );
 
 CREATE OR REPLACE TRIGGER trg_listing_preferences_updated_at
-    BEFORE UPDATE ON listing_preferences
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON listing_preferences
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: listing_amenities
@@ -814,7 +854,7 @@ WHERE
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS interest_requests
 (
-    request_id  UUID                 PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id UUID PRIMARY KEY             DEFAULT gen_random_uuid(),
 
 -- The user who saw the listing and expressed interest.
 sender_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
@@ -823,13 +863,15 @@ sender_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
 listing_id UUID NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
 
 -- Optional intro message: "Hi, I'm a 3rd year CS student, non-smoker..."
-message     TEXT,
 
-    status      request_status_enum  NOT NULL DEFAULT 'pending',
 
-    created_at  TIMESTAMPTZ          NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ          NOT NULL DEFAULT NOW(),
-    deleted_at  TIMESTAMPTZ
+message    TEXT,
+
+    status     request_status_enum NOT NULL DEFAULT 'pending',
+
+    created_at TIMESTAMPTZ         NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ         NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ
 );
 
 -- Prevents a user from spamming the same listing with multiple active requests.
@@ -850,8 +892,10 @@ WHERE
     deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_interest_requests_updated_at
-    BEFORE UPDATE ON interest_requests
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON interest_requests
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: connections
@@ -870,7 +914,7 @@ CREATE OR REPLACE TRIGGER trg_interest_requests_updated_at
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS connections
 (
-    connection_id         UUID                     PRIMARY KEY DEFAULT gen_random_uuid(),
+    connection_id         UUID PRIMARY KEY                  DEFAULT gen_random_uuid(),
 
 -- For student_roommate: initiator = whoever sent the interest request.
 -- For pg_stay: initiator = student, counterpart = PG owner.
@@ -887,6 +931,8 @@ connection_type connection_type_enum NOT NULL,
 start_date DATE, end_date DATE,
 
 -- Independent confirmation flags — each party flips their own boolean.
+
+
 initiator_confirmed   BOOLEAN                  NOT NULL DEFAULT FALSE,
     counterpart_confirmed BOOLEAN                  NOT NULL DEFAULT FALSE,
 
@@ -921,8 +967,10 @@ WHERE
     deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_connections_updated_at
-    BEFORE UPDATE ON connections
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON connections
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: notifications
@@ -937,7 +985,7 @@ CREATE OR REPLACE TRIGGER trg_connections_updated_at
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS notifications
 (
-    notification_id   UUID                     PRIMARY KEY DEFAULT gen_random_uuid(),
+    notification_id   UUID PRIMARY KEY                DEFAULT gen_random_uuid(),
 
 -- NULL allowed for system-generated notifications with no human actor.
 actor_id UUID REFERENCES users (user_id) ON DELETE SET NULL,
@@ -952,11 +1000,13 @@ message TEXT,
 
 -- BullMQ job ID — used with a UNIQUE index to make worker retries
 -- idempotent via ON CONFLICT (idempotency_key) DO NOTHING.
-idempotency_key   VARCHAR(100)             UNIQUE,
 
-    is_read           BOOLEAN                  NOT NULL DEFAULT FALSE,
 
-    created_at        TIMESTAMPTZ              NOT NULL DEFAULT NOW(),
+idempotency_key   VARCHAR(100) UNIQUE,
+
+    is_read           BOOLEAN                NOT NULL DEFAULT FALSE,
+
+    created_at        TIMESTAMPTZ            NOT NULL DEFAULT NOW(),
     deleted_at        TIMESTAMPTZ
 );
 
@@ -1004,11 +1054,12 @@ WHERE
 -- reference one table.
 -- -----------------------------------------------------------------------------
 
+
 CREATE TABLE IF NOT EXISTS ratings
 (
-    rating_id      UUID                 PRIMARY KEY DEFAULT gen_random_uuid(),
+    rating_id           UUID PRIMARY KEY            DEFAULT gen_random_uuid(),
 
-    reviewer_id    UUID                 NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
+    reviewer_id         UUID               NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
 
 -- NOT NULL is the entire anti-fake-review system in one constraint.
 -- If no confirmed connection exists, PostgreSQL rejects the INSERT.
@@ -1035,11 +1086,13 @@ review_text TEXT,
 -- Controls visibility without deleting the row. When an admin resolves a
 -- report as 'resolved_removed', is_visible = FALSE. The row is preserved
 -- for audit history and report references.
-is_visible     BOOLEAN              NOT NULL DEFAULT TRUE,
 
-    created_at     TIMESTAMPTZ          NOT NULL DEFAULT NOW(),
-    updated_at     TIMESTAMPTZ          NOT NULL DEFAULT NOW(),
-    deleted_at     TIMESTAMPTZ
+
+is_visible          BOOLEAN            NOT NULL DEFAULT TRUE,
+
+    created_at          TIMESTAMPTZ        NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ        NOT NULL DEFAULT NOW(),
+    deleted_at          TIMESTAMPTZ
 );
 
 -- One rating per (reviewer, connection, reviewee) combination.
@@ -1065,8 +1118,10 @@ WHERE
     deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_ratings_updated_at
-    BEFORE UPDATE ON ratings
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON ratings
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- TRIGGER FUNCTION: update_rating_aggregates
@@ -1079,7 +1134,8 @@ CREATE OR REPLACE TRIGGER trg_ratings_updated_at
 -- AVG() on every search result query — extremely slow at scale.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION update_rating_aggregates()
-    RETURNS TRIGGER AS $$
+    RETURNS TRIGGER AS
+$$
 DECLARE
     v_avg   NUMERIC(3, 2);
     v_count INTEGER;
@@ -1090,10 +1146,10 @@ BEGIN
         SELECT ROUND(AVG(overall_score)::NUMERIC, 2), COUNT(*)
         INTO v_avg, v_count
         FROM ratings
-        WHERE reviewee_id   = NEW.reviewee_id
+        WHERE reviewee_id = NEW.reviewee_id
           AND reviewee_type = 'user'
-          AND is_visible    = TRUE
-          AND deleted_at    IS NULL;
+          AND is_visible = TRUE
+          AND deleted_at IS NULL;
 
         -- Write the result back to the users table in Zone 1.
         UPDATE users
@@ -1106,10 +1162,10 @@ BEGIN
         SELECT ROUND(AVG(overall_score)::NUMERIC, 2), COUNT(*)
         INTO v_avg, v_count
         FROM ratings
-        WHERE reviewee_id   = NEW.reviewee_id
+        WHERE reviewee_id = NEW.reviewee_id
           AND reviewee_type = 'property'
-          AND is_visible    = TRUE
-          AND deleted_at    IS NULL;
+          AND is_visible = TRUE
+          AND deleted_at IS NULL;
 
         -- Write the result back to the properties table in Zone 2.
         UPDATE properties
@@ -1127,7 +1183,8 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE TRIGGER trg_ratings_update_aggregates
     AFTER INSERT OR UPDATE OF overall_score, is_visible
     ON ratings
-    FOR EACH ROW EXECUTE FUNCTION update_rating_aggregates();
+    FOR EACH ROW
+EXECUTE FUNCTION update_rating_aggregates();
 
 -- -----------------------------------------------------------------------------
 -- TABLE: rating_reports
@@ -1169,8 +1226,10 @@ WHERE
     deleted_at IS NULL;
 
 CREATE OR REPLACE TRIGGER trg_rating_reports_updated_at
-    BEFORE UPDATE ON rating_reports
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    BEFORE UPDATE
+    ON rating_reports
+    FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
 
 -- =============================================================================
 -- PHASE 3 / INTERESTS — SCHEMA MIGRATION
@@ -1181,7 +1240,8 @@ CREATE OR REPLACE TRIGGER trg_rating_reports_updated_at
 -- Changes:
 --   1. Add interest_request_withdrawn to notification_type_enum
 --   2. Add interest_request_id FK column to connections
---   3. Add index for the new FK
+--   3. Add UNIQUE index for the new FK (enforces one live connection per
+--      interest_request at the database level)
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
@@ -1220,18 +1280,47 @@ ALTER TABLE connections
 ADD COLUMN IF NOT EXISTS interest_request_id UUID REFERENCES interest_requests (request_id) ON DELETE SET NULL;
 
 -- -----------------------------------------------------------------------------
--- 3. Index on connections.interest_request_id
+-- 3. UNIQUE index on connections.interest_request_id
 --
--- WHY: The lookup "find the connection that came from this interest_request"
--- is a natural query for a detail page or audit tool. Without an index it is
--- a seq scan on connections. With it, it is an index scan on a narrow column.
--- A partial index excluding NULLs keeps it small — admin-created connections
--- (interest_request_id IS NULL) are never looked up by this column.
+-- WHY — uniqueness, not just a lookup index:
+--   _acceptInterestRequest uses a FOR UPDATE row lock to serialise concurrent
+--   acceptance attempts at the application layer. That guard is correct, but
+--   it is only as strong as every code path that ever touches this table.
+--   A UNIQUE partial index at the database level adds a second, structural
+--   guarantee: PostgreSQL will unconditionally reject any INSERT that would
+--   create a second live (deleted_at IS NULL) connections row pointing at the
+--   same interest_request, regardless of whether the lock was held, whether
+--   the insert came from a retried BullMQ job, a bug in a new code path, or
+--   a direct SQL statement. Defence-in-depth applied at the storage layer.
+--
+-- WHY partial (WHERE interest_request_id IS NOT NULL AND deleted_at IS NULL):
+--   NULL is excluded because admin-created connections have no originating
+--   request, and PostgreSQL's UNIQUE constraint correctly treats each NULL as
+--   distinct — but the predicate keeps those rows out of the index entirely so
+--   they do not consume space or cause false conflicts.
+--   deleted_at IS NULL excludes soft-deleted rows so that a connection can be
+--   soft-deleted and a new one created for the same interest_request without
+--   violating the constraint — the old row is logically gone.
+--
+-- HOW TO APPLY IN PRODUCTION:
+--   Use the CONCURRENTLY form to avoid an AccessExclusiveLock that would block
+--   reads while the index is being built on a live, populated table:
+--
+--     DROP INDEX CONCURRENTLY IF EXISTS idx_connections_interest_request_id;
+--     CREATE UNIQUE INDEX CONCURRENTLY idx_connections_interest_request_id
+--       ON connections (interest_request_id)
+--       WHERE interest_request_id IS NOT NULL AND deleted_at IS NULL;
+--
+--   In this setup script (fresh installs / test environments) the non-concurrent
+--   form is fine because the table is empty when this script runs.
 -- -----------------------------------------------------------------------------
-CREATE INDEX IF NOT EXISTS idx_connections_interest_request_id ON connections (interest_request_id)
+DROP INDEX IF EXISTS idx_connections_interest_request_id;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_interest_request_id ON connections (interest_request_id)
 WHERE
     interest_request_id IS NOT NULL
     AND deleted_at IS NULL;
+
 -- =============================================================================
 -- SANITY CHECK QUERIES
 --
