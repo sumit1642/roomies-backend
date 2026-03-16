@@ -2,42 +2,26 @@
 //
 // Azure Blob Storage adapter — production implementation.
 //
-// This adapter is selected when STORAGE_ADAPTER=azure in your env file.
-// It stores compressed WebP photos in Azure Blob Storage under the path:
-//   listings/{listingId}/{filename}
-//
-// The interface is identical to LocalDiskAdapter:
-//   upload(buffer, listingId, filename) → public HTTPS URL string
-//   delete(url)                         → void
-//
-// Nothing outside this file needs to change when switching from local to Azure.
-// The storage/index.js selector and every caller (photo.service.js,
-// mediaProcessor.js) only ever call upload() and delete() — they never know
-// which adapter is active.
-//
-// PREREQUISITES:
-//   npm install @azure/storage-blob
-//
-// REQUIRED ENV VARS (add to .env.azure, then to Azure App Service settings):
-//   AZURE_STORAGE_CONNECTION_STRING — full connection string from Azure portal
-//   AZURE_STORAGE_CONTAINER         — blob container name (e.g. "roomies-uploads")
-//
-// HOW TO GET YOUR CONNECTION STRING:
-//   Azure Portal → Storage Account → Security + networking → Access keys
-//   Copy "Connection string" under key1. It looks like:
-//   DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net
+// Fixes applied:
+//   Fix 7 — upload() now aborts after UPLOAD_TIMEOUT_MS (30s) via AbortController
+//            to prevent the worker from hanging indefinitely on a slow/stalled
+//            Azure connection.
+//   Fix 8 — delete() strips query-string and fragment from the URL before
+//            extracting the blob path, so SAS tokens or CDN cache-busters in
+//            the stored URL don't cause a path mismatch.
 
 import { BlobServiceClient } from "@azure/storage-blob";
 import { config } from "../../config/env.js";
 import { logger } from "../../logger/index.js";
 import { AppError } from "../../middleware/errorHandler.js";
 
+// Maximum time allowed for a single upload before we abort and let the worker
+// retry. 30 seconds is generous for a WebP thumbnail (rarely exceeds a few
+// hundred kilobytes) but short enough to surface a hung connection promptly.
+const UPLOAD_TIMEOUT_MS = 30_000;
+
 export class AzureBlobAdapter {
 	constructor() {
-		// Fail loudly at startup if credentials are missing when this adapter is
-		// selected. This mirrors the Zod env validation philosophy — it is far
-		// better to crash immediately with a clear message than to boot successfully
-		// and fail silently on the first photo upload hours later.
 		if (!config.AZURE_STORAGE_CONNECTION_STRING) {
 			throw new AppError(
 				"AZURE_STORAGE_CONNECTION_STRING is required when STORAGE_ADAPTER=azure. " +
@@ -53,16 +37,7 @@ export class AzureBlobAdapter {
 			);
 		}
 
-		// BlobServiceClient is the top-level entry point for all Blob Storage
-		// operations. fromConnectionString() parses the full Azure connection string
-		// and configures authentication, endpoint, and protocol automatically.
-		// This client is stateless and safe to share across all upload/delete calls.
 		this.client = BlobServiceClient.fromConnectionString(config.AZURE_STORAGE_CONNECTION_STRING);
-
-		// A container is Azure's equivalent of a top-level "bucket" or folder.
-		// We get a reference to our specific container here rather than in each
-		// method call — the reference is cheap and reusing it avoids redundant
-		// string parsing on every operation.
 		this.container = this.client.getContainerClient(config.AZURE_STORAGE_CONTAINER);
 
 		logger.info({ container: config.AZURE_STORAGE_CONTAINER }, "AzureBlobAdapter initialised");
@@ -70,83 +45,79 @@ export class AzureBlobAdapter {
 
 	// Uploads a compressed WebP buffer to Azure Blob Storage.
 	//
-	// The blob path mirrors the LocalDiskAdapter directory structure:
-	//   listings/{listingId}/{filename}
-	// This makes it straightforward to understand which listing a blob belongs
-	// to just by looking at the path in the Azure portal.
-	//
-	// Returns the full public HTTPS URL that gets written to listing_photos.photo_url.
-	// Format: https://{account}.blob.core.windows.net/{container}/listings/{listingId}/{filename}
-	//
-	// Setting blobContentType to 'image/webp' is critical — without it Azure
-	// serves the file as 'application/octet-stream' and browsers will download
-	// the file rather than displaying it as an image.
+	// An AbortController drives the timeout. The controller's signal is passed
+	// to uploadData() so Azure's SDK cancels the in-flight HTTP request (not just
+	// the JS-side promise). The timer is cleared in a finally block so it doesn't
+	// keep the event loop alive if the upload finishes before the deadline.
 	async upload(buffer, listingId, filename) {
 		const blobPath = `listings/${listingId}/${filename}`;
 		const blockBlobClient = this.container.getBlockBlobClient(blobPath);
 
+		const controller = new AbortController();
+		const timer = setTimeout(() => {
+			controller.abort();
+		}, UPLOAD_TIMEOUT_MS);
+
 		try {
 			await blockBlobClient.uploadData(buffer, {
+				abortSignal: controller.signal,
 				blobHTTPHeaders: {
 					blobContentType: "image/webp",
-					// Cache-Control tells CDNs and browsers they can cache the image
-					// for up to 1 year. Photos are content-addressed by UUID filename
-					// so a new photo never collides with an old URL — safe to cache
-					// aggressively.
 					blobCacheControl: "public, max-age=31536000, immutable",
 				},
 			});
 
-			// blockBlobClient.url is the canonical public URL Azure assigns to this blob.
-			// It includes the account name, container, and blob path — everything needed
-			// to serve the image directly from Blob Storage or through Azure CDN.
 			const url = blockBlobClient.url;
-
 			logger.debug({ blobPath, url }, "AzureBlobAdapter: blob uploaded");
 			return url;
 		} catch (err) {
+			// AbortController fires a DOMException with name "AbortError".
+			if (err.name === "AbortError") {
+				logger.error({ blobPath, timeoutMs: UPLOAD_TIMEOUT_MS }, "AzureBlobAdapter: upload timed out");
+				throw new AppError(`Photo upload timed out after ${UPLOAD_TIMEOUT_MS / 1000}s — please try again`, 504);
+			}
 			logger.error({ err, blobPath }, "AzureBlobAdapter: upload failed");
 			throw new AppError("Failed to upload photo to Azure Blob Storage — try again shortly", 502);
+		} finally {
+			// Clear the timer whether the upload succeeded, failed, or timed out so
+			// the handle does not keep the Node.js event loop alive unnecessarily.
+			clearTimeout(timer);
 		}
 	}
 
 	// Deletes a blob from Azure Blob Storage given its full HTTPS URL.
 	//
-	// We extract the blob path from the URL rather than accepting a path directly
-	// because the rest of the codebase stores and passes the full URL (as written
-	// to listing_photos.photo_url). This keeps the interface consistent with
-	// LocalDiskAdapter.delete(url).
-	//
-	// deleteIfExists() is intentional — it mirrors the ENOENT-swallowing behaviour
-	// in LocalDiskAdapter. If the blob is already gone (e.g. manual deletion via
-	// the Azure portal, or a previous partially-failed cleanup), this is a silent
-	// success rather than an error. The desired end state — "file does not exist"
-	// — is already true, so there is nothing to fail.
+	// Before extracting the blob path we strip any query-string or fragment from
+	// the URL. Azure Blob Storage URLs returned by blockBlobClient.url are pure
+	// paths, but in practice the stored URL might carry a SAS token
+	// (?sv=2021-06-08&...) added by a CDN layer or a previous code version.
+	// Without stripping, containerPrefix.indexOf() still matches (the container
+	// name is in the path portion), but the sliced blobPath would be
+	// "listings/id/file.webp?sv=..." which doesn't match any real blob name.
 	async delete(url) {
-		// Extract the blob path from the full Azure URL.
-		//
-		// Full URL format:
-		//   https://{account}.blob.core.windows.net/{container}/listings/{id}/{file}
-		//
-		// We need just:
-		//   listings/{id}/{file}
-		//
-		// Strategy: split on "/{containerName}/" and take everything after it.
-		// This is robust against account names that might share substrings with
-		// the container name.
+		// Strip query string and fragment to obtain the pure path-only URL.
+		// Using the WHATWG URL API is safer than splitting on '?' because it
+		// handles edge cases like encoded query characters correctly.
+		let pathOnlyUrl = url;
+		try {
+			const parsed = new URL(url);
+			// Reconstruct origin + pathname — drop search and hash entirely.
+			pathOnlyUrl = `${parsed.origin}${parsed.pathname}`;
+		} catch {
+			// If url is somehow not a valid URL (e.g. a relative path in tests),
+			// fall through with the original string; the containerPrefix check below
+			// will handle it gracefully.
+		}
+
 		const containerPrefix = `/${config.AZURE_STORAGE_CONTAINER}/`;
-		const containerIndex = url.indexOf(containerPrefix);
+		const containerIndex = pathOnlyUrl.indexOf(containerPrefix);
 
 		if (containerIndex === -1) {
-			// URL does not contain the expected container — this should never happen
-			// in normal operation but log a warning rather than crashing. The blob
-			// may have already been deleted or the URL is from a different storage
-			// account (e.g. a stale row from a previous configuration).
 			logger.warn({ url }, "AzureBlobAdapter: could not extract blob path from URL — skipping delete");
 			return;
 		}
 
-		const blobPath = url.slice(containerIndex + containerPrefix.length);
+		const blobPath = pathOnlyUrl.slice(containerIndex + containerPrefix.length);
 		const blockBlobClient = this.container.getBlockBlobClient(blobPath);
 
 		try {
