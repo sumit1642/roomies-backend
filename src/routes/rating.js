@@ -21,6 +21,7 @@
 //
 //   GET  /ratings/me/given                  — authenticated — ratings I've submitted
 //   GET  /ratings/user/:userId              — public — ratings a user has received
+//   GET  /ratings/property/:propertyId      — public — ratings a property has received
 //   GET  /ratings/connection/:connectionId  — authenticated — both ratings for a connection
 //   POST /ratings                           — authenticated — submit a rating
 //
