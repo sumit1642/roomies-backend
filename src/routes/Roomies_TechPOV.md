@@ -1,5 +1,3 @@
-Roomies_TechPOV
-
 # Roomies — Implementation Plan
 
 **Stack:** Node.js + Express (ES modules) · PostgreSQL 16 + PostGIS · Redis + BullMQ · Zod v4 · Pino · Azure target
@@ -393,7 +391,7 @@ src/services/listing.service.js        (modified — expirePendingRequestsForLis
 
 - `createInterestRequest(senderId, listingId)` — throws `409` on duplicate pending request (unique constraint on
   `(sender_id, listing_id)` where `status='pending'`). Throws `403` if sender owns the listing. Post-commit: enqueue
-  `new_interest_request` notification to poster.
+  `interest_request_received` notification to poster.
 - `updateInterestStatus(callerId, interestId, newStatus)`:
     - Resolves actor role by comparing `callerId` to `sender_id` and `listing.posted_by`.
     - Throws `404` if no match (never `403`).
@@ -423,12 +421,11 @@ connection_type       = derived from listing_type
 initiator_confirmed   = FALSE
 counterpart_confirmed = FALSE
 confirmation_status   = 'pending'
-status                = 'active'
 ```
 
 **Notification types fired (post-commit enqueue):**
 
-- `new_interest_request` → recipient: poster
+- `interest_request_received` → recipient: poster
 - `interest_request_accepted` → recipient: sender
 - `interest_request_declined` → recipient: sender
 - `interest_request_withdrawn` → recipient: poster
@@ -522,7 +519,7 @@ src/server.js                              (modified — start/stop worker)
 - Job name: `'send-notification'`.
 - Job payload: `{ recipientId, type, entityType, entityId }`.
 - Worker body:
-  `INSERT INTO notifications (recipient_id, type, entity_type, entity_id) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`.
+  `INSERT INTO notifications (recipient_id, notification_type, entity_type, entity_id) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`.
 - Retry policy: `{ attempts: 5, backoff: { type: 'exponential', delay: 1000 } }`.
 
 **`src/services/notification.service.js`**
@@ -589,20 +586,20 @@ parsed from `config.REDIS_URL`.
       arbitrary properties via unrelated connection)
 - Step 3: `rowCount === 0` disambiguation — follow-up connection query: `404` (not found/not a party) | `422` (not
   confirmed) | `409` (duplicate — ON CONFLICT fired)
-- Step 4: post-commit notification enqueue — user: `rating_received` to `revieweeId`. Property: async owner lookup →
-  `rating_received` to `owner_id`. Both fire-and-forget with `.catch()` logging.
+- Step 4: post-commit notification enqueue — user: `rating_received` to `revieweeId`. Property: `rating_received` to
+  `owner_id` captured from the INSERT CTE RETURNING clause — no separate lookup query needed.
 
-`getRatingsForConnection(callerId, connectionId)` → `{ myRating: Rating|null, theirRating: Rating|null }`
+`getRatingsForConnection(callerId, connectionId)` → `{ myRatings: Rating[], theirRatings: Rating[] }`
 
 - Fetches `initiator_id, counterpart_id` — throws `404` if caller is not a party.
 - Single query fetches both ratings via `reviewer_id = ANY($2::uuid[])`.
 - Filters `is_visible = TRUE AND deleted_at IS NULL`.
-- Resolves `myRating` / `theirRating` by comparing `reviewer_id` to `callerId`.
+- Resolves `myRatings` / `theirRatings` by filtering on `reviewer_id`.
 
 `getPublicRatings(userId, filters)` → `{ items, nextCursor }`
 
 - No auth. Filters: `reviewee_type = 'user'`, `is_visible = TRUE`, `deleted_at IS NULL`.
-- JOINs `users` + LEFT JOIN `student_profiles` for `COALESCE(sp.full_name, u.email)` as `reviewer_name`.
+- JOINs `users` + LEFT JOIN `student_profiles` + LEFT JOIN `pg_owner_profiles` for reviewer name.
 - Keyset on `(created_at DESC, rating_id ASC)`.
 - Item shape:
   `{ ratingId, overallScore, cleanliness/communication/reliability/valueScore, comment, createdAt, reviewer: { fullName, profilePhotoUrl } }`
@@ -611,7 +608,7 @@ parsed from `config.REDIS_URL`.
 
 - Filters: `reviewer_id = $1`, `deleted_at IS NULL` (no `is_visible` filter — reviewer sees their own hidden ratings).
 - Polymorphic reviewee name:
-  `CASE WHEN reviewee_type='user' THEN COALESCE(sp_rev.full_name, pop_rev.owner_full_name, u_rev.email) ELSE p_rev.property_name END`.
+  `CASE WHEN reviewee_type='user' THEN COALESCE(sp_rev.full_name, pop_rev.owner_full_name, 'Anonymous User') ELSE p_rev.property_name END`.
 - Four LEFT JOINs: `users u_rev`, `student_profiles sp_rev`, `pg_owner_profiles pop_rev`, `properties p_rev`.
 - Item shape adds `isVisible` + `reviewee: { fullName, profilePhotoUrl, type }`.
 
@@ -707,7 +704,7 @@ src/server.js                  (modified — register cron jobs)
 | Job                 | Schedule            | Action                                                                              |
 | ------------------- | ------------------- | ----------------------------------------------------------------------------------- |
 | `listingExpiry`     | daily 02:00         | `UPDATE listings SET status='expired' WHERE expires_at < NOW() AND status='active'` |
-| `connectionExpiry`  | daily 03:00         | `UPDATE connections SET status='expired' WHERE ...`                                 |
+| `connectionExpiry`  | daily 03:00         | `UPDATE connections SET confirmation_status='expired' WHERE ...`                    |
 | `expiryWarning`     | daily 01:00         | Enqueue `email-queue` jobs for listings expiring in 7 days                          |
 | `hardDeleteCleanup` | weekly Sunday 04:00 | Permanently DELETE rows where `deleted_at < NOW() - INTERVAL '90 days'`             |
 
