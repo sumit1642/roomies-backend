@@ -498,6 +498,13 @@ CREATE INDEX IF NOT EXISTS idx_verification_requests_user_id ON verification_req
 WHERE
     deleted_at IS NULL;
 
+-- Database-level race-condition guard: at most one non-deleted pending request
+-- per user may exist at a time, even if two submissions arrive concurrently.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_verification_requests_active_pending_per_user ON verification_requests (user_id)
+WHERE
+    deleted_at IS NULL
+    AND status = 'pending';
+
 -- =============================================================================
 -- ZONE 2 — LISTINGS ZONE
 -- Answers: what is being offered, by whom, and where?
