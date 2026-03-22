@@ -1,8 +1,8 @@
 // src/db/utils/spatial.js
 //
- 
+
 import { pool } from "../client.js";
- 
+
 // within `radiusMeters` meters of the given (lat, lng) point.
 //
 // Returns an array of listing_id strings — NOT full listing rows. The caller
@@ -32,18 +32,18 @@ import { pool } from "../client.js";
 // calls this inside a transaction.
 export const findListingsNearPoint = async (lat, lng, radiusMeters, client = pool) => {
 	const { rows } = await client.query(
-		`SELECT listing_id
-     FROM listings
+		`SELECT l.listing_id
+     FROM listings l
+     LEFT JOIN properties p ON p.property_id = l.property_id
      WHERE ST_DWithin(
-             location::geography,
+             COALESCE(l.location, p.location)::geography,
              ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography,
              $3
            )
-       AND status     = 'active'
-       AND deleted_at IS NULL`,
+       AND l.status     = 'active'
+       AND l.deleted_at IS NULL`,
 		[lat, lng, radiusMeters],
 	);
 
-	// Return a flat array of UUID strings for easy use in ANY($N::uuid[]) clause.
 	return rows.map((r) => r.listing_id);
 };
