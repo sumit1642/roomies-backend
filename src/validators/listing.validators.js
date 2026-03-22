@@ -1,6 +1,7 @@
 // src/validators/listing.validators.js
 
 import { z } from "zod";
+import { buildKeysetPaginationQuerySchema, keysetPaginationQuerySchema } from "./pagination.validators.js";
 
 // ─── Shared sub-schemas ───────────────────────────────────────────────────────
 
@@ -62,47 +63,40 @@ export const listingParamsSchema = z.object({
 // radius defaults to 5000m (5km). Max 50km — beyond that, proximity search
 // loses meaning for PG discovery and risks returning most of the table.
 export const searchListingsSchema = z.object({
-	query: z
-		.object({
-			city: z.string().min(1).max(100).optional(),
+	query: buildKeysetPaginationQuerySchema({
+		city: z.string().min(1).max(100).optional(),
 
-			minRent: z.coerce.number().int().min(0).optional(),
-			maxRent: z.coerce.number().int().min(0).optional(),
+		minRent: z.coerce.number().int().min(0).optional(),
+		maxRent: z.coerce.number().int().min(0).optional(),
 
-			roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
-			bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
+		roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
+		bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
 
-			preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
+		preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
 
-			listingType: z.enum(["student_room", "pg_room", "hostel_bed"]).optional(),
+		listingType: z.enum(["student_room", "pg_room", "hostel_bed"]).optional(),
 
-			availableFrom: z.string().date({ error: "availableFrom must be a valid date (YYYY-MM-DD)" }).optional(),
+		availableFrom: z.string().date({ error: "availableFrom must be a valid date (YYYY-MM-DD)" }).optional(),
 
-			// Proximity — requires all three to activate the spatial path
-			lat: z.coerce.number().min(-90).max(90).optional(),
-			lng: z.coerce.number().min(-180).max(180).optional(),
-			radius: z.coerce.number().int().min(100).max(50_000).default(5_000),
+		// Proximity — requires all three to activate the spatial path
+		lat: z.coerce.number().min(-90).max(90).optional(),
+		lng: z.coerce.number().min(-180).max(180).optional(),
+		radius: z.coerce.number().int().min(100).max(50_000).default(5_000),
 
-			// Comma-separated amenity UUID list from query string —
-			// e.g. ?amenityIds=uuid1,uuid2
-			// Transformed into an array for the service.
-			amenityIds: z
-				.string()
-				.optional()
-				.transform((val) =>
-					val ?
-						val
-							.split(",")
-							.map((s) => s.trim())
-							.filter(Boolean)
-					:	[],
-				),
-
-			// Keyset pagination cursor
-			cursorTime: z.string().optional(),
-			cursorId: z.uuid({ error: "cursorId must be a valid UUID" }).optional(),
-			limit: z.coerce.number().int().min(1).max(100).default(20),
-		})
+		// Comma-separated amenity UUID list from query string —
+		// e.g. ?amenityIds=uuid1,uuid2
+		// Parsed into an array first, then each entry is validated as a UUID.
+		amenityIds: z.preprocess(
+			(val) => {
+				if (typeof val !== "string") return val;
+				return val
+					.split(",")
+					.map((s) => s.trim())
+					.filter(Boolean);
+			},
+			z.array(z.uuid({ error: "Each amenity ID must be a valid UUID" })).default([]),
+		),
+	})
 		.refine(
 			(data) => {
 				// Rent range: if both provided, min must not exceed max
@@ -112,15 +106,6 @@ export const searchListingsSchema = z.object({
 				return true;
 			},
 			{ error: "minRent cannot be greater than maxRent", path: ["minRent"] },
-		)
-		.refine(
-			(data) => {
-				// Cursor: both fields must come together or not at all
-				const hasTime = data.cursorTime !== undefined;
-				const hasId = data.cursorId !== undefined;
-				return hasTime === hasId;
-			},
-			{ error: "cursorTime and cursorId must be provided together" },
 		)
 		.refine(
 			(data) => {
@@ -335,18 +320,5 @@ export const saveListingSchema = z.object({
 // GET /api/v1/listings/me/saved
 // Keyset pagination on saved_at (when the user bookmarked the listing).
 export const savedListingsSchema = z.object({
-	query: z
-		.object({
-			cursorTime: z.string().optional(),
-			cursorId: z.uuid({ error: "cursorId must be a valid UUID" }).optional(),
-			limit: z.coerce.number().int().min(1).max(100).default(20),
-		})
-		.refine(
-			(data) => {
-				const hasTime = data.cursorTime !== undefined;
-				const hasId = data.cursorId !== undefined;
-				return hasTime === hasId;
-			},
-			{ error: "cursorTime and cursorId must be provided together" },
-		),
+	query: keysetPaginationQuerySchema,
 });
