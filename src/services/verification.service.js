@@ -15,33 +15,73 @@ export const submitDocument = async (requestingUserId, targetUserId, { documentT
 		throw new AppError("Forbidden", 403);
 	}
 
-	const { rows: profileRows } = await pool.query(
-		`SELECT profile_id
-     FROM pg_owner_profiles
-     WHERE user_id = $1
-       AND deleted_at IS NULL`,
-		[targetUserId],
-	);
-	if (!profileRows.length) {
-		throw new AppError("PG owner profile not found", 404);
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
+
+		const { rows: profileRows } = await client.query(
+			`SELECT profile_id
+       FROM pg_owner_profiles
+       WHERE user_id = $1
+         AND deleted_at IS NULL
+       FOR UPDATE`,
+			[targetUserId],
+		);
+		if (!profileRows.length) {
+			throw new AppError("PG owner profile not found", 404);
+		}
+
+		const { rowCount: pendingRequestCount } = await client.query(
+			`SELECT 1
+       FROM verification_requests
+       WHERE user_id = $1
+         AND status = 'pending'
+         AND deleted_at IS NULL
+       LIMIT 1`,
+			[targetUserId],
+		);
+		if (pendingRequestCount > 0) {
+			throw new AppError("You already have a pending verification request", 409);
+		}
+
+		const { rows } = await client.query(
+			`INSERT INTO verification_requests (user_id, document_type, document_url)
+       VALUES ($1, $2, $3)
+       RETURNING request_id, document_type, document_url, status, submitted_at`,
+			[targetUserId, documentType, documentUrl],
+		);
+
+		const { rowCount: profileRowCount } = await client.query(
+			`UPDATE pg_owner_profiles
+       SET verification_status = 'pending',
+           rejection_reason    = NULL
+       WHERE user_id = $1
+         AND deleted_at IS NULL`,
+			[targetUserId],
+		);
+		if (profileRowCount === 0) {
+			throw new AppError("PG owner profile not found — cannot submit verification", 409);
+		}
+
+		await client.query("COMMIT");
+
+		logger.info(
+			{ userId: targetUserId, documentType, requestId: rows[0].request_id },
+			"Document submitted for verification",
+		);
+
+		return rows[0];
+	} catch (err) {
+		await client.query("ROLLBACK");
+
+		if (err.code === "23505" && err.constraint === "uq_verification_requests_active_pending_per_user") {
+			throw new AppError("You already have a pending verification request", 409);
+		}
+
+		throw err;
+	} finally {
+		client.release();
 	}
-
-	// Single-table INSERT — no transaction needed because there are no other
-	// coupled writes. The pg_owner_profiles status flip to 'pending' happens
-	// explicitly when an admin acts on the request, not automatically on submission.
-	const { rows } = await pool.query(
-		`INSERT INTO verification_requests (user_id, document_type, document_url)
-     VALUES ($1, $2, $3)
-     RETURNING request_id, document_type, document_url, status, submitted_at`,
-		[targetUserId, documentType, documentUrl],
-	);
-
-	logger.info(
-		{ userId: targetUserId, documentType, requestId: rows[0].request_id },
-		"Document submitted for verification",
-	);
-
-	return rows[0];
 };
 
 // ─── Admin queue ──────────────────────────────────────────────────────────────
