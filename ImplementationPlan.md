@@ -490,6 +490,8 @@ index prevents more than one `pending` or `accepted` request from the same stude
 
 Notifications fire post-commit (never inside the transaction): `new_interest_request` → poster,
 `interest_request_accepted` → sender, `interest_request_declined` → sender, `interest_request_withdrawn` → poster.
+System-driven cleanup when a listing is deleted/deactivated or another request is accepted now uses the `expired`
+status instead of `withdrawn`, so it should not be mapped to the user-withdrawal notification copy.
 
 ### `phase3/connections` ✅
 
