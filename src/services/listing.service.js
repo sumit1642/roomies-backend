@@ -312,10 +312,10 @@ export const searchListings = async (userId, filters) => {
 		lat,
 		lng,
 		radius,
-		amenityIds,
+		amenityIds = [],
 		cursorTime,
 		cursorId,
-		limit,
+		limit=20,
 	} = filters;
 
 	let proximityIds = null;
