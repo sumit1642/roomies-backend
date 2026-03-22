@@ -205,10 +205,13 @@ const _acceptInterestRequest = async (posterId, requestId) => {
          ir.listing_id,
          ir.status,
          l.posted_by,
+         l.title AS listing_title,
          l.listing_type,
-         u_poster.phone  AS poster_phone,
-         u_sender.phone  AS sender_phone,
-         COALESCE(sp.full_name, u_sender.email) AS sender_name
+         CASE
+           WHEN l.listing_type = 'student_room' THEN u_poster.phone
+           ELSE pop.business_phone
+         END AS poster_phone,
+         COALESCE(pop.business_name, sp_poster.full_name, u_poster.email) AS poster_name
        FROM interest_requests ir
        JOIN listings l
          ON l.listing_id    = ir.listing_id
@@ -216,12 +219,12 @@ const _acceptInterestRequest = async (posterId, requestId) => {
        JOIN users u_poster
          ON u_poster.user_id = l.posted_by
         AND u_poster.deleted_at IS NULL
-       JOIN users u_sender
-         ON u_sender.user_id = ir.sender_id
-        AND u_sender.deleted_at IS NULL
-       LEFT JOIN student_profiles sp
-         ON sp.user_id    = ir.sender_id
-        AND sp.deleted_at IS NULL
+       LEFT JOIN student_profiles sp_poster
+         ON sp_poster.user_id = l.posted_by
+        AND sp_poster.deleted_at IS NULL
+       LEFT JOIN pg_owner_profiles pop
+         ON pop.user_id = l.posted_by
+        AND pop.deleted_at IS NULL
        WHERE ir.request_id = $1
          AND ir.deleted_at IS NULL
        FOR UPDATE OF ir, l`,
@@ -284,9 +287,12 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			entityId: requestId,
 		});
 
-		const whatsAppLink =
-			ir.sender_phone ?
-				_buildWhatsAppLink(ir.sender_phone, `Hi ${ir.sender_name}, your interest request has been accepted!`)
+		const whatsappLink =
+			ir.poster_phone ?
+				_buildWhatsAppLink(
+					ir.poster_phone,
+					`Hi ${ir.poster_name}, my interest request for ${ir.listing_title} was accepted!`,
+				)
 			:	null;
 
 		return {
@@ -295,7 +301,8 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			listingId: ir.listing_id,
 			status: "accepted",
 			connectionId,
-			whatsAppLink,
+			whatsappLink,
+			whatsAppLink: whatsappLink,
 		};
 	} catch (err) {
 		try {
