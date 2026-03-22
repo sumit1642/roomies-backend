@@ -294,7 +294,12 @@ export const getListing = async (listingId) => {
 	const listing = await fetchListingDetail(listingId);
 	if (!listing) throw new AppError("Listing not found", 404);
 
-	pool.query(`UPDATE listings SET views_count = views_count + 1 WHERE listing_id = $1`, [listingId]);
+	// View counting is best-effort analytics and must never crash the listing read API.
+	void pool
+		.query(`UPDATE listings SET views_count = views_count + 1 WHERE listing_id = $1`, [listingId])
+		.catch((err) => {
+			logger.warn({ err, listingId }, "Failed to increment listing view count");
+		});
 
 	return toRupees(listing);
 };
