@@ -78,7 +78,8 @@ export const submitRating = async (reviewerId, data) => {
              (counterpart_id = $1 AND initiator_id  = $4)
            )
        )
-       ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING
+       ON CONFLICT (reviewer_id, connection_id, reviewee_id)
+	   		WHERE deleted_at IS NULL DO NOTHING
        RETURNING rating_id, created_at`,
 			[
 				reviewerId,
