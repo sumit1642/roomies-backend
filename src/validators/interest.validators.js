@@ -10,6 +10,7 @@
 // transition allowed for this actor from this state?).
 
 import { z } from "zod";
+import { buildKeysetPaginationQuerySchema } from "./pagination.validators.js";
 
 // ─── Create interest request ──────────────────────────────────────────────────
 // POST /api/v1/listings/:listingId/interests
@@ -75,21 +76,9 @@ export const getListingInterestsSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
 	}),
-	query: z
-		.object({
-			status: z.enum(["pending", "accepted", "declined", "withdrawn", "expired"]).optional(),
-			cursorTime: z.string().optional(),
-			cursorId: z.uuid({ error: "cursorId must be a valid UUID" }).optional(),
-			limit: z.coerce.number().int().min(1).max(100).default(20),
-		})
-		.refine(
-			(data) => {
-				const hasTime = data.cursorTime !== undefined;
-				const hasId = data.cursorId !== undefined;
-				return hasTime === hasId;
-			},
-			{ error: "cursorTime and cursorId must be provided together" },
-		),
+	query: buildKeysetPaginationQuerySchema({
+		status: z.enum(["pending", "accepted", "declined", "withdrawn", "expired"]).optional(),
+	}),
 });
 
 // ─── Get my interest requests (student dashboard) ─────────────────────────────
@@ -99,19 +88,7 @@ export const getListingInterestsSchema = z.object({
 // Status filter lets them focus on e.g. only 'accepted' requests (confirmed
 // interest from the poster) or only 'pending' requests (waiting for a response).
 export const getMyInterestsSchema = z.object({
-	query: z
-		.object({
-			status: z.enum(["pending", "accepted", "declined", "withdrawn", "expired"]).optional(),
-			cursorTime: z.string().optional(),
-			cursorId: z.uuid({ error: "cursorId must be a valid UUID" }).optional(),
-			limit: z.coerce.number().int().min(1).max(100).default(20),
-		})
-		.refine(
-			(data) => {
-				const hasTime = data.cursorTime !== undefined;
-				const hasId = data.cursorId !== undefined;
-				return hasTime === hasId;
-			},
-			{ error: "cursorTime and cursorId must be provided together" },
-		),
+	query: buildKeysetPaginationQuerySchema({
+		status: z.enum(["pending", "accepted", "declined", "withdrawn", "expired"]).optional(),
+	}),
 });
