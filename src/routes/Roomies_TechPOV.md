@@ -408,7 +408,8 @@ src/services/listing.service.js        (modified — expirePendingRequestsForLis
 - `getInterestRequestsForListing(callerId, listingId, filters)` — poster-only read. Keyset paginated.
 - `getMyInterestRequests(senderId, filters)` — student's own sent requests. Keyset paginated.
 - `expirePendingRequestsForListing(listingId, client)` — bulk UPDATE inside caller's transaction. Called from
-  `listing.service.updateListingStatus` when transitioning away from `active`.
+  `listing.service.updateListingStatus`, `listing.service.deleteListing`, and the accept-flow to mark other pending
+  requests as `expired` (a system-driven terminal state, not a user withdrawal).
 
 **Connections row at birth:**
 
