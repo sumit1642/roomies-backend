@@ -90,7 +90,7 @@ CREATE TYPE property_status_enum AS ENUM (
 
 -- Tracks where an interest request is in its conversation lifecycle.
 CREATE TYPE request_status_enum AS ENUM (
-    'pending', 'accepted', 'declined', 'withdrawn'
+    'pending', 'accepted', 'declined', 'withdrawn', 'expired'
     );
 
 -- The nature of the real-world interaction recorded in the connections table.
@@ -847,10 +847,10 @@ WHERE
 -- -----------------------------------------------------------------------------
 -- TABLE: interest_requests
 -- Created when a user taps "I'm interested" on a listing.
--- State machine: pending → accepted / declined / withdrawn
+-- State machine: pending → accepted / declined / withdrawn / expired
 --
 -- Partial unique index prevents duplicate active requests per (sender, listing)
--- pair. Declined/withdrawn requests don't block future re-applications.
+-- pair. Declined/withdrawn/expired requests don't block future re-applications.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS interest_requests
 (
@@ -1238,14 +1238,125 @@ EXECUTE FUNCTION set_updated_at();
 -- Safe to inspect and run section by section.
 --
 -- Changes:
---   1. Add interest_request_withdrawn to notification_type_enum
---   2. Add interest_request_id FK column to connections
---   3. Add UNIQUE index for the new FK (enforces one live connection per
+--   1. Add expired to request_status_enum
+--   2. Backfill likely system-expired interest_requests from withdrawn → expired
+--   3. Add interest_request_withdrawn to notification_type_enum
+--   4. Add interest_request_id FK column to connections
+--   5. Add UNIQUE index for the new FK (enforces one live connection per
 --      interest_request at the database level)
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
--- 1. Extend notification_type_enum
+-- 1. Extend request_status_enum
+--
+-- WHY: System-driven cleanup paths (listing delete/deactivate/fill and
+-- accept-flow cleanup for other pending requests) should use 'expired', not the
+-- user-driven 'withdrawn' state. PostgreSQL enums can only be extended with
+-- ADD VALUE — values cannot be removed or reordered. This is additive and safe.
+-- -----------------------------------------------------------------------------
+ALTER TYPE request_status_enum ADD VALUE IF NOT EXISTS 'expired';
+
+-- -----------------------------------------------------------------------------
+-- 2. One-time backfill for historical auto-closed interest requests
+--
+-- WHY: Before the service fix, system-driven cleanup wrote status='withdrawn'.
+-- That conflated user action with automated expiry. This backfill converts only
+-- rows that are likely to have been auto-transitioned by the helper.
+--
+-- HEURISTIC:
+--   We cannot perfectly reconstruct every historical auto-expiration versus a
+--   genuine user withdrawal. So this intentionally uses a conservative filter.
+--   A row is considered a candidate if:
+--
+--   A) its parent listing was deleted / filled / deactivated / expired at
+--      nearly the same time, OR
+--   B) another interest request on the same listing was accepted at nearly the
+--      same time (the accept-flow expires the sibling pending requests).
+--
+-- REVIEW FIRST:
+--   The SELECT COUNT(*) below lets you inspect the candidate volume before the
+--   UPDATE runs. If you want, you can swap COUNT(*) for SELECT ir.* in the CTE
+--   and inspect exact rows manually before applying the update.
+-- -----------------------------------------------------------------------------
+WITH
+    candidate_rows AS (
+        SELECT ir.request_id
+        FROM
+            interest_requests ir
+            JOIN listings l ON l.listing_id = ir.listing_id
+        WHERE
+            ir.status = 'withdrawn'::request_status_enum
+            AND ir.deleted_at IS NULL
+            AND (
+                (
+                    (
+                        l.deleted_at IS NOT NULL
+                        OR l.status IN (
+                            'filled',
+                            'deactivated',
+                            'expired'
+                        )
+                    )
+                    AND ir.updated_at BETWEEN COALESCE(l.deleted_at, l.updated_at) - INTERVAL '5 seconds' AND COALESCE(l.deleted_at, l.updated_at)  + INTERVAL '5 seconds'
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM interest_requests accepted_ir
+                    WHERE
+                        accepted_ir.listing_id = ir.listing_id
+                        AND accepted_ir.status = 'accepted'::request_status_enum
+                        AND accepted_ir.deleted_at IS NULL
+                        AND accepted_ir.request_id <> ir.request_id
+                        AND ir.updated_at BETWEEN accepted_ir.updated_at - INTERVAL '5 seconds' AND accepted_ir.updated_at  + INTERVAL '5 seconds'
+                )
+            )
+    )
+SELECT COUNT(*) AS candidate_count
+FROM candidate_rows;
+
+WITH
+    candidate_rows AS (
+        SELECT ir.request_id
+        FROM
+            interest_requests ir
+            JOIN listings l ON l.listing_id = ir.listing_id
+        WHERE
+            ir.status = 'withdrawn'::request_status_enum
+            AND ir.deleted_at IS NULL
+            AND (
+                (
+                    (
+                        l.deleted_at IS NOT NULL
+                        OR l.status IN (
+                            'filled',
+                            'deactivated',
+                            'expired'
+                        )
+                    )
+                    AND ir.updated_at BETWEEN COALESCE(l.deleted_at, l.updated_at) - INTERVAL '5 seconds' AND COALESCE(l.deleted_at, l.updated_at)  + INTERVAL '5 seconds'
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM interest_requests accepted_ir
+                    WHERE
+                        accepted_ir.listing_id = ir.listing_id
+                        AND accepted_ir.status = 'accepted'::request_status_enum
+                        AND accepted_ir.deleted_at IS NULL
+                        AND accepted_ir.request_id <> ir.request_id
+                        AND ir.updated_at BETWEEN accepted_ir.updated_at - INTERVAL '5 seconds' AND accepted_ir.updated_at  + INTERVAL '5 seconds'
+                )
+            )
+    )
+UPDATE interest_requests ir
+SET
+    status = 'expired'::request_status_enum,
+    updated_at = NOW()
+FROM candidate_rows c
+WHERE
+    ir.request_id = c.request_id;
+
+-- -----------------------------------------------------------------------------
+-- 3. Extend notification_type_enum
 --
 -- WHY: The interest service has four actor-driven transitions. Three of them
 -- (received, accepted, declined) already exist in the enum. The fourth
@@ -1256,7 +1367,7 @@ EXECUTE FUNCTION set_updated_at();
 ALTER TYPE notification_type_enum ADD VALUE IF NOT EXISTS 'interest_request_withdrawn';
 
 -- -----------------------------------------------------------------------------
--- 2. Add interest_request_id to connections
+-- 4. Add interest_request_id to connections
 --
 -- WHY: A connection is born from exactly one interest_request. Without this FK
 -- the audit chain is: connection → listing + two user IDs, then guess which
@@ -1280,7 +1391,7 @@ ALTER TABLE connections
 ADD COLUMN IF NOT EXISTS interest_request_id UUID REFERENCES interest_requests (request_id) ON DELETE SET NULL;
 
 -- -----------------------------------------------------------------------------
--- 3. UNIQUE index on connections.interest_request_id
+-- 5. UNIQUE index on connections.interest_request_id
 --
 -- WHY — uniqueness, not just a lookup index:
 --   _acceptInterestRequest uses a FOR UPDATE row lock to serialise concurrent
@@ -1320,8 +1431,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_interest_request_id ON connect
 WHERE
     interest_request_id IS NOT NULL
     AND deleted_at IS NULL;
-
--- =============================================================================
+	--=============================================================================
 -- SANITY CHECK QUERIES
 --
 --   \dt       list all tables       (expect 19 tables)
