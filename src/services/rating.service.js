@@ -126,8 +126,10 @@ export const submitRating = async (reviewerId, data) => {
           reliability_score, value_score, review_text)
        SELECT $1, $2, $3::reviewee_type_enum, $4, $5, $6, $7, $8, $9, $10
        FROM gate
-       ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING
-       RETURNING rating_id, created_at, (SELECT owner_id FROM gate) AS owner_id`,
+       ON CONFLICT (reviewer_id, connection_id, reviewee_id)
+	   		WHERE deleted_at IS NULL DO NOTHING
+   			RETURNING rating_id, created_at,
+   			(SELECT owner_id FROM gate) AS owner_id`,
 			[
 				reviewerId,
 				connectionId,
