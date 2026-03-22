@@ -912,7 +912,7 @@ This is the most complex phase. Three full pipelines run in parallel — one per
 
 > **📋 CAPTURE: Save `data.connectionId` as `PRIYA_CONNECTION_ID`.**
 >
-> **📌** At this moment, three things happened atomically in the DB: (1) `interest_requests` row updated to `'accepted'`, (2) a `connections` row was created with `connection_type = 'hostel_stay'`, (3) all other pending requests for this listing are bulk-withdrawn. Post-commit, a notification is queued to Priya.
+> **📌** At this moment, three things happened atomically in the DB: (1) `interest_requests` row updated to `'accepted'`, (2) a `connections` row was created with `connection_type = 'hostel_stay'`, (3) all other pending requests for this listing are bulk-expired. Post-commit, a notification is queued to Priya.
 
 ---
 

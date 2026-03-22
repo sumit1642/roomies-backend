@@ -8,7 +8,7 @@
 //   listing_id
 //   message
 //   status            — type: request_status_enum
-//                       values: 'pending','accepted','declined','withdrawn'
+//                       values: 'pending','accepted','declined','withdrawn','expired'
 //   created_at, updated_at, deleted_at
 //
 // listings columns relevant here:
@@ -550,7 +550,7 @@ export const expirePendingRequestsForListing = async (listingId, client = pool, 
 
 	const { rowCount } = await client.query(
 		`UPDATE interest_requests
-     SET status = 'withdrawn'::request_status_enum, updated_at = NOW()
+     SET status = 'expired'::request_status_enum, updated_at = NOW()
      WHERE listing_id = $1
        AND status     = 'pending'
        AND deleted_at IS NULL

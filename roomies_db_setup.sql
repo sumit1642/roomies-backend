@@ -90,7 +90,7 @@ CREATE TYPE property_status_enum AS ENUM (
 
 -- Tracks where an interest request is in its conversation lifecycle.
 CREATE TYPE request_status_enum AS ENUM (
-    'pending', 'accepted', 'declined', 'withdrawn'
+    'pending', 'accepted', 'declined', 'withdrawn', 'expired'
     );
 
 -- The nature of the real-world interaction recorded in the connections table.
@@ -847,10 +847,10 @@ WHERE
 -- -----------------------------------------------------------------------------
 -- TABLE: interest_requests
 -- Created when a user taps "I'm interested" on a listing.
--- State machine: pending → accepted / declined / withdrawn
+-- State machine: pending → accepted / declined / withdrawn / expired
 --
 -- Partial unique index prevents duplicate active requests per (sender, listing)
--- pair. Declined/withdrawn requests don't block future re-applications.
+-- pair. Declined/withdrawn/expired requests don't block future re-applications.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS interest_requests
 (

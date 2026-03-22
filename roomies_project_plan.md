@@ -109,7 +109,7 @@ The core product zone. Its most important design decision is that both student r
 
 The pipeline that converts two strangers into a pair with a proven real-world history. Three sequential stages: intent (`interest_requests`), proof (`connections`), and awareness (`notifications`).
 
-**`interest_requests`** is created when a student taps "I'm interested." The status state machine has four states: `pending`, `accepted`, `declined`, `withdrawn`. A partial unique index on `(sender_id, listing_id) WHERE status IN ('pending', 'accepted')` prevents duplicate concurrent requests while still allowing re-application after a decline or withdrawal.
+**`interest_requests`** is created when a student taps "I'm interested." The status state machine has five states: `pending`, `accepted`, `declined`, `withdrawn`, `expired`. A partial unique index on `(sender_id, listing_id) WHERE status IN ('pending', 'accepted')` prevents duplicate concurrent requests while still allowing re-application after a decline, withdrawal, or system-driven expiration.
 
 **`connections` — the trust anchor.** A connection row is only created after an interest request is accepted. Its `confirmation_status` only reaches `confirmed` after BOTH `initiator_confirmed` and `counterpart_confirmed` are independently set to `TRUE` by each party. The `connection_type` (`student_roommate`, `pg_stay`, `hostel_stay`, `visit_only`) determines which rating dimensions are meaningful when Zone 4 ratings are submitted.
 
