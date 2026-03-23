@@ -41,6 +41,7 @@ export const findListingsNearPoint = async (lat, lng, radiusMeters, client = poo
              $3
            )
        AND l.status     = 'active'
+       AND l.expires_at > NOW()
        AND l.deleted_at IS NULL`,
 		[lat, lng, radiusMeters],
 	);
