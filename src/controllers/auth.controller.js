@@ -52,7 +52,6 @@ export const register = async (req, res, next) => {
 export const login = async (req, res, next) => {
 	try {
 		const tokens = await authService.login(req.body);
-		// Same dual-delivery pattern as register.
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 		res.json({ status: "success", data: tokens });
 	} catch (err) {
@@ -77,8 +76,23 @@ export const refresh = async (req, res, next) => {
 			return next(new AppError("Refresh token is required", 401));
 		}
 
-		const result = await authService.refresh(incomingRefreshToken);
-		res.json({ status: "success", data: result });
+		const tokens = await authService.refresh(incomingRefreshToken);
+
+		// Set fresh cookies for browser clients. Previously this was missing,
+		// which meant the expired accessToken cookie was never replaced on an
+		// explicit refresh call — the browser had to rely on silent-refresh
+		// middleware to eventually patch things up. Now refresh behaves like
+		// login: both tokens are delivered via cookie AND JSON body so that
+		// browser and Android clients are handled identically.
+		//
+		// The refreshToken cookie is also rotated here. Since authService.refresh()
+		// now calls storeRefreshToken(), the old refresh token is atomically
+		// revoked in Redis the moment the new one is stored. A compromised old
+		// refresh token presented after this point will fail the Redis comparison
+		// in the service and return 401.
+		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
+
+		res.json({ status: "success", data: tokens });
 	} catch (err) {
 		next(err);
 	}
@@ -105,7 +119,6 @@ export const verifyOtp = async (req, res, next) => {
 export const me = (req, res) => {
 	res.json({ status: "success", data: req.user });
 };
-
 
 export const googleCallback = async (req, res, next) => {
 	try {
