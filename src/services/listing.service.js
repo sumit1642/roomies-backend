@@ -17,6 +17,7 @@ import { assertPgOwnerVerified } from "../db/utils/pgOwner.js";
 import { findListingsNearPoint } from "../db/utils/spatial.js";
 import { scoreListingsForUser } from "../db/utils/compatibility.js";
 import { expirePendingRequestsForListing } from "./interest.service.js";
+import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 
 const toRupees = (listing) => {
 	if (!listing) return null;
@@ -625,7 +626,8 @@ const ALLOWED_STATUS_TRANSITIONS = {
 
 export const updateListingStatus = async (posterId, listingId, newStatus) => {
 	const { rows: listingRows } = await pool.query(
-		`SELECT status FROM listings
+		`SELECT status, expires_at, (expires_at <= NOW()) AS is_expired
+     FROM listings
      WHERE listing_id = $1
        AND posted_by  = $2
        AND deleted_at IS NULL`,
@@ -637,6 +639,11 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 	}
 
 	const currentStatus = listingRows[0].status;
+
+	if (newStatus === "active" && listingRows[0].is_expired) {
+		throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
+	}
+
 	const allowed = ALLOWED_STATUS_TRANSITIONS[currentStatus] ?? [];
 
 	if (!allowed.includes(newStatus)) {
@@ -738,11 +745,29 @@ export const saveListing = async (userId, listingId) => {
 		`SELECT 1 FROM listings
      WHERE listing_id = $1
        AND status     = 'active'
+       AND expires_at > NOW()
        AND deleted_at IS NULL`,
 		[listingId],
 	);
 	if (!listingCheck.length) {
-		throw new AppError("Listing not found or no longer active", 404);
+		const { rows: availabilityRows } = await pool.query(
+			`SELECT status, expires_at, (expires_at <= NOW()) AS is_expired
+       FROM listings
+       WHERE listing_id = $1
+         AND deleted_at IS NULL`,
+			[listingId],
+		);
+
+		if (!availabilityRows.length) {
+			throw new AppError("Listing not found", 404);
+		}
+
+		const listing = availabilityRows[0];
+		if (listing.is_expired) {
+			throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
+		}
+
+		throw new AppError(UNAVAILABLE_LISTING_MESSAGE, 422);
 	}
 
 	await pool.query(
@@ -812,6 +837,7 @@ export const getSavedListings = async (userId, { cursorTime, cursorId, limit = 2
     WHERE sl.user_id    = $1
       AND sl.deleted_at IS NULL
       AND l.status      = 'active'
+      AND l.expires_at  > NOW()
       AND l.deleted_at  IS NULL
       ${cursorClause}
     ORDER BY sl.saved_at DESC, l.listing_id ASC
