@@ -112,7 +112,7 @@ export const getListingPhotos = async (listingId) => {
        photo_url      AS "photoUrl",
        is_cover       AS "isCover",
        display_order  AS "displayOrder",
-       created_at     AS "createdAt"
+       uploaded_at     AS "createdAt"
      FROM listing_photos
      WHERE listing_id = $1
        AND deleted_at IS NULL
