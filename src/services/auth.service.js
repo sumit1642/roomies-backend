@@ -204,11 +204,9 @@ export const refresh = async (incomingRefreshToken) => {
 		throw new AppError("Refresh token is invalid or has been revoked", 401);
 	}
 
-	const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [
-		payload.userId,
-	]);
-	const roles = roleRows.map((r) => r.role_name);
-
+	// Load fresh user state from DB — the refresh token payload may be up to
+	// 7 days old, so roles and account status could have changed since it was
+	// issued. Never trust stale payload data for authorization decisions.
 	const { rows: userRows } = await pool.query(
 		`SELECT email, is_email_verified, account_status FROM users WHERE user_id = $1 AND deleted_at IS NULL`,
 		[payload.userId],
@@ -221,8 +219,32 @@ export const refresh = async (incomingRefreshToken) => {
 		throw new AppError("Account inactive", 401);
 	}
 
-	const accessToken = issueAccessToken(payload.userId, userRows[0].email, roles);
-	return { accessToken };
+	const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [
+		payload.userId,
+	]);
+	const roles = roleRows.map((r) => r.role_name);
+
+	// Build a FULL token response — both access and refresh tokens — using the
+	// same canonical path as login and register. This has two important effects:
+	//
+	// 1. REFRESH TOKEN ROTATION: storing the new refresh token in Redis
+	//    atomically revokes the old one because only one token is kept per user
+	//    under the key refreshToken:{userId}. If the old token is presented
+	//    again (e.g. by a compromised client), it will fail the storedToken
+	//    comparison above and return 401.
+	//
+	// 2. CONSISTENT RESPONSE SHAPE: every auth endpoint now returns
+	//    { accessToken, refreshToken, user: {...} }, so browser clients get
+	//    fresh cookies set by the controller and Android clients get fresh
+	//    tokens in the JSON body — both handled identically.
+	const tokens = buildTokenResponse(payload.userId, userRows[0].email, roles, userRows[0].is_email_verified);
+
+	// Overwrite the old refresh token in Redis, revoking it.
+	await storeRefreshToken(payload.userId, tokens.refreshToken);
+
+	logger.info({ userId: payload.userId }, "Tokens refreshed");
+
+	return tokens;
 };
 
 export const sendOtp = async (userId, email) => {
