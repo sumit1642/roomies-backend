@@ -29,6 +29,7 @@
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 import { enqueueNotification } from "../workers/notificationQueue.js";
 
 const _buildWhatsAppLink = (phone, message) => {
@@ -48,7 +49,14 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 	const { message } = data;
 
 	const { rows: listingRows } = await pool.query(
-		`SELECT l.listing_id, l.posted_by, l.status, l.title, u.phone
+		`SELECT
+       l.listing_id,
+       l.posted_by,
+       l.status,
+       l.title,
+       l.expires_at,
+       (l.expires_at <= NOW()) AS is_expired,
+       u.phone
      FROM listings l
      JOIN users u ON u.user_id = l.posted_by AND u.deleted_at IS NULL
      WHERE l.listing_id = $1 AND l.deleted_at IS NULL`,
@@ -61,8 +69,12 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 
 	const listing = listingRows[0];
 
+	if (listing.is_expired) {
+		throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
+	}
+
 	if (listing.status !== "active") {
-		throw new AppError("This listing is no longer accepting interest requests", 422);
+		throw new AppError(UNAVAILABLE_LISTING_MESSAGE, 422);
 	}
 
 	if (listing.posted_by === studentId) {
@@ -205,6 +217,9 @@ const _acceptInterestRequest = async (posterId, requestId) => {
          ir.listing_id,
          ir.status,
          l.posted_by,
+         l.status AS listing_status,
+         l.expires_at,
+         (l.expires_at <= NOW()) AS listing_is_expired,
          l.title AS listing_title,
          l.listing_type,
          CASE
@@ -246,6 +261,16 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 		if (ir.status !== "pending") {
 			await client.query("ROLLBACK");
 			throw new AppError(`Cannot accept a request with status '${ir.status}'`, 422);
+		}
+
+		if (ir.listing_is_expired) {
+			await client.query("ROLLBACK");
+			throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
+		}
+
+		if (ir.listing_status !== "active") {
+			await client.query("ROLLBACK");
+			throw new AppError(UNAVAILABLE_LISTING_MESSAGE, 422);
 		}
 
 		await client.query(
