@@ -19,6 +19,21 @@ import { scoreListingsForUser } from "../db/utils/compatibility.js";
 import { expirePendingRequestsForListing } from "./interest.service.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 
+// ─── Location fields that belong to the parent property for pg/hostel listings ─
+// These are forbidden on updateListing for pg_room and hostel_bed because the
+// listing row inherits them from its parent property. Allowing edits here would
+// cause the listing to drift away from the property's true location, breaking
+// proximity search and data integrity.
+const PROPERTY_OWNED_LOCATION_FIELDS = new Set([
+	"addressLine",
+	"city",
+	"locality",
+	"landmark",
+	"pincode",
+	"latitude",
+	"longitude",
+]);
+
 const toRupees = (listing) => {
 	if (!listing) return null;
 	return {
@@ -295,7 +310,6 @@ export const getListing = async (listingId) => {
 	const listing = await fetchListingDetail(listingId);
 	if (!listing) throw new AppError("Listing not found", 404);
 
-	// View counting is best-effort analytics and must never crash the listing read API.
 	void pool
 		.query(`UPDATE listings SET views_count = views_count + 1 WHERE listing_id = $1`, [listingId])
 		.catch((err) => {
@@ -321,7 +335,7 @@ export const searchListings = async (userId, filters) => {
 		amenityIds = [],
 		cursorTime,
 		cursorId,
-		limit=20,
+		limit = 20,
 	} = filters;
 
 	let proximityIds = null;
@@ -337,8 +351,15 @@ export const searchListings = async (userId, filters) => {
 	let p = 1;
 
 	if (city !== undefined) {
-		clauses.push(`l.city ILIKE $${p}`);
-		params.push(`%${city}%`);
+		// FIX (QA #5): Use prefix match instead of full substring match.
+		// The existing B-tree index on (city, status) can serve prefix queries
+		// (city ILIKE 'x%') but NOT leading-wildcard queries ('%x%') because the
+		// B-tree must be able to determine the search start point from the left side
+		// of the string. Prefix search is semantically correct here — users type
+		// "Delhi" or "Bengaluru", not substrings of city names.
+		const escapedCity = city.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+		clauses.push(`l.city ILIKE $${p} ESCAPE '\\'`);
+		params.push(`${escapedCity}%`);
 		p++;
 	}
 
@@ -390,16 +411,33 @@ export const searchListings = async (userId, filters) => {
 		p++;
 	}
 
-	for (const amenityId of amenityIds) {
+	// FIX (QA #6): Replace per-amenity correlated EXISTS subqueries with a single
+	// set-based approach. The old code appended one EXISTS clause per amenity ID,
+	// meaning a 5-amenity filter generated 5 correlated subqueries — query
+	// complexity grew linearly with the filter count.
+	//
+	// The new approach: join listing_amenities once, filter to the requested set,
+	// group by listing_id, and require that every requested amenity is represented
+	// using HAVING COUNT(DISTINCT amenity_id) = cardinality($n). This is a single
+	// join regardless of how many amenities are requested.
+	//
+	// The listing_id is pushed into an EXISTS subquery so the outer query's WHERE
+	// clause stays clean and the planner can still use the (listing_id, amenity_id)
+	// index on listing_amenities efficiently.
+	if (amenityIds.length > 0) {
+		const uniqueAmenityIds = [...new Set(amenityIds)];
 		clauses.push(
 			`EXISTS (
-        SELECT 1 FROM listing_amenities la_f
+        SELECT 1
+        FROM listing_amenities la_f
         WHERE la_f.listing_id = l.listing_id
-          AND la_f.amenity_id = $${p}
+          AND la_f.amenity_id = ANY($${p}::uuid[])
+        GROUP BY la_f.listing_id
+        HAVING COUNT(DISTINCT la_f.amenity_id) = $${p + 1}
       )`,
 		);
-		params.push(amenityId);
-		p++;
+		params.push(uniqueAmenityIds, uniqueAmenityIds.length);
+		p += 2;
 	}
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
@@ -474,6 +512,34 @@ export const searchListings = async (userId, filters) => {
 };
 
 export const updateListing = async (posterId, listingId, body) => {
+	// FIX (QA #2): Enforce the PG/hostel location invariant.
+	// For pg_room and hostel_bed listings, city/address/lat/lng are owned by the
+	// parent property. We must check the listing type BEFORE building the SET
+	// clause so we can reject any attempt to overwrite location data on a
+	// property-linked listing. This prevents silent drift between the listing row
+	// and its parent property's true location.
+	const { rows: typeRows } = await pool.query(
+		`SELECT listing_type FROM listings WHERE listing_id = $1 AND posted_by = $2 AND deleted_at IS NULL`,
+		[listingId, posterId],
+	);
+	if (!typeRows.length) throw new AppError("Listing not found", 404);
+
+	const listingType = typeRows[0].listing_type;
+	const isPropertyLinked = listingType === "pg_room" || listingType === "hostel_bed";
+
+	if (isPropertyLinked) {
+		// Check whether the caller is trying to mutate any location field that
+		// belongs to the parent property.
+		const forbiddenFields = Object.keys(body).filter((key) => PROPERTY_OWNED_LOCATION_FIELDS.has(key));
+		if (forbiddenFields.length > 0) {
+			throw new AppError(
+				`Location fields (${forbiddenFields.join(", ")}) cannot be updated on a ${listingType} listing — ` +
+					`they are inherited from the parent property. Update the property's address instead.`,
+				422,
+			);
+		}
+	}
+
 	const columnMap = {
 		title: "title",
 		description: "description",
@@ -485,6 +551,8 @@ export const updateListing = async (posterId, listingId, body) => {
 		preferredGender: "preferred_gender",
 		availableFrom: "available_from",
 		availableUntil: "available_until",
+		// These are only reachable for student_room listings; property-linked
+		// listings are blocked above before we ever reach this map.
 		addressLine: "address_line",
 		city: "city",
 		locality: "locality",
@@ -539,16 +607,9 @@ export const updateListing = async (posterId, listingId, body) => {
 				values,
 			);
 			if (rowCount === 0) throw new AppError("Listing not found", 404);
-		} else {
-			const { rows } = await client.query(
-				`SELECT 1 FROM listings
-         WHERE listing_id = $1
-           AND posted_by  = $2
-           AND deleted_at IS NULL`,
-				[listingId, posterId],
-			);
-			if (!rows.length) throw new AppError("Listing not found", 404);
 		}
+		// If no scalar fields changed, ownership was already confirmed by the
+		// listing type lookup at the top of this function.
 
 		if (updateAmenities) {
 			await client.query(`DELETE FROM listing_amenities WHERE listing_id = $1`, [listingId]);
@@ -606,19 +667,7 @@ export const deleteListing = async (posterId, listingId) => {
 };
 
 // ─── Change listing status ─────────────────────────────────────────────────────
-//
-// ─── FIX: STUDENT_ROOM REACTIVATION ──────────────────────────────────────────
-//
-// The previous WHERE clause included:
-//   AND ($1 <> 'active' OR EXISTS (SELECT 1 FROM properties p WHERE ...))
-//
-// This blocked student_room reactivation because student listings have
-// property_id = NULL, so the EXISTS subquery always returns false, and when
-// $1 = 'active' the whole condition became false — producing a spurious 409.
-//
-// Fix: add OR l.property_id IS NULL so student listings (which are always
-// property-less by design) can freely transition to 'active'. PG listings
-// still require the property to exist before they can be reactivated.
+
 const ALLOWED_STATUS_TRANSITIONS = {
 	active: ["filled", "deactivated"],
 	deactivated: ["active"],
