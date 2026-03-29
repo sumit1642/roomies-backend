@@ -351,12 +351,10 @@ export const searchListings = async (userId, filters) => {
 	let p = 1;
 
 	if (city !== undefined) {
-		// FIX (QA #5): Use prefix match instead of full substring match.
-		// The existing B-tree index on (city, status) can serve prefix queries
-		// (city ILIKE 'x%') but NOT leading-wildcard queries ('%x%') because the
-		// B-tree must be able to determine the search start point from the left side
-		// of the string. Prefix search is semantically correct here — users type
-		// "Delhi" or "Bengaluru", not substrings of city names.
+		// Prefix match: 'city%' is left-anchored and can be served by the
+		// idx_listings_city_pattern_ops index (varchar_pattern_ops). The ESCAPE
+		// clause prevents user-supplied backslashes, percent signs, or underscores
+		// from being interpreted as pattern metacharacters.
 		const escapedCity = city.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 		clauses.push(`l.city ILIKE $${p} ESCAPE '\\'`);
 		params.push(`${escapedCity}%`);
@@ -411,19 +409,6 @@ export const searchListings = async (userId, filters) => {
 		p++;
 	}
 
-	// FIX (QA #6): Replace per-amenity correlated EXISTS subqueries with a single
-	// set-based approach. The old code appended one EXISTS clause per amenity ID,
-	// meaning a 5-amenity filter generated 5 correlated subqueries — query
-	// complexity grew linearly with the filter count.
-	//
-	// The new approach: join listing_amenities once, filter to the requested set,
-	// group by listing_id, and require that every requested amenity is represented
-	// using HAVING COUNT(DISTINCT amenity_id) = cardinality($n). This is a single
-	// join regardless of how many amenities are requested.
-	//
-	// The listing_id is pushed into an EXISTS subquery so the outer query's WHERE
-	// clause stays clean and the planner can still use the (listing_id, amenity_id)
-	// index on listing_amenities efficiently.
 	if (amenityIds.length > 0) {
 		const uniqueAmenityIds = [...new Set(amenityIds)];
 		clauses.push(
@@ -512,34 +497,18 @@ export const searchListings = async (userId, filters) => {
 };
 
 export const updateListing = async (posterId, listingId, body) => {
-	// FIX (QA #2): Enforce the PG/hostel location invariant.
-	// For pg_room and hostel_bed listings, city/address/lat/lng are owned by the
-	// parent property. We must check the listing type BEFORE building the SET
-	// clause so we can reject any attempt to overwrite location data on a
-	// property-linked listing. This prevents silent drift between the listing row
-	// and its parent property's true location.
-	const { rows: typeRows } = await pool.query(
-		`SELECT listing_type FROM listings WHERE listing_id = $1 AND posted_by = $2 AND deleted_at IS NULL`,
-		[listingId, posterId],
-	);
-	if (!typeRows.length) throw new AppError("Listing not found", 404);
-
-	const listingType = typeRows[0].listing_type;
-	const isPropertyLinked = listingType === "pg_room" || listingType === "hostel_bed";
-
-	if (isPropertyLinked) {
-		// Check whether the caller is trying to mutate any location field that
-		// belongs to the parent property.
-		const forbiddenFields = Object.keys(body).filter((key) => PROPERTY_OWNED_LOCATION_FIELDS.has(key));
-		if (forbiddenFields.length > 0) {
-			throw new AppError(
-				`Location fields (${forbiddenFields.join(", ")}) cannot be updated on a ${listingType} listing — ` +
-					`they are inherited from the parent property. Update the property's address instead.`,
-				422,
-			);
-		}
-	}
-
+	// FIX (Finding 2): Move the ownership/type SELECT inside the transaction with
+	// FOR UPDATE to prevent a race condition with concurrent soft-deletes.
+	//
+	// Previously this SELECT ran against the shared pool before the transaction
+	// was opened, creating a TOCTOU window:
+	//   T1 (us):    SELECT listing_type → row exists
+	//   T2 (other): UPDATE listings SET deleted_at = NOW() → row soft-deleted
+	//   T1 (us):    BEGIN; UPDATE listings SET ... → rowCount 0, spurious 404
+	//
+	// With FOR UPDATE inside the transaction, T2 blocks until T1 commits,
+	// closing the race entirely. The ownership check (posted_by = $2) remains
+	// so a listing owned by someone else still returns a clean 404.
 	const columnMap = {
 		title: "title",
 		description: "description",
@@ -551,8 +520,6 @@ export const updateListing = async (posterId, listingId, body) => {
 		preferredGender: "preferred_gender",
 		availableFrom: "available_from",
 		availableUntil: "available_until",
-		// These are only reachable for student_room listings; property-linked
-		// listings are blocked above before we ever reach this map.
 		addressLine: "address_line",
 		city: "city",
 		locality: "locality",
@@ -596,6 +563,39 @@ export const updateListing = async (posterId, listingId, body) => {
 	try {
 		await client.query("BEGIN");
 
+		// Lock and fetch the listing type inside the transaction.
+		// FOR UPDATE prevents concurrent soft-deletes or status changes from
+		// racing between this check and the subsequent UPDATE below.
+		const { rows: typeRows } = await client.query(
+			`SELECT listing_type
+       FROM listings
+       WHERE listing_id = $1
+         AND posted_by  = $2
+         AND deleted_at IS NULL
+       FOR UPDATE`,
+			[listingId, posterId],
+		);
+
+		if (!typeRows.length) {
+			throw new AppError("Listing not found", 404);
+		}
+
+		const listingType = typeRows[0].listing_type;
+		const isPropertyLinked = listingType === "pg_room" || listingType === "hostel_bed";
+
+		if (isPropertyLinked) {
+			// Check whether the caller is trying to mutate any location field that
+			// belongs to the parent property.
+			const forbiddenFields = Object.keys(body).filter((key) => PROPERTY_OWNED_LOCATION_FIELDS.has(key));
+			if (forbiddenFields.length > 0) {
+				throw new AppError(
+					`Location fields (${forbiddenFields.join(", ")}) cannot be updated on a ${listingType} listing — ` +
+						`they are inherited from the parent property. Update the property's address instead.`,
+					422,
+				);
+			}
+		}
+
 		if (setClauses.length) {
 			values.push(listingId, posterId);
 			const { rowCount } = await client.query(
@@ -606,10 +606,11 @@ export const updateListing = async (posterId, listingId, body) => {
            AND deleted_at IS NULL`,
 				values,
 			);
+			// rowCount can only be 0 here if another transaction deleted the row
+			// between our FOR UPDATE lock and this UPDATE — essentially impossible
+			// since the FOR UPDATE holds the row lock. Guard defensively anyway.
 			if (rowCount === 0) throw new AppError("Listing not found", 404);
 		}
-		// If no scalar fields changed, ownership was already confirmed by the
-		// listing type lookup at the top of this function.
 
 		if (updateAmenities) {
 			await client.query(`DELETE FROM listing_amenities WHERE listing_id = $1`, [listingId]);
