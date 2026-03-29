@@ -187,8 +187,9 @@ The pipeline that converts two strangers into a pair with a proven real-world hi
 (`interest_requests`), proof (`connections`), and awareness (`notifications`).
 
 **`interest_requests`** is created when a student taps "I'm interested." The status state machine has five states:
-`pending`, `accepted`, `declined`, `withdrawn`, `expired`. The table includes `expires_at TIMESTAMP NULL` so expiry can
-be driven either by explicit per-row expiry timestamps or by age from `created_at`. A partial unique index on
+`pending`, `accepted`, `declined`, `withdrawn`, `expired`. Expiry is currently listing-driven in service logic (not a
+per-row `interest_requests.expires_at` column): `expirePendingRequestsForListing()` marks pending rows as `expired` when
+the listing is no longer available or when one request is accepted. A partial unique index on
 `(sender_id, listing_id) WHERE status IN ('pending', 'accepted')` prevents duplicate concurrent requests while still
 allowing re-application after a decline, withdrawal, or system-driven expiration.
 
@@ -414,7 +415,8 @@ State transitions include:
 - `pending → accepted` (poster accepts)
 - `pending → declined` (poster declines)
 - `pending → withdrawn` (sender withdraws)
-- `pending → expired` (scheduled expiry job runs, or `expires_at <= NOW()`)
+- `pending → expired` (event-driven via `expirePendingRequestsForListing()` when listing is deactivated/filled/deleted,
+  or when one request is accepted and the remaining pending requests are closed)
 
 Because the partial unique index is scoped to `WHERE status IN ('pending', 'accepted')`, an expired request is no longer
 considered active, so the same sender can re-apply to the same listing after expiration.
@@ -506,10 +508,11 @@ concurrency settings and retry policy.
 | Schedule            | Task                                                                                                                                                                                         | Tables Affected                      |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
 | Daily 02:00         | Listing expiry — bulk-update past-expiry active listings to `expired`, dispatch notifications                                                                                                | `listings`, `notifications`          |
-| Daily 02:30         | Interest request expiry — transition `pending` requests to `expired` when `expires_at <= NOW()` or when `created_at` is older than a configurable threshold (`INTEREST_REQUEST_EXPIRY_DAYS`) | `interest_requests`, `notifications` |
 | Daily 03:00         | Connection expiry — find pending connections older than 30 days, transition to `expired`                                                                                                     | `connections`                        |
 | Daily 01:00         | Expiry warning — find active listings where `expires_at` within 3 days, send `listing_expiring` notification                                                                                 | `listings`, `notifications`          |
 | Weekly Sunday 04:00 | Hard-delete cleanup — permanently remove rows where `deleted_at < NOW() - 90 days`                                                                                                           | All tables with `deleted_at`         |
+
+Interest-request expiry is currently event-driven (service-level), not cron-driven: `src/services/interest.service.js#expirePendingRequestsForListing()` is invoked from listing/interest workflows to mark stale competing pending requests as `expired`.
 
 ---
 
