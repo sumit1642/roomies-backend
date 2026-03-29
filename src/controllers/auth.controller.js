@@ -66,7 +66,10 @@ export const logout = async (req, res, next) => {
 		if (!incomingRefreshToken) {
 			return next(new AppError("Refresh token is required", 401));
 		}
-		await authService.logoutCurrent(req.user.userId, incomingRefreshToken);
+		if (!req.user?.sid) {
+			return next(new AppError("Authenticated session is missing", 401));
+		}
+		await authService.logoutCurrent(req.user.userId, incomingRefreshToken, req.user.sid);
 		clearAuthCookies(res);
 		res.json({ status: "success", message: "Logged out" });
 	} catch (err) {

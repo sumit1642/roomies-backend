@@ -21,8 +21,8 @@ const INACTIVE_ACCOUNT_STATUSES = new Set(["suspended", "banned", "deactivated"]
 
 // ─── Token helpers ───────────────────────────────────────────────────────────
 
-const issueAccessToken = (userId, email, roles) =>
-	jwt.sign({ userId, email, roles }, config.JWT_SECRET, {
+const issueAccessToken = (userId, email, roles, sid) =>
+	jwt.sign({ userId, email, roles, sid }, config.JWT_SECRET, {
 		expiresIn: config.JWT_EXPIRES_IN,
 	});
 
@@ -34,6 +34,7 @@ const issueRefreshToken = (userId, sid) =>
 const issueSessionId = () => crypto.randomUUID();
 
 const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
+const userSessionsKey = (userId) => `userSessions:${userId}`;
 
 export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) => {
 	if (typeof expiresIn === "number" && Number.isFinite(expiresIn) && expiresIn > 0) {
@@ -59,13 +60,39 @@ export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) =
 const REFRESH_TTL = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN);
 
 const buildTokenResponse = (userId, sid, email, roles, isEmailVerified) => {
-	const accessToken = issueAccessToken(userId, email, roles);
+	const accessToken = issueAccessToken(userId, email, roles, sid);
 	const refreshToken = issueRefreshToken(userId, sid);
 	return { accessToken, refreshToken, user: { userId, email, roles, isEmailVerified }, sid };
 };
 
 const storeRefreshToken = async (userId, sid, refreshToken) => {
-	await redis.setEx(refreshTokenKey(userId, sid), REFRESH_TTL, refreshToken);
+	const multi = redis.multi();
+	multi.setEx(refreshTokenKey(userId, sid), REFRESH_TTL, refreshToken);
+	multi.sAdd(userSessionsKey(userId), sid);
+	await multi.exec();
+};
+
+const deleteSessionToken = async (userId, sid) => {
+	const multi = redis.multi();
+	multi.del(refreshTokenKey(userId, sid));
+	multi.sRem(userSessionsKey(userId), sid);
+	await multi.exec();
+};
+
+const casRefreshTokenScript = `
+if redis.call("GET", KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+redis.call("SETEX", KEYS[1], tonumber(ARGV[3]), ARGV[2])
+return 1
+`;
+
+export const casRefreshToken = async (userId, sid, expectedOldToken, newToken, ttl = REFRESH_TTL) => {
+	const result = await redis.eval(casRefreshTokenScript, {
+		keys: [refreshTokenKey(userId, sid)],
+		arguments: [expectedOldToken, newToken, String(ttl)],
+	});
+	return result === 1;
 };
 
 const verifyRefreshTokenPayload = (incomingRefreshToken) => {
@@ -81,25 +108,6 @@ const verifyRefreshTokenPayload = (incomingRefreshToken) => {
 	}
 
 	return payload;
-};
-
-const collectRefreshKeys = async (userId) => {
-	const keys = [];
-	let cursor = "0";
-	const pattern = refreshTokenKey(userId, "*");
-
-	do {
-		const { cursor: nextCursor, keys: scannedKeys } = await redis.scan(cursor, {
-			MATCH: pattern,
-			COUNT: 100,
-		});
-		cursor = nextCursor;
-		if (scannedKeys.length) {
-			keys.push(...scannedKeys);
-		}
-	} while (cursor !== "0");
-
-	return keys;
 };
 
 // ─── OTP helpers ─────────────────────────────────────────────────────────────
@@ -239,31 +247,41 @@ export const login = async ({ email, password }) => {
 	return tokens;
 };
 
-export const logoutCurrent = async (userId, incomingRefreshToken) => {
+export const logoutCurrent = async (userId, incomingRefreshToken, authenticatedSid) => {
 	const payload = verifyRefreshTokenPayload(incomingRefreshToken);
 	if (payload.userId !== userId) {
 		throw new AppError("Refresh token does not belong to current user", 403);
 	}
-	await redis.del(refreshTokenKey(payload.userId, payload.sid));
-	logger.info({ userId: payload.userId, sid: payload.sid }, "User logged out from current session");
+	if (!authenticatedSid || payload.sid !== authenticatedSid) {
+		throw new AppError("Refresh token session does not match the authenticated session", 403);
+	}
+	await deleteSessionToken(userId, authenticatedSid);
+	logger.info({ userId: payload.userId, sid: authenticatedSid }, "User logged out from current session");
 };
 
 export const logoutAll = async (userId) => {
-	const keys = await collectRefreshKeys(userId);
-	if (keys.length) {
-		await redis.del(keys);
+	const sids = await redis.sMembers(userSessionsKey(userId));
+	if (sids.length) {
+		const keys = sids.map((sid) => refreshTokenKey(userId, sid));
+		const multi = redis.multi();
+		multi.del(...keys);
+		multi.del(userSessionsKey(userId));
+		await multi.exec();
 	}
-	logger.info({ userId, revokedSessions: keys.length }, "User logged out from all sessions");
+	logger.info({ userId, revokedSessions: sids.length }, "User logged out from all sessions");
 };
 
 export const listSessions = async (userId, currentSid) => {
-	const keys = await collectRefreshKeys(userId);
-	if (!keys.length) return [];
+	const sids = await redis.sMembers(userSessionsKey(userId));
+	if (!sids.length) return [];
 
 	const sessions = await Promise.all(
-		keys.map(async (key) => {
-			const sid = key.split(":").at(-1);
-			const token = await redis.get(key);
+		sids.map(async (sid) => {
+			const token = await redis.get(refreshTokenKey(userId, sid));
+			if (!token) {
+				await redis.sRem(userSessionsKey(userId), sid);
+				return null;
+			}
 			const decoded = token ? jwt.decode(token) : null;
 
 			return {
@@ -275,11 +293,12 @@ export const listSessions = async (userId, currentSid) => {
 		}),
 	);
 
-	return sessions.sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
+	return sessions.filter(Boolean).sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
 };
 
 export const revokeSession = async (userId, sid) => {
 	const deleted = await redis.del(refreshTokenKey(userId, sid));
+	await redis.sRem(userSessionsKey(userId), sid);
 	if (!deleted) {
 		throw new AppError("Session not found", 404);
 	}
@@ -288,11 +307,6 @@ export const revokeSession = async (userId, sid) => {
 
 export const refresh = async (incomingRefreshToken) => {
 	const payload = verifyRefreshTokenPayload(incomingRefreshToken);
-
-	const storedToken = await redis.get(refreshTokenKey(payload.userId, payload.sid));
-	if (!storedToken || storedToken !== incomingRefreshToken) {
-		throw new AppError("Refresh token is invalid or has been revoked", 401);
-	}
 
 	// Load fresh user state from DB — the refresh token payload may be up to
 	// 7 days old, so roles and account status could have changed since it was
@@ -317,11 +331,9 @@ export const refresh = async (incomingRefreshToken) => {
 	// Build a FULL token response — both access and refresh tokens — using the
 	// same canonical path as login and register. This has two important effects:
 	//
-	// 1. REFRESH TOKEN ROTATION: storing the new refresh token in Redis
-	//    atomically revokes the old one because only one token is kept per user
-	//    under the key refreshToken:{userId}. If the old token is presented
-	//    again (e.g. by a compromised client), it will fail the storedToken
-	//    comparison above and return 401.
+	// 1. REFRESH TOKEN ROTATION: CAS replaces the per-session token only when the
+	//    caller presents the currently stored token for refreshToken:{userId}:{sid}.
+	//    Replays of older tokens fail atomically and return 401.
 	//
 	// 2. CONSISTENT RESPONSE SHAPE: every auth endpoint now returns
 	//    { accessToken, refreshToken, user: {...} }, so browser clients get
@@ -329,8 +341,17 @@ export const refresh = async (incomingRefreshToken) => {
 	//    tokens in the JSON body — both handled identically.
 	const tokens = buildTokenResponse(payload.userId, payload.sid, userRows[0].email, roles, userRows[0].is_email_verified);
 
-	// Overwrite the old refresh token in Redis, revoking it.
-	await storeRefreshToken(payload.userId, payload.sid, tokens.refreshToken);
+	const rotated = await casRefreshToken(
+		payload.userId,
+		payload.sid,
+		incomingRefreshToken,
+		tokens.refreshToken,
+		REFRESH_TTL,
+	);
+	if (!rotated) {
+		throw new AppError("Refresh token is invalid or has been revoked", 401);
+	}
+	await redis.sAdd(userSessionsKey(payload.userId), payload.sid);
 
 	logger.info({ userId: payload.userId, sid: payload.sid }, "Tokens refreshed");
 

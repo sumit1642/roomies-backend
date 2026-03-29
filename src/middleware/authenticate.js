@@ -6,7 +6,7 @@ import { AppError } from "./errorHandler.js";
 import { findUserById } from "../db/utils/auth.js";
 import { redis } from "../cache/client.js";
 import { pool } from "../db/client.js";
-import { parseTtlSeconds } from "../services/auth.service.js";
+import { casRefreshToken, parseTtlSeconds } from "../services/auth.service.js";
 
 const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
 
@@ -123,11 +123,20 @@ const attemptSilentRefresh = async (req, res) => {
 		{ expiresIn: config.JWT_REFRESH_EXPIRES_IN },
 	);
 
+	const rotated = await casRefreshToken(
+		refreshPayload.userId,
+		refreshPayload.sid,
+		refreshToken,
+		newRefreshToken,
+		REFRESH_TTL,
+	);
+	if (!rotated) {
+		throw new AppError("Refresh token is invalid or has been revoked", 401);
+	}
 	res.cookie("accessToken", newAccessToken, ACCESS_COOKIE_OPTIONS);
 	res.cookie("refreshToken", newRefreshToken, REFRESH_COOKIE_OPTIONS);
-	await redis.setEx(refreshTokenKey(refreshPayload.userId, refreshPayload.sid), REFRESH_TTL, newRefreshToken);
 
-	return refreshPayload.userId;
+	return { userId: refreshPayload.userId, sid: refreshPayload.sid };
 };
 
 //
@@ -156,14 +165,14 @@ export const authenticate = async (req, res, next) => {
 			// On expiry, only browser clients (cookie source) get a silent refresh attempt.
 			// Android (header source) receives a 401 and handles refresh itself.
 			if (err.name === "TokenExpiredError" && source === "cookie") {
-				const userId = await attemptSilentRefresh(req, res);
-				if (!userId) {
+				const session = await attemptSilentRefresh(req, res);
+				if (!session?.userId) {
 					// Both tokens expired or refresh revoked — session is over
 					return next(new AppError("Session expired", 401));
 				}
 				// Silent refresh succeeded — reconstruct a minimal payload so the rest
 				// of the middleware can load the user from the DB normally.
-				payload = { userId };
+				payload = session;
 			} else {
 				// JsonWebTokenError (malformed token) or header-source expiry —
 				// propagate to global error handler for consistent 401 formatting.
@@ -184,6 +193,7 @@ export const authenticate = async (req, res, next) => {
 		// Unchanged from before this branch — all existing handlers continue to work.
 		req.user = {
 			userId: user.user_id,
+			sid: payload.sid ?? null,
 			email: user.email,
 			roles: user.roles,
 			isEmailVerified: user.is_email_verified,
