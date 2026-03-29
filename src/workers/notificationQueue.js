@@ -33,6 +33,9 @@ export const enqueueNotification = (payload) => {
 	getQueue(NOTIFICATION_QUEUE_NAME)
 		.add("send-notification", payload, JOB_OPTIONS)
 		.catch((err) => {
-			logger.error({ err, ...payload }, "Failed to enqueue notification");
+			logger.error(
+				{ err, type: payload?.type, entityType: payload?.entityType, entityId: payload?.entityId },
+				"Failed to enqueue notification"
+			);
 		});
 };
