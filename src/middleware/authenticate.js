@@ -7,9 +7,9 @@ import { findUserById } from "../db/utils/auth.js";
 import { redis } from "../cache/client.js";
 import { pool } from "../db/client.js";
 import { parseTtlSeconds } from "../services/auth.service.js";
- 
+
 const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
- 
+
 // used in auth.controller.js — a cookie set with sameSite:'strict' must also be
 // cleared/replaced with sameSite:'strict'. Inconsistent options cause browsers to
 // treat them as different cookies, leaving the old one in place.
@@ -21,9 +21,9 @@ const ACCESS_COOKIE_OPTIONS = {
 	httpOnly: true,
 	secure: config.NODE_ENV === "production",
 	sameSite: "strict",
-	maxAge: parseTtlSeconds(config.JWT_EXPIRES_IN) * 1000,
+	maxAge: parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60) * 1000,
 };
- 
+
 //
 // Priority chain: cookie first, then Authorization header.
 //
@@ -48,7 +48,7 @@ const extractToken = (req) => {
 
 	return null;
 };
- 
+
 //
 // Only attempted when:
 //   1. The access token came from a cookie (source === 'cookie')
@@ -81,7 +81,7 @@ const attemptSilentRefresh = async (req, res) => {
 		// Token has been revoked (logout from another device) — return null for 401
 		return null;
 	}
- 
+
 	// We sign a minimal payload here — the full user shape is loaded from the DB
 	// below in the main middleware body, just as it is for a normal non-expired request.
 	// This avoids any stale data from the refresh token payload being used as req.user.
@@ -91,11 +91,13 @@ const attemptSilentRefresh = async (req, res) => {
 	const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [
 		refreshPayload.userId,
 	]);
-	const { rows: userRows } = await pool.query(`SELECT email FROM users WHERE user_id = $1 AND deleted_at IS NULL`, [
-		refreshPayload.userId,
-	]);
+	const { rows: userRows } = await pool.query(
+		`SELECT email, account_status FROM users WHERE user_id = $1 AND deleted_at IS NULL`,
+		[refreshPayload.userId],
+	);
 
 	if (!userRows.length) return null;
+	if (INACTIVE_STATUSES.has(userRows[0].account_status)) return null;
 
 	const roles = roleRows.map((r) => r.role_name);
 	const newAccessToken = jwt.sign(
@@ -103,12 +105,11 @@ const attemptSilentRefresh = async (req, res) => {
 		config.JWT_SECRET,
 		{ expiresIn: config.JWT_EXPIRES_IN },
 	);
- 
+
 	res.cookie("accessToken", newAccessToken, ACCESS_COOKIE_OPTIONS);
 
 	return refreshPayload.userId;
 };
- 
 
 //
 // Verifies the access token, loads the user from DB, and attaches req.user.
