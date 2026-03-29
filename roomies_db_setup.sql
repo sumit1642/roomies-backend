@@ -1188,7 +1188,7 @@ $$ LANGUAGE plpgsql;
 
 -- Fires only when overall_score or is_visible changes — not on every update.
 CREATE OR REPLACE TRIGGER trg_ratings_update_aggregates
-    AFTER INSERT OR UPDATE OF overall_score, is_visible
+    AFTER INSERT OR UPDATE OF overall_score, is_visible, deleted_at
     ON ratings
     FOR EACH ROW
 EXECUTE FUNCTION update_rating_aggregates();
