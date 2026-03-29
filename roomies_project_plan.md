@@ -25,13 +25,12 @@
 > are wrapped in named functions inside `src/db/utils/` — one file per concern. Queries that are one-off or still
 > evolving live inline in their service file, clearly written and commented. The SQL schema file is the single source of
 > truth for everything the database looks like.
-
 > **On Zod's role:** Zod v4 operates at two distinct points. At the HTTP boundary it validates every incoming request
 > before any query logic runs — and writes parsed/coerced data back to `req` so downstream handlers see transformed
 > types and defaults. At server startup it validates all environment variables — if anything is missing or wrong-typed,
 > the server refuses to start rather than failing silently later. Together with the database constraints already baked
 > into the schema, Zod creates a two-layer defence that covers what an ORM would have provided.
-
+> **On Real-Time / WhatsApp:** The `ws` WebSocket package is in the stack but will be implemented in a future phase.
 > **On Real-Time / WhatsApp:** The `ws` WebSocket package is in the stack but will be implemented in a future phase.
 > During the current verified-user phase, the contact flow works by displaying the poster's WhatsApp number as a
 > clickable `wa.me` deep-link once a student's interest request is accepted — no custom socket infrastructure needed
