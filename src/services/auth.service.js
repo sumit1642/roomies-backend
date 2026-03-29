@@ -31,12 +31,25 @@ const issueRefreshToken = (userId) =>
 		expiresIn: config.JWT_REFRESH_EXPIRES_IN,
 	});
 
-export const parseTtlSeconds = (expiresIn) => {
-	const match = expiresIn.match(/^(\d+)([smhd])$/);
-	if (!match) return 7 * 24 * 60 * 60; // fallback: 7 days
+export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) => {
+	if (typeof expiresIn === "number" && Number.isFinite(expiresIn) && expiresIn > 0) {
+		return Math.floor(expiresIn);
+	}
+
+	const value = String(expiresIn ?? "").trim();
+	if (!value) return fallbackSeconds;
+
+	// jsonwebtoken accepts numeric strings too. We interpret plain digits as
+	// seconds so env values like JWT_EXPIRES_IN=900 behave as expected.
+	if (/^\d+$/.test(value)) {
+		return Number.parseInt(value, 10);
+	}
+
+	const match = value.match(/^(\d+)([smhd])$/i);
+	if (!match) return fallbackSeconds;
 	const [, amount, unit] = match;
 	const multipliers = { s: 1, m: 60, h: 3600, d: 86400 };
-	return parseInt(amount, 10) * multipliers[unit];
+	return Number.parseInt(amount, 10) * multipliers[unit.toLowerCase()];
 };
 
 const REFRESH_TTL = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN);
