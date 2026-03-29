@@ -312,6 +312,11 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			entityId: requestId,
 		});
 
+		// FIX (QA #4): Return only the canonical `whatsappLink` key.
+		// The previous code returned both `whatsappLink` and `whatsAppLink` (mixed
+		// casing) for "backward compatibility", but since no real client exists yet
+		// there is nothing to stay compatible with. A single canonical key is cleaner
+		// and prevents future confusion about which key to consume.
 		const whatsappLink =
 			ir.poster_phone ?
 				_buildWhatsAppLink(
@@ -327,7 +332,6 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			status: "accepted",
 			connectionId,
 			whatsappLink,
-			whatsAppLink: whatsappLink,
 		};
 	} catch (err) {
 		try {
