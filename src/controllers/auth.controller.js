@@ -148,6 +148,16 @@ export const listSessions = async (req, res, next) => {
 
 export const revokeSession = async (req, res, next) => {
 	try {
+		const sid = req.params?.sid;
+		const isValidSid =
+			typeof sid === "string" &&
+			sid.trim().length > 0 &&
+			/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sid);
+
+		if (!isValidSid) {
+			return res.status(400).json({ error: "Invalid session id" });
+		}
+
 		await authService.revokeSession(req.user.userId, req.params.sid);
 
 		if (req.user.sid === req.params.sid) {
