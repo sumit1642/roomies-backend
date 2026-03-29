@@ -23,6 +23,14 @@ const ACCESS_COOKIE_OPTIONS = {
 	sameSite: "strict",
 	maxAge: parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60) * 1000,
 };
+const REFRESH_COOKIE_OPTIONS = {
+	httpOnly: true,
+	secure: config.NODE_ENV === "production",
+	sameSite: "strict",
+	maxAge: parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60) * 1000,
+};
+const REFRESH_TTL = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
+const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
 
 //
 // Priority chain: cookie first, then Authorization header.
@@ -76,7 +84,11 @@ const attemptSilentRefresh = async (req, res) => {
 		return null;
 	}
 
-	const storedToken = await redis.get(`refreshToken:${refreshPayload.userId}`);
+	if (!refreshPayload?.userId || !refreshPayload?.sid) {
+		return null;
+	}
+
+	const storedToken = await redis.get(refreshTokenKey(refreshPayload.userId, refreshPayload.sid));
 	if (!storedToken || storedToken !== refreshToken) {
 		// Token has been revoked (logout from another device) — return null for 401
 		return null;
@@ -105,8 +117,15 @@ const attemptSilentRefresh = async (req, res) => {
 		config.JWT_SECRET,
 		{ expiresIn: config.JWT_EXPIRES_IN },
 	);
+	const newRefreshToken = jwt.sign(
+		{ userId: refreshPayload.userId, sid: refreshPayload.sid },
+		config.JWT_REFRESH_SECRET,
+		{ expiresIn: config.JWT_REFRESH_EXPIRES_IN },
+	);
 
 	res.cookie("accessToken", newAccessToken, ACCESS_COOKIE_OPTIONS);
+	res.cookie("refreshToken", newRefreshToken, REFRESH_COOKIE_OPTIONS);
+	await redis.setEx(refreshTokenKey(refreshPayload.userId, refreshPayload.sid), REFRESH_TTL, newRefreshToken);
 
 	return refreshPayload.userId;
 };

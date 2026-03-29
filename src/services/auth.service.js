@@ -26,10 +26,14 @@ const issueAccessToken = (userId, email, roles) =>
 		expiresIn: config.JWT_EXPIRES_IN,
 	});
 
-const issueRefreshToken = (userId) =>
-	jwt.sign({ userId }, config.JWT_REFRESH_SECRET, {
+const issueRefreshToken = (userId, sid) =>
+	jwt.sign({ userId, sid }, config.JWT_REFRESH_SECRET, {
 		expiresIn: config.JWT_REFRESH_EXPIRES_IN,
 	});
+
+const issueSessionId = () => crypto.randomUUID();
+
+const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
 
 export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) => {
 	if (typeof expiresIn === "number" && Number.isFinite(expiresIn) && expiresIn > 0) {
@@ -54,14 +58,48 @@ export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) =
 
 const REFRESH_TTL = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN);
 
-const buildTokenResponse = (userId, email, roles, isEmailVerified) => {
+const buildTokenResponse = (userId, sid, email, roles, isEmailVerified) => {
 	const accessToken = issueAccessToken(userId, email, roles);
-	const refreshToken = issueRefreshToken(userId);
-	return { accessToken, refreshToken, user: { userId, email, roles, isEmailVerified } };
+	const refreshToken = issueRefreshToken(userId, sid);
+	return { accessToken, refreshToken, user: { userId, email, roles, isEmailVerified }, sid };
 };
 
-const storeRefreshToken = async (userId, refreshToken) => {
-	await redis.setEx(`refreshToken:${userId}`, REFRESH_TTL, refreshToken);
+const storeRefreshToken = async (userId, sid, refreshToken) => {
+	await redis.setEx(refreshTokenKey(userId, sid), REFRESH_TTL, refreshToken);
+};
+
+const verifyRefreshTokenPayload = (incomingRefreshToken) => {
+	let payload;
+	try {
+		payload = jwt.verify(incomingRefreshToken, config.JWT_REFRESH_SECRET);
+	} catch (err) {
+		throw err;
+	}
+
+	if (!payload?.userId || !payload?.sid) {
+		throw new AppError("Refresh token payload is invalid", 401);
+	}
+
+	return payload;
+};
+
+const collectRefreshKeys = async (userId) => {
+	const keys = [];
+	let cursor = "0";
+	const pattern = refreshTokenKey(userId, "*");
+
+	do {
+		const { cursor: nextCursor, keys: scannedKeys } = await redis.scan(cursor, {
+			MATCH: pattern,
+			COUNT: 100,
+		});
+		cursor = nextCursor;
+		if (scannedKeys.length) {
+			keys.push(...scannedKeys);
+		}
+	} while (cursor !== "0");
+
+	return keys;
 };
 
 // ─── OTP helpers ─────────────────────────────────────────────────────────────
@@ -161,8 +199,9 @@ export const register = async ({ email, password, role, fullName, businessName }
 		logger.info({ userId: user.user_id, role }, "User registered");
 
 		const roles = [role];
-		const tokens = buildTokenResponse(user.user_id, user.email, roles, effectivelyVerified);
-		await storeRefreshToken(user.user_id, tokens.refreshToken);
+		const sid = issueSessionId();
+		const tokens = buildTokenResponse(user.user_id, sid, user.email, roles, effectivelyVerified);
+		await storeRefreshToken(user.user_id, sid, tokens.refreshToken);
 		return tokens;
 	} catch (err) {
 		await client.query("ROLLBACK");
@@ -194,25 +233,63 @@ export const login = async ({ email, password }) => {
 
 	logger.info({ userId: user.user_id }, "User logged in");
 
-	const tokens = buildTokenResponse(user.user_id, user.email, roles, user.is_email_verified);
-	await storeRefreshToken(user.user_id, tokens.refreshToken);
+	const sid = issueSessionId();
+	const tokens = buildTokenResponse(user.user_id, sid, user.email, roles, user.is_email_verified);
+	await storeRefreshToken(user.user_id, sid, tokens.refreshToken);
 	return tokens;
 };
 
-export const logout = async (userId) => {
-	await redis.del(`refreshToken:${userId}`);
-	logger.info({ userId }, "User logged out");
+export const logoutCurrent = async (userId, incomingRefreshToken) => {
+	const payload = verifyRefreshTokenPayload(incomingRefreshToken);
+	if (payload.userId !== userId) {
+		throw new AppError("Refresh token does not belong to current user", 403);
+	}
+	await redis.del(refreshTokenKey(payload.userId, payload.sid));
+	logger.info({ userId: payload.userId, sid: payload.sid }, "User logged out from current session");
+};
+
+export const logoutAll = async (userId) => {
+	const keys = await collectRefreshKeys(userId);
+	if (keys.length) {
+		await redis.del(keys);
+	}
+	logger.info({ userId, revokedSessions: keys.length }, "User logged out from all sessions");
+};
+
+export const listSessions = async (userId, currentSid) => {
+	const keys = await collectRefreshKeys(userId);
+	if (!keys.length) return [];
+
+	const sessions = await Promise.all(
+		keys.map(async (key) => {
+			const sid = key.split(":").at(-1);
+			const token = await redis.get(key);
+			const decoded = token ? jwt.decode(token) : null;
+
+			return {
+				sid,
+				isCurrent: sid === currentSid,
+				expiresAt: decoded?.exp ? new Date(decoded.exp * 1000).toISOString() : null,
+				issuedAt: decoded?.iat ? new Date(decoded.iat * 1000).toISOString() : null,
+			};
+		}),
+	);
+
+	return sessions.sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
+};
+
+export const revokeSession = async (userId, sid) => {
+	const deleted = await redis.del(refreshTokenKey(userId, sid));
+	if (!deleted) {
+		throw new AppError("Session not found", 404);
+	}
+	logger.info({ userId, sid }, "Session revoked");
 };
 
 export const refresh = async (incomingRefreshToken) => {
-	let payload;
-	try {
-		payload = jwt.verify(incomingRefreshToken, config.JWT_REFRESH_SECRET);
-	} catch (err) {
-		throw err;
-	}
+	const payload = verifyRefreshTokenPayload(incomingRefreshToken);
 
-	const storedToken = await redis.get(`refreshToken:${payload.userId}`);
+	const storedToken = await redis.get(refreshTokenKey(payload.userId, payload.sid));
 	if (!storedToken || storedToken !== incomingRefreshToken) {
 		throw new AppError("Refresh token is invalid or has been revoked", 401);
 	}
@@ -250,12 +327,12 @@ export const refresh = async (incomingRefreshToken) => {
 	//    { accessToken, refreshToken, user: {...} }, so browser clients get
 	//    fresh cookies set by the controller and Android clients get fresh
 	//    tokens in the JSON body — both handled identically.
-	const tokens = buildTokenResponse(payload.userId, userRows[0].email, roles, userRows[0].is_email_verified);
+	const tokens = buildTokenResponse(payload.userId, payload.sid, userRows[0].email, roles, userRows[0].is_email_verified);
 
 	// Overwrite the old refresh token in Redis, revoking it.
-	await storeRefreshToken(payload.userId, tokens.refreshToken);
+	await storeRefreshToken(payload.userId, payload.sid, tokens.refreshToken);
 
-	logger.info({ userId: payload.userId }, "Tokens refreshed");
+	logger.info({ userId: payload.userId, sid: payload.sid }, "Tokens refreshed");
 
 	return tokens;
 };
@@ -386,13 +463,15 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 
 		logger.info({ userId: existingByGoogleId.user_id }, "User signed in via Google OAuth");
 
+		const sid = issueSessionId();
 		const tokens = buildTokenResponse(
 			existingByGoogleId.user_id,
+			sid,
 			existingByGoogleId.email,
 			roles,
 			existingByGoogleId.is_email_verified,
 		);
-		await storeRefreshToken(existingByGoogleId.user_id, tokens.refreshToken);
+		await storeRefreshToken(existingByGoogleId.user_id, sid, tokens.refreshToken);
 		return tokens;
 	}
 
@@ -420,13 +499,15 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 
 		logger.info({ userId: existingByEmail.user_id }, "Google account linked to existing email/password account");
 
+		const sid = issueSessionId();
 		const tokens = buildTokenResponse(
 			existingByEmail.user_id,
+			sid,
 			existingByEmail.email,
 			roles,
 			existingByEmail.is_email_verified,
 		);
-		await storeRefreshToken(existingByEmail.user_id, tokens.refreshToken);
+		await storeRefreshToken(existingByEmail.user_id, sid, tokens.refreshToken);
 		return tokens;
 	}
 
@@ -499,8 +580,9 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 		logger.info({ userId: user.user_id, role }, "New user registered via Google OAuth");
 
 		const roles = [role];
-		const tokens = buildTokenResponse(user.user_id, user.email, roles, true);
-		await storeRefreshToken(user.user_id, tokens.refreshToken);
+		const sid = issueSessionId();
+		const tokens = buildTokenResponse(user.user_id, sid, user.email, roles, true);
+		await storeRefreshToken(user.user_id, sid, tokens.refreshToken);
 		return tokens;
 	} catch (err) {
 		await client.query("ROLLBACK");

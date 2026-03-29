@@ -55,6 +55,25 @@ export const refreshSchema = z.object({
 		.default({}),
 });
 
+export const logoutCurrentSchema = z.object({
+	body: z
+		.object({
+			refreshToken: z.string().min(1, { error: "Refresh token must not be empty" }).optional(),
+		})
+		.optional()
+		.default({}),
+});
+
+export const listSessionsSchema = z.object({
+	query: z.object({}).optional().default({}),
+});
+
+export const revokeSessionSchema = z.object({
+	params: z.object({
+		sid: z.string().min(1, { error: "Session id is required" }),
+	}),
+});
+
 // ─── OTP verify ──────────────────────────────────────────────────────────────
 export const otpVerifySchema = z.object({
 	body: z.object({

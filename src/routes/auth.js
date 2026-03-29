@@ -8,6 +8,9 @@ import {
 	registerSchema,
 	loginSchema,
 	refreshSchema,
+	logoutCurrentSchema,
+	listSessionsSchema,
+	revokeSessionSchema,
 	otpVerifySchema,
 	googleCallbackSchema,
 } from "../validators/auth.validators.js";
@@ -19,7 +22,11 @@ export const authRouter = Router();
 // so abusive traffic is dropped at the router edge with zero downstream cost.
 authRouter.post("/register", authLimiter, validate(registerSchema), authController.register);
 authRouter.post("/login", authLimiter, validate(loginSchema), authController.login);
-authRouter.post("/logout", authenticate, authController.logout);
+authRouter.post("/logout", authenticate, validate(logoutCurrentSchema), authController.logout);
+authRouter.post("/logout/current", authenticate, validate(logoutCurrentSchema), authController.logout);
+authRouter.post("/logout/all", authenticate, authController.logoutAll);
+authRouter.get("/sessions", authenticate, validate(listSessionsSchema), authController.listSessions);
+authRouter.delete("/sessions/:sid", authenticate, validate(revokeSessionSchema), authController.revokeSession);
 
 // refreshSchema now accepts an optional body — browser clients send no body and
 // carry the token in the HttpOnly cookie. The controller resolves the token from

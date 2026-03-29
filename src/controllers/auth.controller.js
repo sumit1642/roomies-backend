@@ -4,6 +4,7 @@ import * as authService from "../services/auth.service.js";
 import { parseTtlSeconds } from "../services/auth.service.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { config } from "../config/env.js";
+import jwt from "jsonwebtoken";
 
 const ACCESS_COOKIE_OPTIONS = {
 	httpOnly: true,
@@ -61,9 +62,23 @@ export const login = async (req, res, next) => {
 
 export const logout = async (req, res, next) => {
 	try {
-		await authService.logout(req.user.userId);
+		const incomingRefreshToken = req.body?.refreshToken ?? req.cookies?.refreshToken;
+		if (!incomingRefreshToken) {
+			return next(new AppError("Refresh token is required", 401));
+		}
+		await authService.logoutCurrent(req.user.userId, incomingRefreshToken);
 		clearAuthCookies(res);
 		res.json({ status: "success", message: "Logged out" });
+	} catch (err) {
+		next(err);
+	}
+};
+
+export const logoutAll = async (req, res, next) => {
+	try {
+		await authService.logoutAll(req.user.userId);
+		clearAuthCookies(res);
+		res.json({ status: "success", message: "Logged out from all sessions" });
 	} catch (err) {
 		next(err);
 	}
@@ -118,6 +133,34 @@ export const verifyOtp = async (req, res, next) => {
 
 export const me = (req, res) => {
 	res.json({ status: "success", data: req.user });
+};
+
+export const listSessions = async (req, res, next) => {
+	try {
+		const refreshToken = req.cookies?.refreshToken ?? req.body?.refreshToken;
+		const decoded = refreshToken ? jwt.decode(refreshToken) : null;
+		const currentSid = decoded?.sid;
+		const sessions = await authService.listSessions(req.user.userId, currentSid);
+		res.json({ status: "success", data: sessions });
+	} catch (err) {
+		next(err);
+	}
+};
+
+export const revokeSession = async (req, res, next) => {
+	try {
+		await authService.revokeSession(req.user.userId, req.params.sid);
+
+		const refreshToken = req.cookies?.refreshToken;
+		const decoded = refreshToken ? jwt.decode(refreshToken) : null;
+		if (decoded?.sid === req.params.sid) {
+			clearAuthCookies(res);
+		}
+
+		res.json({ status: "success", message: "Session revoked" });
+	} catch (err) {
+		next(err);
+	}
 };
 
 export const googleCallback = async (req, res, next) => {
