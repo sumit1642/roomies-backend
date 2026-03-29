@@ -113,7 +113,7 @@ const attemptSilentRefresh = async (req, res) => {
 
 	const roles = roleRows.map((r) => r.role_name);
 	const newAccessToken = jwt.sign(
-		{ userId: refreshPayload.userId, email: userRows[0].email, roles },
+		{ userId: refreshPayload.userId, email: userRows[0].email, roles, sid: refreshPayload.sid },
 		config.JWT_SECRET,
 		{ expiresIn: config.JWT_EXPIRES_IN },
 	);

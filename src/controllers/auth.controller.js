@@ -4,7 +4,6 @@ import * as authService from "../services/auth.service.js";
 import { parseTtlSeconds } from "../services/auth.service.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { config } from "../config/env.js";
-import jwt from "jsonwebtoken";
 
 const ACCESS_COOKIE_OPTIONS = {
 	httpOnly: true,
@@ -140,10 +139,7 @@ export const me = (req, res) => {
 
 export const listSessions = async (req, res, next) => {
 	try {
-		const refreshToken = req.cookies?.refreshToken ?? req.body?.refreshToken;
-		const decoded = refreshToken ? jwt.decode(refreshToken) : null;
-		const currentSid = decoded?.sid;
-		const sessions = await authService.listSessions(req.user.userId, currentSid);
+		const sessions = await authService.listSessions(req.user.userId, req.user.sid);
 		res.json({ status: "success", data: sessions });
 	} catch (err) {
 		next(err);
@@ -154,9 +150,7 @@ export const revokeSession = async (req, res, next) => {
 	try {
 		await authService.revokeSession(req.user.userId, req.params.sid);
 
-		const refreshToken = req.cookies?.refreshToken;
-		const decoded = refreshToken ? jwt.decode(refreshToken) : null;
-		if (decoded?.sid === req.params.sid) {
+		if (req.user.sid === req.params.sid) {
 			clearAuthCookies(res);
 		}
 

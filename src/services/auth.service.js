@@ -66,16 +66,17 @@ const buildTokenResponse = (userId, sid, email, roles, isEmailVerified) => {
 };
 
 const storeRefreshToken = async (userId, sid, refreshToken) => {
+	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
 	const multi = redis.multi();
 	multi.setEx(refreshTokenKey(userId, sid), REFRESH_TTL, refreshToken);
-	multi.sAdd(userSessionsKey(userId), sid);
+	multi.zAdd(userSessionsKey(userId), { score: expiryTimestamp, value: sid });
 	await multi.exec();
 };
 
 const deleteSessionToken = async (userId, sid) => {
 	const multi = redis.multi();
 	multi.del(refreshTokenKey(userId, sid));
-	multi.sRem(userSessionsKey(userId), sid);
+	multi.zRem(userSessionsKey(userId), sid);
 	await multi.exec();
 };
 
@@ -260,26 +261,32 @@ export const logoutCurrent = async (userId, incomingRefreshToken, authenticatedS
 };
 
 export const logoutAll = async (userId) => {
-	const sids = await redis.sMembers(userSessionsKey(userId));
+	const now = Math.floor(Date.now() / 1000);
+	const sessionsKey = userSessionsKey(userId);
+	await redis.zRemRangeByScore(sessionsKey, 0, now);
+	const sids = await redis.zRange(sessionsKey, 0, -1);
 	if (sids.length) {
 		const keys = sids.map((sid) => refreshTokenKey(userId, sid));
 		const multi = redis.multi();
 		multi.del(...keys);
-		multi.del(userSessionsKey(userId));
+		multi.zRem(sessionsKey, ...sids);
 		await multi.exec();
 	}
 	logger.info({ userId, revokedSessions: sids.length }, "User logged out from all sessions");
 };
 
 export const listSessions = async (userId, currentSid) => {
-	const sids = await redis.sMembers(userSessionsKey(userId));
+	const now = Math.floor(Date.now() / 1000);
+	const sessionsKey = userSessionsKey(userId);
+	await redis.zRemRangeByScore(sessionsKey, 0, now);
+	const sids = await redis.zRange(sessionsKey, 0, -1);
 	if (!sids.length) return [];
 
 	const sessions = await Promise.all(
 		sids.map(async (sid) => {
 			const token = await redis.get(refreshTokenKey(userId, sid));
 			if (!token) {
-				await redis.sRem(userSessionsKey(userId), sid);
+				await redis.zRem(sessionsKey, sid);
 				return null;
 			}
 			const decoded = token ? jwt.decode(token) : null;
@@ -298,7 +305,7 @@ export const listSessions = async (userId, currentSid) => {
 
 export const revokeSession = async (userId, sid) => {
 	const deleted = await redis.del(refreshTokenKey(userId, sid));
-	await redis.sRem(userSessionsKey(userId), sid);
+	await redis.zRem(userSessionsKey(userId), sid);
 	if (!deleted) {
 		throw new AppError("Session not found", 404);
 	}
@@ -351,7 +358,8 @@ export const refresh = async (incomingRefreshToken) => {
 	if (!rotated) {
 		throw new AppError("Refresh token is invalid or has been revoked", 401);
 	}
-	await redis.sAdd(userSessionsKey(payload.userId), payload.sid);
+	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
+	await redis.zAdd(userSessionsKey(payload.userId), { score: expiryTimestamp, value: payload.sid });
 
 	logger.info({ userId: payload.userId, sid: payload.sid }, "Tokens refreshed");
 
