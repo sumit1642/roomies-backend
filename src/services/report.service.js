@@ -237,11 +237,11 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 
 	const nextCursor =
 		hasNextPage && items.length > 0 ?
-				{
-					cursorTime: items[items.length - 1].submitted_at,
-					cursorId: items[items.length - 1].report_id,
-				}
-			:	null;
+			{
+				cursorTime: items[items.length - 1].submitted_at,
+				cursorId: items[items.length - 1].report_id,
+			}
+		:	null;
 
 	return {
 		items: items.map((row) => ({
@@ -291,6 +291,11 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 // failed (e.g. due to a network partition or serialisation failure). The
 // corrected order is: COMMIT → log success; any error → ROLLBACK (no log).
 export const resolveReport = async (adminId, reportId, { resolution, adminNotes }) => {
+	const validResolutions = ["resolved_removed", "resolved_kept"];
+	if (!validResolutions.includes(resolution)) {
+		throw new AppError(`Invalid resolution. Must be one of: ${validResolutions.join(", ")}`, 400);
+	}
+
 	if (resolution === "resolved_removed" && (!adminNotes || adminNotes.trim() === "")) {
 		throw new AppError("adminNotes is required when resolution is resolved_removed", 400);
 	}
@@ -370,7 +375,11 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 			ratingId,
 		};
 	} catch (err) {
-		await client.query("ROLLBACK");
+		try {
+			await client.query("ROLLBACK");
+		} catch (rollbackErr) {
+			logger.error({ originalError: err, rollbackError: rollbackErr }, "ROLLBACK failed during error handling");
+		}
 		throw err;
 	} finally {
 		client.release();
