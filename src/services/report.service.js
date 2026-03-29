@@ -114,7 +114,11 @@ export const submitReport = async (reporterId, ratingId, { reason, explanation }
 // gracefully with fallback display text).
 export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
-	const safeLimit = Math.max(1, Number(limit) || 1);
+	const hasPartialCursor = (cursorTime !== undefined) !== (cursorId !== undefined);
+	if (hasPartialCursor) {
+		throw new AppError("cursorTime and cursorId must be provided together", 400);
+	}
+	const safeLimit = Math.min(100, Math.max(1, Number(limit) || 1));
 
 	const params = [safeLimit + 1];
 	let cursorClause = "";
