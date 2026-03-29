@@ -1,4 +1,4 @@
--- Active: 1772230719653@@127.0.0.1@5432@roomies_db
+-- Active: 1774765370673@@127.0.0.1@5432@roomies_db
 -- =============================================================================
 -- ROOMIES — DATABASE SCHEMA SETUP SCRIPT
 --
@@ -1438,13 +1438,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_interest_request_id ON connect
 WHERE
     interest_request_id IS NOT NULL
     AND deleted_at IS NULL;
-	--=============================================================================
--- SANITY CHECK QUERIES
---
---   \dt       list all tables       (expect 19 tables)
---   \dT       list all enum types   (expect 15 types)
---   \df       list all functions    (expect 3 functions)
---   \d ratings
---   \d+ ratings
---   \d connections
--- =============================================================================
+
+CREATE INDEX idx_listings_city_pattern_ops ON listings (city varchar_pattern_ops)
+WHERE
+    status = 'active'
+    AND deleted_at IS NULL;
