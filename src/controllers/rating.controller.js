@@ -25,7 +25,7 @@ export const submitRating = async (req, res, next) => {
 
 // GET /api/v1/ratings/connection/:connectionId
 // Returns both ratings for a connection from the caller's perspective:
-//   { myRating: Rating | null, theirRating: Rating | null }
+//   { myRatings: Rating[], theirRatings: Rating[] }
 // Only the two connection parties can call this. Third parties get 404.
 export const getRatingsForConnection = async (req, res, next) => {
 	try {
