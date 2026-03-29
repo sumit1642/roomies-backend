@@ -9,14 +9,14 @@ const ACCESS_COOKIE_OPTIONS = {
 	httpOnly: true,
 	secure: config.NODE_ENV === "production",
 	sameSite: "strict",
-	maxAge: parseTtlSeconds(config.JWT_EXPIRES_IN) * 1000,
+	maxAge: parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60) * 1000,
 };
 
 const REFRESH_COOKIE_OPTIONS = {
 	httpOnly: true,
 	secure: config.NODE_ENV === "production",
 	sameSite: "strict",
-	maxAge: parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN) * 1000,
+	maxAge: parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60) * 1000,
 };
 
 const setAuthCookies = (res, accessToken, refreshToken) => {
