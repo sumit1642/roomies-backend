@@ -85,13 +85,21 @@ if redis.call("GET", KEYS[1]) ~= ARGV[1] then
   return 0
 end
 redis.call("SETEX", KEYS[1], tonumber(ARGV[3]), ARGV[2])
+redis.call("ZADD", KEYS[2], tonumber(ARGV[5]), ARGV[4])
 return 1
 `;
 
-export const casRefreshToken = async (userId, sid, expectedOldToken, newToken, ttl = REFRESH_TTL) => {
+export const casRefreshToken = async (
+	userId,
+	sid,
+	expectedOldToken,
+	newToken,
+	ttl = REFRESH_TTL,
+	expiryTimestamp = Math.floor(Date.now() / 1000) + ttl,
+) => {
 	const result = await redis.eval(casRefreshTokenScript, {
-		keys: [refreshTokenKey(userId, sid)],
-		arguments: [expectedOldToken, newToken, String(ttl)],
+		keys: [refreshTokenKey(userId, sid), userSessionsKey(userId)],
+		arguments: [expectedOldToken, newToken, String(ttl), sid, String(expiryTimestamp)],
 	});
 	return result === 1;
 };
@@ -346,7 +354,15 @@ export const refresh = async (incomingRefreshToken) => {
 	//    { accessToken, refreshToken, user: {...} }, so browser clients get
 	//    fresh cookies set by the controller and Android clients get fresh
 	//    tokens in the JSON body — both handled identically.
-	const tokens = buildTokenResponse(payload.userId, payload.sid, userRows[0].email, roles, userRows[0].is_email_verified);
+	const tokens = buildTokenResponse(
+		payload.userId,
+		payload.sid,
+		userRows[0].email,
+		roles,
+		userRows[0].is_email_verified,
+	);
+
+	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
 
 	const rotated = await casRefreshToken(
 		payload.userId,
@@ -354,12 +370,11 @@ export const refresh = async (incomingRefreshToken) => {
 		incomingRefreshToken,
 		tokens.refreshToken,
 		REFRESH_TTL,
+		expiryTimestamp,
 	);
 	if (!rotated) {
 		throw new AppError("Refresh token is invalid or has been revoked", 401);
 	}
-	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
-	await redis.zAdd(userSessionsKey(payload.userId), { score: expiryTimestamp, value: payload.sid });
 
 	logger.info({ userId: payload.userId, sid: payload.sid }, "Tokens refreshed");
 
