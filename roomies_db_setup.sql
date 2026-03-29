@@ -1439,7 +1439,7 @@ WHERE
     interest_request_id IS NOT NULL
     AND deleted_at IS NULL;
 
-CREATE INDEX idx_listings_city_pattern_ops ON listings (city varchar_pattern_ops)
+CREATE INDEX IF NOT EXISTS idx_listings_city_pattern_ops ON listings (city varchar_pattern_ops)
 WHERE
     status = 'active'
     AND deleted_at IS NULL;
