@@ -21,7 +21,10 @@ export const buildKeysetPaginationQuerySchema = (extraFields = {}) =>
 				const hasId = data.cursorId !== undefined;
 				return hasTime === hasId;
 			},
-			{ error: "cursorTime and cursorId must be provided together" },
+			{
+				error: "cursorTime and cursorId must be provided together",
+				path: ["cursorTime"],
+			},
 		);
 
 export const keysetPaginationQuerySchema = buildKeysetPaginationQuerySchema();
