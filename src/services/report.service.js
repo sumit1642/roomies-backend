@@ -10,9 +10,10 @@
 // ─── THE REPORTER ELIGIBILITY CHECK ──────────────────────────────────────────
 //
 // A reporter must be a party to the connection that the rating references.
-// This is enforced via a WHERE EXISTS join that mirrors the eligibility check
-// used in rating submission (rating.service.js). The reasoning: if you were
-// not involved in the interaction, you have no standing to dispute the rating.
+// This is enforced via a single atomic INSERT ... SELECT ... RETURNING that
+// mirrors the eligibility check used in rating submission (rating.service.js).
+// The reasoning: if you were not involved in the interaction, you have no
+// standing to dispute the rating.
 //
 // ─── THE AGGREGATE RECALCULATION ─────────────────────────────────────────────
 //
@@ -34,46 +35,49 @@ import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 
 // ─── Submit report ────────────────────────────────────────────────────────────
+//
+// FIX (Finding 3): Replace the two-step SELECT + INSERT with a single atomic
+// INSERT ... SELECT ... RETURNING.
+//
+// The previous code did:
+//   1. SELECT eligibility (pool.query)
+//   2. INSERT into rating_reports (pool.query)
+//
+// This TOCTOU race meant the connection could be soft-deleted, or the reporter
+// could be removed from the connection, between steps 1 and 2. The new pattern
+// collapses both into one statement: the INSERT only fires when the SELECT sub-
+// query (equivalent to the old eligibility check) returns a row. If the sub-
+// query returns nothing, the INSERT produces zero rows, and we throw 404 — the
+// same observable behaviour as before, but now atomic.
 export const submitReport = async (reporterId, ratingId, { reason, explanation }) => {
-	// Step 1: Verify the rating exists and the reporter is a party to the
-	// connection it references. We use a single combined query that:
-	//   a) confirms the rating row exists and is not deleted
-	//   b) confirms the reporter is initiator or counterpart on the connection
-	//      that the rating is anchored to
-	// If either condition fails, the EXISTS returns no rows and we throw 404
-	// rather than 403 — we never confirm whether the rating exists to a caller
-	// who is not a party.
-	const { rows: eligibilityRows } = await pool.query(
-		`SELECT r.rating_id, r.connection_id
+	// Single atomic INSERT ... SELECT:
+	//   - Selects from ratings JOIN connections with the full eligibility predicate
+	//   - If the sub-query returns no rows (rating not found, reporter not a party,
+	//     or either row soft-deleted) the INSERT produces zero rows → 404
+	//   - If the partial unique index on (reporter_id, rating_id) WHERE status='open'
+	//     fires (duplicate open report), PostgreSQL raises a 23505 unique-violation
+	//     which the global error handler converts to 409
+	const { rows } = await pool.query(
+		`INSERT INTO rating_reports (reporter_id, rating_id, reason, explanation)
+     SELECT $1, r.rating_id, $3::report_reason_enum, $4
      FROM ratings r
-     JOIN connections c ON c.connection_id = r.connection_id AND c.deleted_at IS NULL
-     WHERE r.rating_id   = $1
+     JOIN connections c
+       ON c.connection_id = r.connection_id
+      AND c.deleted_at    IS NULL
+     WHERE r.rating_id   = $2
        AND r.deleted_at  IS NULL
-       AND (c.initiator_id = $2 OR c.counterpart_id = $2)`,
-		[ratingId, reporterId],
+       AND (c.initiator_id = $1 OR c.counterpart_id = $1)
+     RETURNING report_id, reporter_id, rating_id, reason, status, created_at`,
+		[reporterId, ratingId, reason, explanation ?? null],
 	);
 
-	if (!eligibilityRows.length) {
+	if (!rows.length) {
 		// Either the rating doesn't exist, or the caller isn't a party to the
 		// underlying connection. We return 404 in both cases to avoid leaking
 		// whether the rating exists at all.
 		throw new AppError("Rating not found or you are not a party to this connection", 404);
 	}
 
-	// Step 2: INSERT the report. The partial unique index on
-	// (reporter_id, rating_id) WHERE status = 'open' prevents duplicate open
-	// reports from the same person on the same rating. A resolved report does
-	// not block re-reporting (the partial index only covers open rows).
-	const { rows } = await pool.query(
-		`INSERT INTO rating_reports (reporter_id, rating_id, reason, explanation)
-     VALUES ($1, $2, $3::report_reason_enum, $4)
-     RETURNING report_id, reporter_id, rating_id, reason, status, created_at`,
-		[reporterId, ratingId, reason, explanation ?? null],
-	);
-
-	// rowCount will be 1 on success. ON CONFLICT would produce 0, but we aren't
-	// using ON CONFLICT here — we let the unique index throw a 23505 PostgreSQL
-	// error which the global error handler converts to a 409.
 	const report = rows[0];
 
 	logger.info({ reporterId, ratingId, reportId: report.report_id, reason }, "Rating report submitted");
@@ -94,6 +98,20 @@ export const submitReport = async (reporterId, ratingId, { reason, explanation }
 // Each row includes the full rating content, the reporter's public profile, and
 // the reviewee's public profile, so the admin can make a decision without a
 // second request.
+//
+// FIX (Finding 4): Changed INNER JOINs on ratings and users (reviewer/reporter)
+// to LEFT JOINs with deleted_at IS NULL predicates moved into the ON clause.
+//
+// The original INNER JOINs silently dropped open reports whenever:
+//   - The flagged rating row was soft-deleted (ratings.deleted_at IS NOT NULL)
+//   - The reporter's user row was soft-deleted (u_rep.deleted_at IS NOT NULL)
+//   - The reviewer's user row was soft-deleted (u_rev.deleted_at IS NOT NULL)
+//
+// This left admins with an incomplete moderation queue — open reports that
+// existed in the DB were invisible. Using LEFT JOINs with the predicate in the
+// ON clause means the report row always appears; missing related data surfaces
+// as NULLs in the reviewer/reporter columns (which the admin UI already handles
+// gracefully with fallback display text).
 export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	const safeLimit = Math.max(1, Number(limit) || 1);
@@ -106,16 +124,6 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 		cursorClause = `AND (rr.created_at, rr.report_id) > ($2, $3::uuid)`;
 	}
 
-	// The query joins outward from rating_reports (filtered to open) through:
-	//   ratings              — to get the actual review text and scores
-	//   users (reviewer)     — to get the person who wrote the review
-	//   student/pg_owner profiles (reviewer) — for name/photo
-	//   users (reviewee)     — for the person or property being reviewed
-	//   student/pg_owner profiles (reviewee) — for name/photo
-	//   properties           — when reviewee_type = 'property'
-	//
-	// The CASE expressions on reviewee name and photo handle the polymorphic
-	// reviewee pattern (same pattern as rating.service.js public reads).
 	const { rows } = await pool.query(
 		`SELECT
        rr.report_id,
@@ -126,7 +134,7 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
        rr.status,
        rr.created_at                           AS submitted_at,
 
-       -- Rating detail
+       -- Rating detail (LEFT JOIN so open reports survive rating soft-delete)
        r.overall_score,
        r.cleanliness_score,
        r.communication_score,
@@ -138,12 +146,12 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
        r.is_visible                            AS rating_is_visible,
        r.created_at                            AS rating_created_at,
 
-       -- Reviewer (the person who wrote the rating)
+       -- Reporter (LEFT JOIN so reports survive reporter account soft-delete)
        COALESCE(sp_rep.full_name, pop_rep.owner_full_name, u_rep.email)
                                                AS reporter_name,
        sp_rep.profile_photo_url                AS reporter_photo_url,
 
-       -- Reviewer of the rating (could differ from reporter)
+       -- Reviewer of the rating (LEFT JOIN so reports survive reviewer soft-delete)
        COALESCE(sp_rev.full_name, pop_rev.owner_full_name, u_rev.email)
                                                AS reviewer_name,
        sp_rev.profile_photo_url                AS reviewer_photo_url,
@@ -163,13 +171,15 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 
      FROM rating_reports rr
 
-     -- The flagged rating
-     JOIN ratings r
+     -- The flagged rating: LEFT JOIN so open reports are visible even if the
+     -- rating row is later soft-deleted (e.g. by a hard-delete migration pass).
+     LEFT JOIN ratings r
        ON r.rating_id   = rr.rating_id
       AND r.deleted_at  IS NULL
 
-     -- The person who filed the report
-     JOIN users u_rep
+     -- The person who filed the report: LEFT JOIN so the queue remains visible
+     -- even if the reporter account is soft-deleted before the admin resolves.
+     LEFT JOIN users u_rep
        ON u_rep.user_id    = rr.reporter_id
       AND u_rep.deleted_at IS NULL
      LEFT JOIN student_profiles sp_rep
@@ -179,8 +189,8 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
        ON pop_rep.user_id   = rr.reporter_id
       AND pop_rep.deleted_at IS NULL
 
-     -- The person who wrote the rating
-     JOIN users u_rev
+     -- The person who wrote the rating: LEFT JOIN for the same reason.
+     LEFT JOIN users u_rev
        ON u_rev.user_id    = r.reviewer_id
       AND u_rev.deleted_at IS NULL
      LEFT JOIN student_profiles sp_rev
@@ -265,6 +275,14 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 };
 
 // ─── Resolve report (admin) ───────────────────────────────────────────────────
+//
+// FIX (Finding 5): Moved logger.info calls to after COMMIT so the moderation
+// outcome is only logged when the transaction has successfully persisted.
+//
+// Previously both logger.info calls appeared before client.query("COMMIT"),
+// meaning the success message could be logged even if the COMMIT subsequently
+// failed (e.g. due to a network partition or serialisation failure). The
+// corrected order is: COMMIT → log success; any error → ROLLBACK (no log).
 export const resolveReport = async (adminId, reportId, { resolution, adminNotes }) => {
 	// `resolved_removed` requires a transaction: we must update both the report
 	// status AND set the rating's is_visible = FALSE atomically. If only one
@@ -276,6 +294,10 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 	// AND status = 'open' concurrency guard works the same way in both cases.
 
 	const client = await pool.connect();
+
+	// Capture the ratingId and resolution outcome so we can log them after COMMIT.
+	let ratingId;
+
 	try {
 		await client.query("BEGIN");
 
@@ -298,7 +320,7 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 			throw new AppError("Report not found or already resolved", 409);
 		}
 
-		const ratingId = reportRows[0].rating_id;
+		ratingId = reportRows[0].rating_id;
 
 		if (resolution === "resolved_removed") {
 			// Hide the rating. The DB trigger `update_rating_aggregates` fires
@@ -318,13 +340,18 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 				// guard against a soft-deleted rating row just in case.
 				throw new AppError("Rating not found — cannot complete removal", 409);
 			}
+		}
 
+		await client.query("COMMIT");
+
+		// FIX (Finding 5): Log the outcome only after the transaction has committed.
+		// If COMMIT throws, we fall through to the catch block and no success log
+		// is emitted — avoiding a false positive in monitoring dashboards.
+		if (resolution === "resolved_removed") {
 			logger.info({ adminId, reportId, ratingId }, "Report resolved — rating hidden");
 		} else {
 			logger.info({ adminId, reportId, ratingId }, "Report resolved — rating kept visible");
 		}
-
-		await client.query("COMMIT");
 
 		return {
 			reportId,
