@@ -72,7 +72,14 @@ export const submitDocument = async (requestingUserId, targetUserId, { documentT
 
 		return rows[0];
 	} catch (err) {
-		await client.query("ROLLBACK");
+		try {
+			await client.query("ROLLBACK");
+		} catch (rollbackErr) {
+			logger.error(
+				{ rollbackErr, originalErr: err, userId: targetUserId },
+				"Rollback failed during document submission",
+			);
+		}
 
 		if (err.code === "23505" && err.constraint === "uq_verification_requests_active_pending_per_user") {
 			throw new AppError("You already have a pending verification request", 409);
@@ -218,7 +225,14 @@ export const approveRequest = async (adminUserId, requestId, { adminNotes } = {}
 
 		return { requestId, status: "verified" };
 	} catch (err) {
-		await client.query("ROLLBACK");
+		try {
+			await client.query("ROLLBACK");
+		} catch (rollbackErr) {
+			logger.error(
+				{ rollbackErr, originalErr: err, adminUserId, requestId },
+				"Rollback failed during verification approval",
+			);
+		}
 		throw err;
 	} finally {
 		client.release();
@@ -278,7 +292,14 @@ export const rejectRequest = async (adminUserId, requestId, { rejectionReason, a
 
 		return { requestId, status: "rejected" };
 	} catch (err) {
-		await client.query("ROLLBACK");
+		try {
+			await client.query("ROLLBACK");
+		} catch (rollbackErr) {
+			logger.error(
+				{ rollbackErr, originalErr: err, adminUserId, requestId },
+				"Rollback failed during verification rejection",
+			);
+		}
 		throw err;
 	} finally {
 		client.release();
