@@ -186,36 +186,22 @@ export const submitRating = async (reviewerId, data) => {
 
 	// ── Step 4: Post-commit notification ──────────────────────────────────────
 	if (revieweeType === "user") {
-		try {
-			await enqueueNotification({
-				recipientId: revieweeId,
-				type: "rating_received",
-				entityType: "rating",
-				entityId: ratingId,
-			});
-		} catch (err) {
-			logger.error(
-				{ err, recipientId: revieweeId, revieweeId, ratingId },
-				"Failed to enqueue rating notification for reviewee",
-			);
-		}
+		enqueueNotification({
+			recipientId: revieweeId,
+			type: "rating_received",
+			entityType: "rating",
+			entityId: ratingId,
+		});
 	} else {
 		// owner_id was captured by the INSERT CTE RETURNING clause — no extra query.
 		const ownerId = result.rows[0].owner_id;
 		if (ownerId) {
-			try {
-				await enqueueNotification({
-					recipientId: ownerId,
-					type: "rating_received",
-					entityType: "rating",
-					entityId: ratingId,
-				});
-			} catch (err) {
-				logger.error(
-					{ err, recipientId: ownerId, ownerId, ratingId },
-					"Failed to enqueue rating notification for owner",
-				);
-			}
+			enqueueNotification({
+				recipientId: ownerId,
+				type: "rating_received",
+				entityType: "rating",
+				entityId: ratingId,
+			});
 		}
 	}
 
