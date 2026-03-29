@@ -52,5 +52,11 @@ export const resolveReportSchema = z.object({
 			error: "resolution must be one of: resolved_removed, resolved_kept",
 		}),
 		adminNotes: z.string().min(1).max(1000).optional(),
-	}),
+	}).refine(
+		(data) => data.resolution !== "resolved_removed" || Boolean(data.adminNotes?.trim()),
+		{
+			message: "adminNotes is required when resolution is resolved_removed",
+			path: ["adminNotes"],
+		},
+	),
 });

@@ -263,7 +263,10 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 				revieweeId: row.reviewee_id,
 				isVisible: row.rating_is_visible,
 				createdAt: row.rating_created_at,
-				reviewer: { fullName: row.reviewer_name },
+				reviewer: {
+					fullName: row.reviewer_name,
+					profilePhotoUrl: row.reviewer_photo_url,
+				},
 				reviewee: {
 					fullName: row.reviewee_name,
 					profilePhotoUrl: row.reviewee_photo_url,
@@ -288,6 +291,10 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 // failed (e.g. due to a network partition or serialisation failure). The
 // corrected order is: COMMIT → log success; any error → ROLLBACK (no log).
 export const resolveReport = async (adminId, reportId, { resolution, adminNotes }) => {
+	if (resolution === "resolved_removed" && (!adminNotes || adminNotes.trim() === "")) {
+		throw new AppError("adminNotes is required when resolution is resolved_removed", 400);
+	}
+
 	// `resolved_removed` requires a transaction: we must update both the report
 	// status AND set the rating's is_visible = FALSE atomically. If only one
 	// succeeds we'd have an inconsistent state (report closed but rating still
