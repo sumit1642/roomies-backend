@@ -122,6 +122,7 @@ const attemptSilentRefresh = async (req, res) => {
 		config.JWT_REFRESH_SECRET,
 		{ expiresIn: config.JWT_REFRESH_EXPIRES_IN },
 	);
+	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
 
 	const rotated = await casRefreshToken(
 		refreshPayload.userId,
@@ -129,6 +130,7 @@ const attemptSilentRefresh = async (req, res) => {
 		refreshToken,
 		newRefreshToken,
 		REFRESH_TTL,
+		expiryTimestamp,
 	);
 	if (!rotated) {
 		throw new AppError("Refresh token is invalid or has been revoked", 401);
