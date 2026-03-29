@@ -65,7 +65,7 @@ export const logoutCurrentSchema = z.object({
 });
 
 export const listSessionsSchema = z.object({
-	query: z.object({}).optional().default({}),
+	query: z.object({}).passthrough().optional().default({}),
 });
 
 export const revokeSessionSchema = z.object({
