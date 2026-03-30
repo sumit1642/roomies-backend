@@ -1443,3 +1443,75 @@ CREATE INDEX IF NOT EXISTS idx_listings_city_pattern_ops ON listings (city varch
 WHERE
     status = 'active'
     AND deleted_at IS NULL;
+
+-- =============================================================================
+-- MIGRATION: Fix city index for case-insensitive search
+-- =============================================================================
+--
+-- PROBLEM:
+--   The existing index idx_listings_city_pattern_ops was created with the
+--   varchar_pattern_ops operator class:
+--
+--     CREATE INDEX idx_listings_city_pattern_ops
+--       ON listings (city varchar_pattern_ops)
+--       WHERE status = 'active' AND deleted_at IS NULL;
+--
+--   varchar_pattern_ops only accelerates LIKE/~ comparisons that are:
+--     1. Left-anchored ('prefix%')
+--     2. Case-SENSITIVE (byte-exact)
+--
+--   The search query in listing.service.js uses ILIKE, which is case-
+--   insensitive. PostgreSQL cannot use a varchar_pattern_ops index for ILIKE
+--   because the operator class only covers deterministic byte ordering, not
+--   case-folded character comparisons. As a result, every city search falls
+--   back to a sequential scan of the entire partial index (or the table),
+--   which is expensive at scale.
+--
+-- FIX:
+--   Replace the varchar_pattern_ops index with a functional index on
+--   LOWER(city). The search query in listing.service.js is updated in parallel
+--   to use LOWER(city) LIKE lower($n) || '%' instead of ILIKE, which makes
+--   the function call in the WHERE clause match the indexed expression exactly.
+--
+--   This is the recommended PostgreSQL approach for case-insensitive prefix
+--   searches:
+--     - LOWER() is an immutable function, so PostgreSQL allows indexing it.
+--     - A functional index on LOWER(city) with the right WHERE clause lets
+--       the planner do an index scan for "cities starting with X" in constant
+--       time regardless of table size.
+--     - The partial-index predicates (status = 'active' AND deleted_at IS NULL)
+--       are preserved so the index stays small and stays in sync with the
+--       queries that filter on those columns.
+--
+-- NOTE:
+--   An alternative is to enable the pg_trgm extension and create a GIN
+--   trigram index, which supports arbitrary ILIKE patterns (not just
+--   left-anchored ones). For the Roomies city search — which is always a
+--   prefix/starts-with search — the LOWER() functional index is simpler,
+--   uses less storage, and is equally fast. pg_trgm is the right choice if
+--   the search ever needs to support "city contains substring" semantics.
+--
+-- HOW TO APPLY IN PRODUCTION:
+--   Use CONCURRENTLY to avoid an AccessExclusiveLock that would block reads
+--   while the index is being built on a live table. Drop the old index first
+--   (it is already unused, so dropping it doesn't degrade anything), then
+--   create the replacement concurrently.
+--
+--   Note: CREATE INDEX CONCURRENTLY cannot run inside a transaction block.
+--   Run these two statements individually from psql or your migration tool,
+--   NOT wrapped in BEGIN/COMMIT.
+-- =============================================================================
+
+-- Step 1: Drop the ineffective varchar_pattern_ops index.
+-- This is safe to run at any time — the index was not being used for ILIKE
+-- queries, so removing it has no negative effect on query performance.
+DROP INDEX IF EXISTS idx_listings_city_pattern_ops;
+
+-- Step 2: Create the replacement functional index on LOWER(city).
+-- CONCURRENTLY means the index is built without holding an exclusive table lock,
+-- so reads and writes continue uninterrupted during the build.
+-- This statement must NOT be run inside a transaction block.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_listings_city_lower ON listings (LOWER(city))
+WHERE
+    status = 'active'
+    AND deleted_at IS NULL;
