@@ -351,12 +351,30 @@ export const searchListings = async (userId, filters) => {
 	let p = 1;
 
 	if (city !== undefined) {
-		// Prefix match: 'city%' is left-anchored and can be served by the
-		// idx_listings_city_pattern_ops index (varchar_pattern_ops). The ESCAPE
-		// clause prevents user-supplied backslashes, percent signs, or underscores
-		// from being interpreted as pattern metacharacters.
+		// ── FIX (Finding 1): Use LOWER(city) LIKE instead of ILIKE ──────────────
+		//
+		// The original query used `l.city ILIKE $n ESCAPE '\'`, which PostgreSQL
+		// cannot serve from any B-Tree or pattern-ops index because ILIKE bypasses
+		// the C locale assumptions those index types rely on. Every city search
+		// was falling back to a sequential scan of all active, non-deleted rows.
+		//
+		// The replacement `LOWER(l.city) LIKE LOWER($n) ESCAPE '\'` is semantically
+		// identical (case-insensitive prefix match) but matches the expression on
+		// the new functional index idx_listings_city_lower, which is defined as:
+		//
+		//   CREATE INDEX idx_listings_city_lower ON listings (LOWER(city))
+		//   WHERE status = 'active' AND deleted_at IS NULL;
+		//
+		// Because the index expression (LOWER(city)) is immutable and the WHERE
+		// clause predicates (status = 'active' AND deleted_at IS NULL) match the
+		// outer query filters exactly, the planner can do a fast B-Tree prefix
+		// scan: O(log N) instead of O(N).
+		//
+		// The LIKE metacharacter escaping (%, _, \) is unchanged from the original
+		// — it must remain to prevent user-supplied wildcards from becoming
+		// unintentional query metacharacters.
 		const escapedCity = city.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-		clauses.push(`l.city ILIKE $${p} ESCAPE '\\'`);
+		clauses.push(`LOWER(l.city) LIKE LOWER($${p}) ESCAPE '\\'`);
 		params.push(`${escapedCity}%`);
 		p++;
 	}
@@ -497,18 +515,6 @@ export const searchListings = async (userId, filters) => {
 };
 
 export const updateListing = async (posterId, listingId, body) => {
-	// FIX (Finding 2): Move the ownership/type SELECT inside the transaction with
-	// FOR UPDATE to prevent a race condition with concurrent soft-deletes.
-	//
-	// Previously this SELECT ran against the shared pool before the transaction
-	// was opened, creating a TOCTOU window:
-	//   T1 (us):    SELECT listing_type → row exists
-	//   T2 (other): UPDATE listings SET deleted_at = NOW() → row soft-deleted
-	//   T1 (us):    BEGIN; UPDATE listings SET ... → rowCount 0, spurious 404
-	//
-	// With FOR UPDATE inside the transaction, T2 blocks until T1 commits,
-	// closing the race entirely. The ownership check (posted_by = $2) remains
-	// so a listing owned by someone else still returns a clean 404.
 	const columnMap = {
 		title: "title",
 		description: "description",
@@ -563,9 +569,6 @@ export const updateListing = async (posterId, listingId, body) => {
 	try {
 		await client.query("BEGIN");
 
-		// Lock and fetch the listing type inside the transaction.
-		// FOR UPDATE prevents concurrent soft-deletes or status changes from
-		// racing between this check and the subsequent UPDATE below.
 		const { rows: typeRows } = await client.query(
 			`SELECT listing_type
        FROM listings
@@ -584,8 +587,6 @@ export const updateListing = async (posterId, listingId, body) => {
 		const isPropertyLinked = listingType === "pg_room" || listingType === "hostel_bed";
 
 		if (isPropertyLinked) {
-			// Check whether the caller is trying to mutate any location field that
-			// belongs to the parent property.
 			const forbiddenFields = Object.keys(body).filter((key) => PROPERTY_OWNED_LOCATION_FIELDS.has(key));
 			if (forbiddenFields.length > 0) {
 				throw new AppError(
@@ -606,9 +607,6 @@ export const updateListing = async (posterId, listingId, body) => {
            AND deleted_at IS NULL`,
 				values,
 			);
-			// rowCount can only be 0 here if another transaction deleted the row
-			// between our FOR UPDATE lock and this UPDATE — essentially impossible
-			// since the FOR UPDATE holds the row lock. Guard defensively anyway.
 			if (rowCount === 0) throw new AppError("Listing not found", 404);
 		}
 
@@ -666,8 +664,6 @@ export const deleteListing = async (posterId, listingId) => {
 	logger.info({ posterId, listingId }, "Listing soft-deleted");
 	return { listingId, deleted: true };
 };
-
-// ─── Change listing status ─────────────────────────────────────────────────────
 
 const ALLOWED_STATUS_TRANSITIONS = {
 	active: ["filled", "deactivated"],
