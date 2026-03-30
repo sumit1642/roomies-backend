@@ -964,7 +964,7 @@ initially).
 }
 ```
 
-**Expected:** `200 OK`. The response includes `connectionId` and a `whatsAppLink` (`null` if Priya has no phone number
+**Expected:** `200 OK`. The response includes `connectionId` and a `whatsappLink` (`null` if Priya has no phone number
 set, which she doesn't — that is fine and expected).
 
 > **📋 CAPTURE: Save `data.connectionId` as `PRIYA_CONNECTION_ID`.**
