@@ -112,6 +112,9 @@ export const otpLimiter = rateLimit({
 	legacyHeaders: false,
 	// Each IP gets its own key in Redis under the "rl:otp:" namespace.
 	store: makeRedisStore("rl:otp:"),
+	// Intentional fail-open for auth availability; abuse protection degrades
+	// temporarily if Redis is unavailable.
+	passOnStoreError: true,
 	// keyGenerator defaults to req.ip, which is correct since app.js sets
 	// trust proxy to 1 in production so req.ip reflects the real client IP.
 	message: {
@@ -129,6 +132,9 @@ export const authLimiter = rateLimit({
 	standardHeaders: true,
 	legacyHeaders: false,
 	store: makeRedisStore("rl:auth:"),
+	// Intentional fail-open for auth availability; abuse protection degrades
+	// temporarily if Redis is unavailable.
+	passOnStoreError: true,
 	message: {
 		status: "error",
 		message: "Too many requests — please wait 15 minutes before trying again",
