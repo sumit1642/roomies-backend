@@ -283,32 +283,89 @@ export const logoutAll = async (userId) => {
 	logger.info({ userId, revokedSessions: sids.length }, "User logged out from all sessions");
 };
 
+// ─── listSessions ─────────────────────────────────────────────────────────────
+//
+// FIX (Findings 2 & 5): Replace N individual redis.get() calls with a single
+// redis.mGet() call.
+//
+// The original implementation used Promise.all over one redis.get() per SID.
+// While Promise.all issues the commands concurrently rather than sequentially,
+// each command still requires its own TCP round-trip to Redis. With N active
+// sessions, that is N round-trips regardless of how fast they overlap. On a
+// typical deployment (Redis on a separate host or in Azure Cache for Redis),
+// each round-trip adds 1–5 ms of latency, so a user with 10 devices could see
+// 10–50 ms of added latency just for the SID token fetches.
+//
+// redis.mGet(keys) fetches all keys in a single command, a single round-trip,
+// and returns an array of values in the same order as the keys. The total cost
+// is O(1) network round-trips regardless of session count. The trade-off is
+// that we lose the ability to stream results, but for a session list (typically
+// well under 100 items) that is fine — we accumulate and return them all.
+//
+// Stale-SID cleanup (SIDs whose tokens have expired and been evicted from Redis
+// but whose sorted-set entries weren't yet cleaned up) is batched into a single
+// redis.zRem call rather than one zRem per missing token.
 export const listSessions = async (userId, currentSid) => {
 	const now = Math.floor(Date.now() / 1000);
 	const sessionsKey = userSessionsKey(userId);
+
+	// Remove SIDs whose score (expiry timestamp) is in the past. This is a
+	// best-effort cleanup — any remaining stale SIDs are handled below when
+	// we discover their token keys are missing from Redis.
 	await redis.zRemRangeByScore(sessionsKey, 0, now);
+
 	const sids = await redis.zRange(sessionsKey, 0, -1);
 	if (!sids.length) return [];
 
-	const sessions = await Promise.all(
-		sids.map(async (sid) => {
-			const token = await redis.get(refreshTokenKey(userId, sid));
-			if (!token) {
-				await redis.zRem(sessionsKey, sid);
-				return null;
-			}
-			const decoded = token ? jwt.decode(token) : null;
+	// ── Single MGET: fetch all tokens in one round-trip ───────────────────────
+	//
+	// Build the full key list (refreshToken:{userId}:{sid}) for every SID, then
+	// issue one MGET. The returned array mirrors the SIDs array positionally —
+	// tokens[i] is the token for sids[i], or null if that key doesn't exist.
+	const tokenKeys = sids.map((sid) => refreshTokenKey(userId, sid));
+	const tokens = await redis.mGet(tokenKeys);
 
-			return {
-				sid,
-				isCurrent: sid === currentSid,
-				expiresAt: decoded?.exp ? new Date(decoded.exp * 1000).toISOString() : null,
-				issuedAt: decoded?.iat ? new Date(decoded.iat * 1000).toISOString() : null,
-			};
-		}),
-	);
+	// Collect stale SIDs (token key absent from Redis) so we can remove them
+	// from the sorted set in one batched call rather than N individual zRem calls.
+	const staleSids = [];
+	const sessions = [];
 
-	return sessions.filter(Boolean).sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
+	for (let i = 0; i < sids.length; i++) {
+		const sid = sids[i];
+		const token = tokens[i];
+
+		if (!token) {
+			// The token key expired and was evicted by Redis TTL, but the sorted-set
+			// entry survived (e.g. because zRemRangeByScore ran just before the TTL
+			// hit). Mark this SID stale so we can batch-remove it below.
+			staleSids.push(sid);
+			continue;
+		}
+
+		// Decode without verifying — we only need iat/exp for display. The token
+		// was already verified when it was issued and stored, so decoding without
+		// verify here is intentional: we're reading metadata, not granting access.
+		const decoded = jwt.decode(token);
+
+		sessions.push({
+			sid,
+			isCurrent: sid === currentSid,
+			expiresAt: decoded?.exp ? new Date(decoded.exp * 1000).toISOString() : null,
+			issuedAt: decoded?.iat ? new Date(decoded.iat * 1000).toISOString() : null,
+		});
+	}
+
+	// Batch-remove all stale SIDs from the sorted set in one call.
+	// zRem accepts a variable-length argument list; spreading staleSids passes
+	// all members to remove in a single Redis command.
+	if (staleSids.length > 0) {
+		await redis.zRem(sessionsKey, staleSids);
+	}
+
+	// Float the current session to the top; otherwise preserve the order from
+	// the sorted set (ascending by expiry timestamp, so the oldest sessions
+	// appear first in the list — the current session is most likely recent).
+	return sessions.sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
 };
 
 export const revokeSession = async (userId, sid) => {
@@ -343,17 +400,6 @@ export const refresh = async (incomingRefreshToken) => {
 	]);
 	const roles = roleRows.map((r) => r.role_name);
 
-	// Build a FULL token response — both access and refresh tokens — using the
-	// same canonical path as login and register. This has two important effects:
-	//
-	// 1. REFRESH TOKEN ROTATION: CAS replaces the per-session token only when the
-	//    caller presents the currently stored token for refreshToken:{userId}:{sid}.
-	//    Replays of older tokens fail atomically and return 401.
-	//
-	// 2. CONSISTENT RESPONSE SHAPE: every auth endpoint now returns
-	//    { accessToken, refreshToken, user: {...} }, so browser clients get
-	//    fresh cookies set by the controller and Android clients get fresh
-	//    tokens in the JSON body — both handled identically.
 	const tokens = buildTokenResponse(
 		payload.userId,
 		payload.sid,
@@ -427,8 +473,6 @@ export const verifyOtp = async (userId, otp, ipAddress) => {
 			throw new AppError("Too many OTP verification attempts from this IP — please wait 15 minutes", 429);
 		}
 	} else {
-		// Trust proxy may not be configured or the request arrived without a
-		// recognisable IP header. Per-user counter still applies.
 		logger.warn({ userId }, "OTP verify: IP address unavailable — skipping IP-level rate limiting");
 	}
 
