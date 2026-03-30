@@ -286,10 +286,16 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 // FIX (Finding 5): Moved logger.info calls to after COMMIT so the moderation
 // outcome is only logged when the transaction has successfully persisted.
 //
-// Previously both logger.info calls appeared before client.query("COMMIT"),
-// meaning the success message could be logged even if the COMMIT subsequently
-// failed (e.g. due to a network partition or serialisation failure). The
-// corrected order is: COMMIT → log success; any error → ROLLBACK (no log).
+// FIX (soft-deleted rating on resolved_removed): If the target rating row has
+// already been soft-deleted (e.g. by the Phase 5 hard-delete cron running
+// between report submission and resolution), the UPDATE ratings SET is_visible =
+// FALSE WHERE ... AND deleted_at IS NULL will match zero rows. Previously this
+// threw a 409, even though the desired outcome — the rating is not contributing
+// to the average — was already achieved. The fix: after rowCount === 0 on the
+// rating UPDATE, check whether the row exists at all (without the deleted_at
+// filter). If the row is soft-deleted, treat that as a success equivalent to
+// having just hidden it. If the row truly doesn't exist at all, then something
+// is very wrong (FK violation that somehow reached this point), and we throw.
 export const resolveReport = async (adminId, reportId, { resolution, adminNotes }) => {
 	const validResolutions = ["resolved_removed", "resolved_kept"];
 	if (!validResolutions.includes(resolution)) {
@@ -339,10 +345,18 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 		ratingId = reportRows[0].rating_id;
 
 		if (resolution === "resolved_removed") {
-			// Hide the rating. The DB trigger `update_rating_aggregates` fires
-			// automatically after this UPDATE and recalculates the affected
-			// user's/property's average_rating and rating_count. No application
-			// code needed for the aggregate update.
+			// Attempt to hide the rating. The DB trigger `update_rating_aggregates`
+			// fires automatically after this UPDATE and recalculates the affected
+			// user's/property's average_rating and rating_count.
+			//
+			// We filter on AND deleted_at IS NULL because there is no point trying
+			// to set is_visible = FALSE on a row that has already been physically
+			// removed from the active data set by the soft-delete mechanism.
+			// However, a soft-deleted rating is already invisible to all callers
+			// (every read query filters on deleted_at IS NULL), so the desired
+			// end state — the rating does not affect aggregates or appear to users —
+			// is already achieved. We therefore check for this case explicitly and
+			// treat it as a success rather than an error.
 			const { rowCount: ratingRowCount } = await client.query(
 				`UPDATE ratings
          SET is_visible = FALSE
@@ -352,17 +366,43 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 			);
 
 			if (ratingRowCount === 0) {
-				// Shouldn't happen given the FK from rating_reports to ratings, but
-				// guard against a soft-deleted rating row just in case.
-				throw new AppError("Rating not found — cannot complete removal", 409);
+				// The UPDATE matched nothing. Determine why:
+				//   - Row exists with deleted_at IS NOT NULL → already soft-deleted,
+				//     which means it's already invisible. Treat as success.
+				//   - Row doesn't exist at all → genuine data integrity problem.
+				//     This should never happen given the FK from rating_reports to
+				//     ratings, but we guard defensively.
+				const { rows: ratingCheck } = await client.query(
+					`SELECT deleted_at FROM ratings WHERE rating_id = $1`,
+					[ratingId],
+				);
+
+				if (!ratingCheck.length) {
+					// The rating row is completely absent — this violates the FK
+					// constraint from rating_reports to ratings and should not be
+					// possible in normal operation. Throw so this surfaces as a bug.
+					throw new AppError(
+						"Rating not found — this is unexpected; the report references a non-existent rating",
+						409,
+					);
+				}
+
+				// ratingCheck[0].deleted_at IS NOT NULL: the rating is soft-deleted.
+				// Its aggregates were already adjusted when deleted_at was set (or
+				// will be on the next cleanup pass). The report is correctly being
+				// closed as resolved_removed — proceed to COMMIT.
+				logger.info(
+					{ adminId, reportId, ratingId },
+					"resolveReport: target rating is already soft-deleted — proceeding as resolved_removed success",
+				);
 			}
 		}
 
 		await client.query("COMMIT");
 
-		// FIX (Finding 5): Log the outcome only after the transaction has committed.
-		// If COMMIT throws, we fall through to the catch block and no success log
-		// is emitted — avoiding a false positive in monitoring dashboards.
+		// Log the outcome only after the transaction has committed. If COMMIT
+		// throws, we fall through to the catch block and no success log is
+		// emitted — avoiding a false positive in monitoring dashboards.
 		if (resolution === "resolved_removed") {
 			logger.info({ adminId, reportId, ratingId }, "Report resolved — rating hidden");
 		} else {
