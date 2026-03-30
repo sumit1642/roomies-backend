@@ -14,7 +14,6 @@ import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { assertPgOwnerVerified } from "../db/utils/pgOwner.js";
-import { findListingsNearPoint } from "../db/utils/spatial.js";
 import { scoreListingsForUser } from "../db/utils/compatibility.js";
 import { expirePendingRequestsForListing } from "./interest.service.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
@@ -338,17 +337,21 @@ export const searchListings = async (userId, filters) => {
 		limit = 20,
 	} = filters;
 
-	let proximityIds = null;
-	if (lat !== undefined && lng !== undefined) {
-		proximityIds = await findListingsNearPoint(lat, lng, radius);
-		if (!proximityIds.length) {
-			return { items: [], nextCursor: null };
-		}
-	}
-
 	const clauses = [`l.status = 'active'`, `l.deleted_at IS NULL`, `l.expires_at > NOW()`];
 	const params = [];
 	let p = 1;
+
+	if (lat !== undefined && lng !== undefined) {
+		clauses.push(
+			`ST_DWithin(
+        COALESCE(l.location, p.location)::geography,
+        ST_SetSRID(ST_MakePoint($${p + 1}, $${p}), 4326)::geography,
+        $${p + 2}
+      )`,
+		);
+		params.push(lat, lng, radius);
+		p += 3;
+	}
 
 	if (city !== undefined) {
 		// ── FIX (Finding 1): Use LOWER(city) LIKE instead of ILIKE ──────────────
@@ -418,12 +421,6 @@ export const searchListings = async (userId, filters) => {
 	if (availableFrom !== undefined) {
 		clauses.push(`l.available_from <= $${p}`);
 		params.push(availableFrom);
-		p++;
-	}
-
-	if (proximityIds !== null) {
-		clauses.push(`l.listing_id = ANY($${p}::uuid[])`);
-		params.push(proximityIds);
 		p++;
 	}
 
