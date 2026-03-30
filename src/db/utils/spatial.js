@@ -5,10 +5,9 @@ import { pool } from "../client.js";
 
 // within `radiusMeters` meters of the given (lat, lng) point.
 //
-// Returns an array of listing_id strings — NOT full listing rows. The caller
-// (listing service search function) uses these IDs as an IN-clause filter on
-// the main search query. Keeping this function ID-only avoids selecting the
-// same listing columns twice and keeps query responsibilities cleanly separated.
+// Returns an array of listing_id strings. Search now applies proximity inline
+// in the main listings query, so this helper is only for call sites that
+// explicitly need just IDs for a nearby-point lookup.
 //
 // THE GEOGRAPHY CAST IS CRITICAL:
 // ST_DWithin(geometry, geometry, distance) interprets `distance` in the native
@@ -28,23 +27,22 @@ import { pool } from "../client.js";
 //
 // The `client` parameter defaults to the shared pool so the function can
 // participate in a transaction if needed (consistent with findUserById,
-// findInstitutionByDomain, etc.), though in practice the search path never
-// calls this inside a transaction.
-export const findListingsNearPoint = async (lat, lng, radiusMeters, client = pool) => {
-	const { rows } = await client.query(
-		`SELECT l.listing_id
-     FROM listings l
-     LEFT JOIN properties p ON p.property_id = l.property_id
-     WHERE ST_DWithin(
-             COALESCE(l.location, p.location)::geography,
-             ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography,
-             $3
-           )
-       AND l.status     = 'active'
-       AND l.expires_at > NOW()
-       AND l.deleted_at IS NULL`,
-		[lat, lng, radiusMeters],
-	);
+// findInstitutionByDomain, etc.), though most call sites use the shared pool.
+// export const findListingsNearPoint = async (lat, lng, radiusMeters, client = pool) => {
+// 	const { rows } = await client.query(
+// 		`SELECT l.listing_id
+//      FROM listings l
+//      LEFT JOIN properties p ON p.property_id = l.property_id
+//      WHERE ST_DWithin(
+//              COALESCE(l.location, p.location)::geography,
+//              ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography,
+//              $3
+//            )
+//        AND l.status     = 'active'
+//        AND l.expires_at > NOW()
+//        AND l.deleted_at IS NULL`,
+// 		[lat, lng, radiusMeters],
+// 	);
 
-	return rows.map((r) => r.listing_id);
-};
+// 	return rows.map((r) => r.listing_id);
+// };
