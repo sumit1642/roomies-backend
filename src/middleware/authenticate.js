@@ -9,6 +9,8 @@ import { pool } from "../db/client.js";
 import { casRefreshToken, parseTtlSeconds } from "../services/auth.service.js";
 
 const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
+const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
+const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
 
 // used in auth.controller.js — a cookie set with sameSite:'strict' must also be
 // cleared/replaced with sameSite:'strict'. Inconsistent options cause browsers to
@@ -21,15 +23,15 @@ const ACCESS_COOKIE_OPTIONS = {
 	httpOnly: true,
 	secure: config.NODE_ENV === "production",
 	sameSite: "strict",
-	maxAge: parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60) * 1000,
+	maxAge: ACCESS_TTL_SECONDS * 1000,
 };
 const REFRESH_COOKIE_OPTIONS = {
 	httpOnly: true,
 	secure: config.NODE_ENV === "production",
 	sameSite: "strict",
-	maxAge: parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60) * 1000,
+	maxAge: REFRESH_TTL_SECONDS * 1000,
 };
-const REFRESH_TTL = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
+const REFRESH_TTL = REFRESH_TTL_SECONDS;
 const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
 
 //
@@ -112,15 +114,18 @@ const attemptSilentRefresh = async (req, res) => {
 	if (INACTIVE_STATUSES.has(userRows[0].account_status)) return null;
 
 	const roles = roleRows.map((r) => r.role_name);
+	// Use numeric seconds for jwt.sign to match auth.service.js behaviour.
+	// jsonwebtoken interprets digit-only strings (e.g. "900") as milliseconds,
+	// so normalizing to numeric seconds prevents near-instant token expiry.
 	const newAccessToken = jwt.sign(
 		{ userId: refreshPayload.userId, email: userRows[0].email, roles, sid: refreshPayload.sid },
 		config.JWT_SECRET,
-		{ expiresIn: config.JWT_EXPIRES_IN },
+		{ expiresIn: ACCESS_TTL_SECONDS },
 	);
 	const newRefreshToken = jwt.sign(
 		{ userId: refreshPayload.userId, sid: refreshPayload.sid },
 		config.JWT_REFRESH_SECRET,
-		{ expiresIn: config.JWT_REFRESH_EXPIRES_IN },
+		{ expiresIn: REFRESH_TTL_SECONDS },
 	);
 	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
 
