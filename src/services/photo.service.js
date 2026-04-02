@@ -27,25 +27,32 @@ import { getQueue } from "../workers/queue.js";
 // Called by the controller immediately after Multer has written the staged file.
 // Does four things and returns:
 //   1. Verifies the listing exists and belongs to posterId
-//   2. Determines the display_order for the new photo — atomically
+//   2. Allocates display_order server-side — always, ignoring any client hint
 //   3. Inserts a provisional listing_photos row (photo_url = placeholder)
 //   4. Enqueues a BullMQ job carrying the photoId and staging path
 //
 // Returns { photoId, status: 'processing' } — the client polls GET photos
 // to observe when the real URL replaces the placeholder.
 //
-// ─── WHY WE LOCK THE PARENT LISTING ROW ──────────────────────────────────────
+// ─── WHY display_order IS ALWAYS COMPUTED SERVER-SIDE ────────────────────────
 //
 // display_order is allocated by reading MAX(display_order) + 1 from
-// listing_photos. Without serialisation, two concurrent uploads for the same
-// listing can both read the same MAX and both insert with the same order value,
-// producing duplicate display_order entries (a data-consistency bug, not a crash).
+// listing_photos while holding a row-level lock on the parent listing row.
+// The client-supplied displayOrder hint is intentionally ignored: accepting
+// it would bypass the allocation query and allow two concurrent uploads for
+// the same listing to insert with the same display_order value (a duplicate
+// that cannot be caught without a UNIQUE index on the column). The server-side
+// allocation under the listing lock is the only correct approach.
 //
-// The correct serialisation point is the parent listing row, not the photo rows
-// themselves. Locking the listing row (SELECT … FOR UPDATE) makes all concurrent
-// uploads for that listing queue behind each other. The first upload reads MAX,
+// ─── WHY WE LOCK THE PARENT LISTING ROW ──────────────────────────────────────
+//
+// Without serialisation, two concurrent uploads for the same listing can both
+// read the same MAX and both insert with the same order value. The correct
+// serialisation point is the parent listing row, not the photo rows themselves.
+// Locking the listing row (SELECT … FOR UPDATE) makes all concurrent uploads
+// for that listing queue behind each other. The first upload reads MAX,
 // inserts, and commits; only then does the next upload proceed and read the
-// updated MAX. This gives us atomic, gap-free, monotonically increasing order
+// updated MAX. This gives atomic, gap-free, monotonically increasing order
 // values without any application-level retry logic.
 //
 // We use the parent listing row rather than locking the photo rows because:
@@ -54,7 +61,7 @@ import { getQueue } from "../workers/queue.js";
 //      entirely, which is the opposite of what we want.
 //   b) The listing row is a stable, always-present target that exists from the
 //      moment the listing is created through its entire lifetime.
-export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displayOrder) => {
+export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
@@ -77,21 +84,20 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displ
 			throw new AppError("Listing not found", 404);
 		}
 
-		// Step 2: allocate display_order.
+		// Step 2: allocate display_order server-side.
 		// Now that we hold the listing lock, no other transaction can insert a new
 		// photo row for this listing until we commit. MAX() is therefore stable and
 		// gap-free. COALESCE handles the first-photo case (MAX returns NULL → start at 0).
-		let order = displayOrder;
-		if (order === undefined) {
-			const { rows: orderRows } = await client.query(
-				`SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order
+		// The client-supplied displayOrder hint is deliberately not used here —
+		// accepting it would allow duplicate order values from concurrent uploads.
+		const { rows: orderRows } = await client.query(
+			`SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order
          FROM listing_photos
          WHERE listing_id = $1
            AND deleted_at IS NULL`,
-				[listingId],
-			);
-			order = orderRows[0].next_order;
-		}
+			[listingId],
+		);
+		const order = orderRows[0].next_order;
 
 		// Step 3: insert the provisional photo row while holding the lock.
 		// The placeholder URL sentinel prevents the photo from being served before
