@@ -403,7 +403,8 @@ export const listSessions = async (userId, currentSid) => {
 	}
 
 	if (staleSids.length > 0) {
-		await redis.zRem(sessionsKey, staleSids);
+		// Intentionally pass stale members variadically for bulk zRem cleanup.
+		await redis.zRem(sessionsKey, ...staleSids);
 	}
 
 	return sessions.sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
