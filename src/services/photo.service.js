@@ -27,76 +27,121 @@ import { getQueue } from "../workers/queue.js";
 // Called by the controller immediately after Multer has written the staged file.
 // Does four things and returns:
 //   1. Verifies the listing exists and belongs to posterId
-//   2. Determines the display_order for the new photo
+//   2. Determines the display_order for the new photo — atomically
 //   3. Inserts a provisional listing_photos row (photo_url = placeholder)
 //   4. Enqueues a BullMQ job carrying the photoId and staging path
 //
 // Returns { photoId, status: 'processing' } — the client polls GET photos
 // to observe when the real URL replaces the placeholder.
+//
+// ─── WHY WE LOCK THE PARENT LISTING ROW ──────────────────────────────────────
+//
+// display_order is allocated by reading MAX(display_order) + 1 from
+// listing_photos. Without serialisation, two concurrent uploads for the same
+// listing can both read the same MAX and both insert with the same order value,
+// producing duplicate display_order entries (a data-consistency bug, not a crash).
+//
+// The correct serialisation point is the parent listing row, not the photo rows
+// themselves. Locking the listing row (SELECT … FOR UPDATE) makes all concurrent
+// uploads for that listing queue behind each other. The first upload reads MAX,
+// inserts, and commits; only then does the next upload proceed and read the
+// updated MAX. This gives us atomic, gap-free, monotonically increasing order
+// values without any application-level retry logic.
+//
+// We use the parent listing row rather than locking the photo rows because:
+//   a) On the very first upload there are no photo rows to lock — a FOR UPDATE
+//      on an empty result set acquires no lock and closes the race window
+//      entirely, which is the opposite of what we want.
+//   b) The listing row is a stable, always-present target that exists from the
+//      moment the listing is created through its entire lifetime.
 export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displayOrder) => {
-	// Ownership check. The WHERE clause uses both listing_id and posted_by so
-	// a poster who supplies a valid listingId that belongs to someone else
-	// receives a 404 rather than a 403 — ownership is not revealed.
-	const { rows: listingRows } = await pool.query(
-		`SELECT listing_id
-     FROM listings
-     WHERE listing_id = $1
-       AND posted_by  = $2
-       AND deleted_at IS NULL`,
-		[listingId, posterId],
-	);
-	if (!listingRows.length) throw new AppError("Listing not found", 404);
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
 
-	// Determine display_order. If the client supplied one, use it. Otherwise
-	// assign (current max + 1) so the photo appends to the end of the gallery.
-	// COALESCE handles the case where this is the first photo (MAX returns NULL).
-	let order = displayOrder;
-	if (order === undefined) {
-		const { rows: orderRows } = await pool.query(
-			`SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order
-       FROM listing_photos
+		// Step 1 + lock: verify ownership and lock the listing row in one query.
+		// FOR UPDATE acquires a row-level lock on the listing, serialising all
+		// concurrent uploads for this listing through a single queue behind it.
+		// A non-owner or non-existent listing produces zero rows → 404.
+		const { rows: listingRows } = await client.query(
+			`SELECT listing_id
+       FROM listings
        WHERE listing_id = $1
-         AND deleted_at IS NULL`,
-			[listingId],
+         AND posted_by  = $2
+         AND deleted_at IS NULL
+       FOR UPDATE`,
+			[listingId, posterId],
 		);
-		order = orderRows[0].next_order;
+		if (!listingRows.length) {
+			await client.query("ROLLBACK");
+			throw new AppError("Listing not found", 404);
+		}
+
+		// Step 2: allocate display_order.
+		// Now that we hold the listing lock, no other transaction can insert a new
+		// photo row for this listing until we commit. MAX() is therefore stable and
+		// gap-free. COALESCE handles the first-photo case (MAX returns NULL → start at 0).
+		let order = displayOrder;
+		if (order === undefined) {
+			const { rows: orderRows } = await client.query(
+				`SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order
+         FROM listing_photos
+         WHERE listing_id = $1
+           AND deleted_at IS NULL`,
+				[listingId],
+			);
+			order = orderRows[0].next_order;
+		}
+
+		// Step 3: insert the provisional photo row while holding the lock.
+		// The placeholder URL sentinel prevents the photo from being served before
+		// the worker replaces it with the real WebP URL.
+		const photoId = crypto.randomUUID();
+		const placeholderUrl = `processing:${photoId}`;
+
+		await client.query(
+			`INSERT INTO listing_photos
+         (photo_id, listing_id, photo_url, is_cover, display_order)
+       VALUES ($1, $2, $3, FALSE, $4)`,
+			[photoId, listingId, placeholderUrl, order],
+		);
+
+		await client.query("COMMIT");
+
+		// Step 4: enqueue the BullMQ processing job after committing.
+		// The job is enqueued outside the transaction because BullMQ writes to
+		// Redis, not Postgres. Enqueueing inside the transaction would tie the
+		// Redis write to the Postgres commit boundary, and a Redis failure would
+		// cause an unnecessary Postgres rollback. Doing it after commit means the
+		// photo row exists before the worker can possibly run — no orphaned jobs.
+		const queue = getQueue(MEDIA_QUEUE_NAME);
+		await queue.add(
+			"process-photo",
+			{ listingId, photoId, stagingPath, posterId },
+			{
+				attempts: 3,
+				backoff: { type: "exponential", delay: 2000 },
+				removeOnComplete: 100,
+				removeOnFail: 200,
+			},
+		);
+
+		logger.info({ posterId, listingId, photoId, stagingPath, displayOrder: order }, "Photo upload enqueued");
+
+		return { photoId, status: "processing" };
+	} catch (err) {
+		// Roll back if anything fails between BEGIN and COMMIT. If ROLLBACK
+		// itself fails (e.g. the connection is broken), we log and still
+		// re-throw the original error so the HTTP response is a 5xx, not a hang.
+		try {
+			await client.query("ROLLBACK");
+		} catch (rollbackErr) {
+			logger.error({ rollbackErr, err }, "enqueuePhotoUpload: rollback failed");
+		}
+		throw err;
+	} finally {
+		client.release();
 	}
-
-	// The provisional photo_url is a sentinel value rather than a real URL.
-	// The worker replaces it with the real WebP URL after processing. Using a
-	// clearly non-URL string prevents the client from accidentally treating a
-	// placeholder as a real image URL if it reads the photo list before the
-	// worker has finished.
-	const photoId = crypto.randomUUID();
-	const placeholderUrl = `processing:${photoId}`;
-
-	await pool.query(
-		`INSERT INTO listing_photos
-       (photo_id, listing_id, photo_url, is_cover, display_order)
-     VALUES ($1, $2, $3, FALSE, $4)`,
-		[photoId, listingId, placeholderUrl, order],
-	);
-
-	// Enqueue the processing job. The worker needs:
-	//   listingId  — to know which directory to write the final file into
-	//   photoId    — to update the correct listing_photos row when done
-	//   stagingPath — the absolute path where Multer wrote the raw file
-	//   posterId   — carried for log correlation only (not used in processing)
-	const queue = getQueue(MEDIA_QUEUE_NAME);
-	await queue.add(
-		"process-photo",
-		{ listingId, photoId, stagingPath, posterId },
-		{
-			attempts: 3,
-			backoff: { type: "exponential", delay: 2000 },
-			removeOnComplete: 100, // Keep the last 100 completed jobs for debugging
-			removeOnFail: 200, // Keep failed jobs longer so they can be inspected
-		},
-	);
-
-	logger.info({ posterId, listingId, photoId, stagingPath, displayOrder: order }, "Photo upload enqueued");
-
-	return { photoId, status: "processing" };
 };
 
 // ─── Get photos for a listing ─────────────────────────────────────────────────
