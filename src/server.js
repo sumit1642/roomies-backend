@@ -33,12 +33,44 @@ const start = async () => {
 			logger.info(`Server running on port ${config.PORT} [${config.NODE_ENV}]`);
 		});
 
+		// ─── Re-entrancy guard ────────────────────────────────────────────────────
+		//
+		// Both SIGINT (Ctrl-C) and SIGTERM (container orchestrator stop) are wired
+		// to the same shutdown logic. Without a guard, two rapid signals — or a
+		// Ctrl-C double-tap, or a platform that fires both signals during a deploy
+		// restart — start two concurrent shutdown sequences that race over the same
+		// resources: server.close(), worker.close(), pool.end(), redis.close(). The
+		// second invocation finds resources already being torn down, producing
+		// spurious errors, duplicate log lines, and unpredictable exit codes.
+		//
+		// The flag lives at function scope (inside `start`) rather than at module
+		// scope so that test suites that call start() multiple times get a fresh
+		// flag per invocation. It is captured by the closure of both signal
+		// handlers, so they share the same boolean reference.
+		let isShuttingDown = false;
+
 		// Shutdown order: HTTP → workers → queues → PostgreSQL → Redis.
 		// Workers and queues must close before Redis because in-flight jobs still
 		// need the Redis connection. Redis closes last to avoid exhausting Azure
 		// connection limits on repeated restarts.
 		const shutdown = (signal) => async () => {
+			// ── Re-entrancy guard: ignore repeated signals ────────────────────────
+			if (isShuttingDown) {
+				logger.warn(`${signal} received again during shutdown — ignoring duplicate signal`);
+				return;
+			}
+			isShuttingDown = true;
+
 			logger.info(`${signal} received — shutting down gracefully`);
+
+			// Safety net — force exit if graceful shutdown stalls beyond 10 seconds.
+			// Created here (inside the guarded path) so it fires only once, not once
+			// per signal. .unref() ensures this timer does not prevent Node from
+			// exiting naturally if everything closes before the deadline.
+			setTimeout(() => {
+				logger.fatal("Shutdown timeout exceeded — forcing exit");
+				process.exit(1);
+			}, 10_000).unref();
 
 			server.close(async (err) => {
 				if (err) {
@@ -94,12 +126,6 @@ const start = async () => {
 				logger.info("Shutdown complete");
 				process.exit(0);
 			});
-
-			// Safety net — force exit if graceful shutdown stalls beyond 10 seconds.
-			setTimeout(() => {
-				logger.fatal("Shutdown timeout exceeded — forcing exit");
-				process.exit(1);
-			}, 10_000).unref();
 		};
 
 		process.on("SIGINT", shutdown("SIGINT"));

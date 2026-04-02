@@ -6,6 +6,7 @@
 // After successful parse, result.data is written back to req so that Zod
 // coercions, defaults, and transformations are visible to downstream handlers.
 
+
 export const validate = (schema) => (req, res, next) => {
 	const result = schema.safeParse({
 		body: req.body,
@@ -17,13 +18,9 @@ export const validate = (schema) => (req, res, next) => {
 		return next(result.error);
 	}
 
-	// Write validated/transformed data back — downstream sees coerced types and defaults
-	// req.body = result.data.body ?? req.body;
-	// req.query = result.data.query ?? req.query;
-	// req.params = result.data.params ?? req.params;
 	req.body = result.data.body ?? req.body;
-	if (result.data.query) Object.assign(req.query, result.data.query);
-	if (result.data.params) Object.assign(req.params, result.data.params);
-	
+	req.query = result.data.query ?? req.query;
+	req.params = result.data.params ?? req.params;
+
 	next();
 };

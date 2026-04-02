@@ -42,6 +42,30 @@ const withTimeout = (promise, label) => {
 // GET /api/v1/health
 // Returns 200 if server, database, and Redis are all reachable.
 // Returns 503 if any dependency is degraded or timed out.
+//
+// ─── WHY WE SANITISE THE RESPONSE ────────────────────────────────────────────
+//
+// Raw Node/pg/redis error messages can contain infrastructure details that
+// external clients have no business seeing: internal hostnames, port numbers,
+// SSL certificate error details, Azure connection string fragments, and so on.
+// Leaking these in a public HTTP response is an information-disclosure
+// vulnerability — it gives an attacker a precise map of your internal topology
+// from a single unauthenticated probe.
+//
+// We already log the full error object (with all its detail) via logger.error,
+// which goes to your structured log aggregator (Pino → Azure Monitor / stdout).
+// That is exactly the right audience for detailed failure context. The HTTP
+// response audience is a load balancer, a status-page service, or a developer
+// checking health — none of them need the raw error string.
+//
+// The public response therefore uses a fixed vocabulary of sanitised statuses:
+//   "ok"        — the probe succeeded
+//   "unhealthy" — the probe failed for any reason other than timeout
+//   "timeout"   — the probe timed out waiting for a response
+//
+// These three values are expressive enough for any downstream consumer to act
+// on (restart a service, page on-call, mark the instance out of rotation) while
+// revealing nothing about the internal failure mechanism.
 healthRouter.get("/", async (req, res) => {
 	const health = {
 		status: "ok",
@@ -55,9 +79,11 @@ healthRouter.get("/", async (req, res) => {
 	try {
 		await withTimeout(pool.query("SELECT 1"), "database");
 	} catch (err) {
+		// Log the full, unredacted error internally — this is where infrastructure
+		// detail belongs. The response gets a sanitised status only.
 		logger.error({ err }, "Health probe: database unreachable");
 		health.status = "degraded";
-		health.services.database = err.message;
+		health.services.database = err.message?.includes("timed out") ? "timeout" : "unhealthy";
 	}
 
 	try {
@@ -65,7 +91,7 @@ healthRouter.get("/", async (req, res) => {
 	} catch (err) {
 		logger.error({ err }, "Health probe: redis unreachable");
 		health.status = "degraded";
-		health.services.redis = err.message;
+		health.services.redis = err.message?.includes("timed out") ? "timeout" : "unhealthy";
 	}
 
 	res.status(health.status === "ok" ? 200 : 503).json(health);
