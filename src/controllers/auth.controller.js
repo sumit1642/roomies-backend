@@ -95,18 +95,6 @@ export const refresh = async (req, res, next) => {
 
 		const tokens = await authService.refresh(incomingRefreshToken);
 
-		// Set fresh cookies for browser clients. Previously this was missing,
-		// which meant the expired accessToken cookie was never replaced on an
-		// explicit refresh call — the browser had to rely on silent-refresh
-		// middleware to eventually patch things up. Now refresh behaves like
-		// login: both tokens are delivered via cookie AND JSON body so that
-		// browser and Android clients are handled identically.
-		//
-		// The refreshToken cookie is also rotated here. Since authService.refresh()
-		// now calls storeRefreshToken(), the old refresh token is atomically
-		// revoked in Redis the moment the new one is stored. A compromised old
-		// refresh token presented after this point will fail the Redis comparison
-		// in the service and return 401.
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
 		res.json({ status: "success", data: tokens });
@@ -148,19 +136,23 @@ export const listSessions = async (req, res, next) => {
 
 export const revokeSession = async (req, res, next) => {
 	try {
-		const sid = req.params?.sid;
+		const { sid } = req.params;
+
+		// UUID v4 format check. revokeSessionSchema validates only that sid is a
+		// non-empty string; the controller adds a UUID v4 pattern check so that a
+		// malformed sid returns a consistent 400 AppError via the central error
+		// handler rather than a raw JSON object that bypasses the standard envelope.
 		const isValidSid =
 			typeof sid === "string" &&
-			sid.trim().length > 0 &&
 			/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sid);
 
 		if (!isValidSid) {
-			return res.status(400).json({ error: "Invalid session id" });
+			return next(new AppError("Invalid session id", 400));
 		}
 
-		await authService.revokeSession(req.user.userId, req.params.sid);
+		await authService.revokeSession(req.user.userId, sid);
 
-		if (req.user.sid === req.params.sid) {
+		if (req.user.sid === sid) {
 			clearAuthCookies(res);
 		}
 

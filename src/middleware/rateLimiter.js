@@ -54,8 +54,12 @@ const rateLimitRedisClient = createClient({
 		// Modest reconnect strategy — rate limiters can tolerate brief outages.
 		reconnectStrategy: (retries) => {
 			if (retries >= 5) {
+				// Accurate: when Redis reconnect is exhausted, rate limiting is
+				// disabled (requests are allowed through) rather than falling back
+				// to an in-memory store. passOnStoreError: true on the RedisStore
+				// instances below is what causes the fail-open behaviour.
 				logger.warn(
-					"Rate limit Redis: max reconnect attempts reached — rate limiting will degrade to in-memory",
+					"Rate limit Redis: max reconnect attempts reached — rate limiting is disabled, requests will be allowed through",
 				);
 				return new Error("Rate limit Redis reconnect failed");
 			}
@@ -67,9 +71,13 @@ const rateLimitRedisClient = createClient({
 rateLimitRedisClient.on("error", (err) => {
 	// Log the error but do not crash. express-rate-limit's RedisStore has a
 	// `sendCommand` interface that will throw when Redis is down, which causes
-	// the limiter to fall back to allowing requests rather than blocking them.
-	// This is the correct degradation mode: availability over strict enforcement.
-	logger.warn({ err: err.message }, "Rate limit Redis client error — rate limiting may be degraded");
+	// the limiter to fail open (requests are allowed through) rather than
+	// blocking them. This is the correct degradation mode: availability over
+	// strict enforcement.
+	logger.warn(
+		{ err: err.message },
+		"Rate limit Redis client error — rate limiting is disabled, requests will be allowed through",
+	);
 });
 
 // Connect the dedicated client. Failures here are non-fatal; if connect() fails,
@@ -78,7 +86,7 @@ rateLimitRedisClient.on("error", (err) => {
 rateLimitRedisClient.connect().catch((err) => {
 	logger.error(
 		{ err: err.message },
-		"Rate limit Redis: failed to connect on startup — rate limiting will fall back to in-memory store. " +
+		"Rate limit Redis: failed to connect on startup — rate limiting is disabled, requests will be allowed through. " +
 			"Ensure REDIS_URL is correct and Redis is reachable.",
 	);
 });
@@ -112,8 +120,9 @@ export const otpLimiter = rateLimit({
 	legacyHeaders: false,
 	// Each IP gets its own key in Redis under the "rl:otp:" namespace.
 	store: makeRedisStore("rl:otp:"),
-	// Intentional fail-open for auth availability; abuse protection degrades
-	// temporarily if Redis is unavailable.
+	// When Redis is unavailable the store throws, and passOnStoreError: true
+	// instructs express-rate-limit to allow the request through rather than
+	// returning a 500. Rate limiting is disabled, not degraded to in-memory.
 	passOnStoreError: true,
 	// keyGenerator defaults to req.ip, which is correct since app.js sets
 	// trust proxy to 1 in production so req.ip reflects the real client IP.
@@ -132,8 +141,9 @@ export const authLimiter = rateLimit({
 	standardHeaders: true,
 	legacyHeaders: false,
 	store: makeRedisStore("rl:auth:"),
-	// Intentional fail-open for auth availability; abuse protection degrades
-	// temporarily if Redis is unavailable.
+	// When Redis is unavailable the store throws, and passOnStoreError: true
+	// instructs express-rate-limit to allow the request through rather than
+	// returning a 500. Rate limiting is disabled, not degraded to in-memory.
 	passOnStoreError: true,
 	message: {
 		status: "error",

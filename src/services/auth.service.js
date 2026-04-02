@@ -19,22 +19,7 @@ const googleOAuthClient = config.GOOGLE_CLIENT_ID ? new OAuth2Client(config.GOOG
 // ─── Account status guard ─────────────────────────────────────────────────────
 const INACTIVE_ACCOUNT_STATUSES = new Set(["suspended", "banned", "deactivated"]);
 
-// ─── Token helpers ───────────────────────────────────────────────────────────
-
-const issueAccessToken = (userId, email, roles, sid) =>
-	jwt.sign({ userId, email, roles, sid }, config.JWT_SECRET, {
-		expiresIn: config.JWT_EXPIRES_IN,
-	});
-
-const issueRefreshToken = (userId, sid) =>
-	jwt.sign({ userId, sid }, config.JWT_REFRESH_SECRET, {
-		expiresIn: config.JWT_REFRESH_EXPIRES_IN,
-	});
-
-const issueSessionId = () => crypto.randomUUID();
-
-const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
-const userSessionsKey = (userId) => `userSessions:${userId}`;
+// ─── TTL helpers ──────────────────────────────────────────────────────────────
 
 export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) => {
 	if (typeof expiresIn === "number" && Number.isFinite(expiresIn) && expiresIn > 0) {
@@ -57,7 +42,33 @@ export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) =
 	return Number.parseInt(amount, 10) * multipliers[unit.toLowerCase()];
 };
 
-const REFRESH_TTL = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN);
+// ─── Token helpers ───────────────────────────────────────────────────────────
+
+// Normalize TTLs once at startup. jwt.sign treats a plain digit-only string
+// (e.g. "900") as milliseconds, not seconds, which would make tokens expire
+// almost immediately. By converting to a numeric seconds value here we ensure
+// consistent behaviour regardless of how the env var is formatted.
+const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
+const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
+
+const issueAccessToken = (userId, email, roles, sid) =>
+	jwt.sign({ userId, email, roles, sid }, config.JWT_SECRET, {
+		expiresIn: ACCESS_TTL_SECONDS,
+	});
+
+const issueRefreshToken = (userId, sid) =>
+	jwt.sign({ userId, sid }, config.JWT_REFRESH_SECRET, {
+		expiresIn: REFRESH_TTL_SECONDS,
+	});
+
+const issueSessionId = () => crypto.randomUUID();
+
+const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
+const userSessionsKey = (userId) => `userSessions:${userId}`;
+
+export const parseTtlSeconds_EXPORTED = parseTtlSeconds; // re-export alias kept for compat
+
+const REFRESH_TTL = REFRESH_TTL_SECONDS;
 
 const buildTokenResponse = (userId, sid, email, roles, isEmailVerified) => {
 	const accessToken = issueAccessToken(userId, email, roles, sid);
@@ -104,7 +115,23 @@ export const casRefreshToken = async (
 	return result === 1;
 };
 
-const verifyRefreshTokenPayload = (incomingRefreshToken) => {
+// ─── verifyRefreshTokenPayload ────────────────────────────────────────────────
+//
+// Verifies the refresh token JWT and returns its payload. Handles two cases:
+//
+//   Modern tokens:  payload contains both userId and sid. Used directly.
+//
+//   Legacy tokens:  payload contains userId but no sid. These were minted before
+//                   per-session keys were introduced. We attempt a fallback
+//                   lookup using the old per-user key (userSessionsKey) to
+//                   find any stored token, generate a fresh sid, re-issue and
+//                   rotate under the new per-session key, and delete the old
+//                   per-user key so subsequent calls use the modern path.
+//                   If no legacy entry is found, we throw 401 — the session has
+//                   expired or never existed.
+//
+// Returns { userId, sid } — always a complete pair on success.
+export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 	let payload;
 	try {
 		payload = jwt.verify(incomingRefreshToken, config.JWT_REFRESH_SECRET);
@@ -112,8 +139,66 @@ const verifyRefreshTokenPayload = (incomingRefreshToken) => {
 		throw err;
 	}
 
-	if (!payload?.userId || !payload?.sid) {
+	if (!payload?.userId) {
 		throw new AppError("Refresh token payload is invalid", 401);
+	}
+
+	// Modern path — token already has a sid.
+	if (payload.sid) {
+		return { userId: payload.userId, sid: payload.sid };
+	}
+
+	// Legacy path — token was minted without a sid. Attempt fallback migration.
+	logger.warn(
+		{ userId: payload.userId },
+		"verifyRefreshTokenPayload: legacy token without sid — attempting migration",
+	);
+
+	const legacyKey = userSessionsKey(payload.userId);
+	const legacyToken = await redis.get(legacyKey).catch(() => null);
+
+	if (!legacyToken || legacyToken !== incomingRefreshToken) {
+		// No legacy session found or token mismatch — session has expired or been revoked.
+		throw new AppError("Refresh token is invalid or has been revoked", 401);
+	}
+
+	// Issue a new sid and migrate the session to the per-session key scheme.
+	const newSid = issueSessionId();
+	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
+
+	// Atomically: store under the new per-session key, add sid to the sorted set,
+	// and delete the old legacy per-user key. If this partially fails the caller
+	// will get a 401 on the next attempt, which is safe.
+	const multi = redis.multi();
+	multi.setEx(refreshTokenKey(payload.userId, newSid), REFRESH_TTL, incomingRefreshToken);
+	multi.zAdd(userSessionsKey(payload.userId), { score: expiryTimestamp, value: newSid });
+	multi.del(legacyKey);
+	await multi.exec();
+
+	logger.info(
+		{ userId: payload.userId, newSid },
+		"verifyRefreshTokenPayload: legacy token migrated to per-session key",
+	);
+
+	return { userId: payload.userId, sid: newSid };
+};
+
+// Internal sync version used by logoutCurrent where async migration is not needed
+// (logout just needs to validate and extract; migration happens on refresh, not logout).
+const _verifyRefreshTokenPayloadSync = (incomingRefreshToken) => {
+	let payload;
+	try {
+		payload = jwt.verify(incomingRefreshToken, config.JWT_REFRESH_SECRET);
+	} catch (err) {
+		throw err;
+	}
+
+	if (!payload?.userId) {
+		throw new AppError("Refresh token payload is invalid", 401);
+	}
+
+	if (!payload.sid) {
+		throw new AppError("Refresh token payload is invalid (missing sid)", 401);
 	}
 
 	return payload;
@@ -257,7 +342,7 @@ export const login = async ({ email, password }) => {
 };
 
 export const logoutCurrent = async (userId, incomingRefreshToken, authenticatedSid) => {
-	const payload = verifyRefreshTokenPayload(incomingRefreshToken);
+	const payload = _verifyRefreshTokenPayloadSync(incomingRefreshToken);
 	if (payload.userId !== userId) {
 		throw new AppError("Refresh token does not belong to current user", 403);
 	}
@@ -283,50 +368,18 @@ export const logoutAll = async (userId) => {
 	logger.info({ userId, revokedSessions: sids.length }, "User logged out from all sessions");
 };
 
-// ─── listSessions ─────────────────────────────────────────────────────────────
-//
-// FIX (Findings 2 & 5): Replace N individual redis.get() calls with a single
-// redis.mGet() call.
-//
-// The original implementation used Promise.all over one redis.get() per SID.
-// While Promise.all issues the commands concurrently rather than sequentially,
-// each command still requires its own TCP round-trip to Redis. With N active
-// sessions, that is N round-trips regardless of how fast they overlap. On a
-// typical deployment (Redis on a separate host or in Azure Cache for Redis),
-// each round-trip adds 1–5 ms of latency, so a user with 10 devices could see
-// 10–50 ms of added latency just for the SID token fetches.
-//
-// redis.mGet(keys) fetches all keys in a single command, a single round-trip,
-// and returns an array of values in the same order as the keys. The total cost
-// is O(1) network round-trips regardless of session count. The trade-off is
-// that we lose the ability to stream results, but for a session list (typically
-// well under 100 items) that is fine — we accumulate and return them all.
-//
-// Stale-SID cleanup (SIDs whose tokens have expired and been evicted from Redis
-// but whose sorted-set entries weren't yet cleaned up) is batched into a single
-// redis.zRem call rather than one zRem per missing token.
 export const listSessions = async (userId, currentSid) => {
 	const now = Math.floor(Date.now() / 1000);
 	const sessionsKey = userSessionsKey(userId);
 
-	// Remove SIDs whose score (expiry timestamp) is in the past. This is a
-	// best-effort cleanup — any remaining stale SIDs are handled below when
-	// we discover their token keys are missing from Redis.
 	await redis.zRemRangeByScore(sessionsKey, 0, now);
 
 	const sids = await redis.zRange(sessionsKey, 0, -1);
 	if (!sids.length) return [];
 
-	// ── Single MGET: fetch all tokens in one round-trip ───────────────────────
-	//
-	// Build the full key list (refreshToken:{userId}:{sid}) for every SID, then
-	// issue one MGET. The returned array mirrors the SIDs array positionally —
-	// tokens[i] is the token for sids[i], or null if that key doesn't exist.
 	const tokenKeys = sids.map((sid) => refreshTokenKey(userId, sid));
 	const tokens = await redis.mGet(tokenKeys);
 
-	// Collect stale SIDs (token key absent from Redis) so we can remove them
-	// from the sorted set in one batched call rather than N individual zRem calls.
 	const staleSids = [];
 	const sessions = [];
 
@@ -335,16 +388,10 @@ export const listSessions = async (userId, currentSid) => {
 		const token = tokens[i];
 
 		if (!token) {
-			// The token key expired and was evicted by Redis TTL, but the sorted-set
-			// entry survived (e.g. because zRemRangeByScore ran just before the TTL
-			// hit). Mark this SID stale so we can batch-remove it below.
 			staleSids.push(sid);
 			continue;
 		}
 
-		// Decode without verifying — we only need iat/exp for display. The token
-		// was already verified when it was issued and stored, so decoding without
-		// verify here is intentional: we're reading metadata, not granting access.
 		const decoded = jwt.decode(token);
 
 		sessions.push({
@@ -355,16 +402,10 @@ export const listSessions = async (userId, currentSid) => {
 		});
 	}
 
-	// Batch-remove all stale SIDs from the sorted set in one call.
-	// zRem accepts a variable-length argument list; spreading staleSids passes
-	// all members to remove in a single Redis command.
 	if (staleSids.length > 0) {
 		await redis.zRem(sessionsKey, staleSids);
 	}
 
-	// Float the current session to the top; otherwise preserve the order from
-	// the sorted set (ascending by expiry timestamp, so the oldest sessions
-	// appear first in the list — the current session is most likely recent).
 	return sessions.sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
 };
 
@@ -378,14 +419,15 @@ export const revokeSession = async (userId, sid) => {
 };
 
 export const refresh = async (incomingRefreshToken) => {
-	const payload = verifyRefreshTokenPayload(incomingRefreshToken);
+	// verifyRefreshTokenPayload is async to handle the legacy-token migration path.
+	const { userId, sid } = await verifyRefreshTokenPayload(incomingRefreshToken);
 
 	// Load fresh user state from DB — the refresh token payload may be up to
 	// 7 days old, so roles and account status could have changed since it was
 	// issued. Never trust stale payload data for authorization decisions.
 	const { rows: userRows } = await pool.query(
 		`SELECT email, is_email_verified, account_status FROM users WHERE user_id = $1 AND deleted_at IS NULL`,
-		[payload.userId],
+		[userId],
 	);
 	if (!userRows.length) {
 		throw new AppError("User not found", 401);
@@ -395,24 +437,16 @@ export const refresh = async (incomingRefreshToken) => {
 		throw new AppError("Account inactive", 401);
 	}
 
-	const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [
-		payload.userId,
-	]);
+	const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [userId]);
 	const roles = roleRows.map((r) => r.role_name);
 
-	const tokens = buildTokenResponse(
-		payload.userId,
-		payload.sid,
-		userRows[0].email,
-		roles,
-		userRows[0].is_email_verified,
-	);
+	const tokens = buildTokenResponse(userId, sid, userRows[0].email, roles, userRows[0].is_email_verified);
 
 	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
 
 	const rotated = await casRefreshToken(
-		payload.userId,
-		payload.sid,
+		userId,
+		sid,
 		incomingRefreshToken,
 		tokens.refreshToken,
 		REFRESH_TTL,
@@ -422,7 +456,7 @@ export const refresh = async (incomingRefreshToken) => {
 		throw new AppError("Refresh token is invalid or has been revoked", 401);
 	}
 
-	logger.info({ userId: payload.userId, sid: payload.sid }, "Tokens refreshed");
+	logger.info({ userId, sid }, "Tokens refreshed");
 
 	return tokens;
 };
@@ -447,12 +481,6 @@ export const verifyOtp = async (userId, otp, ipAddress) => {
 	const attemptsKey = `otpAttempts:${userId}`;
 	const otpKey = `otp:${userId}`;
 
-	// ── IP-level coarse rate limit ────────────────────────────────────────────
-	//
-	// Only applied when ipAddress is available. If the middleware layer could not
-	// determine an IP (e.g. running behind an unconfigured proxy), we log a
-	// warning and skip the IP check rather than locking everyone out or silently
-	// grouping all requests under "ipAttempts:undefined".
 	if (ipAddress) {
 		const ipAttemptsKey = `ipAttempts:${ipAddress}`;
 		let ipAttempts;
@@ -476,7 +504,6 @@ export const verifyOtp = async (userId, otp, ipAddress) => {
 		logger.warn({ userId }, "OTP verify: IP address unavailable — skipping IP-level rate limiting");
 	}
 
-	// ── Per-user attempt counter ──────────────────────────────────────────────
 	const attempts = parseInt((await redis.get(attemptsKey)) ?? "0", 10);
 	if (attempts >= OTP_MAX_ATTEMPTS) {
 		throw new AppError("Too many incorrect attempts — request a new OTP", 429);
