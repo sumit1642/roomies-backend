@@ -15,10 +15,30 @@
 //   listing_id
 //   posted_by         — the poster's user_id (NOT poster_id)
 //   listing_type      — drives connection_type derivation
+//   total_capacity    — how many occupants the listing can hold
+//   current_occupants — how many have been accepted so far
 //   status
 //   deleted_at
 //
 // connections.interest_request_id — nullable FK added in the Phase 3 migration.
+//
+// ─── OCCUPANCY STATE MACHINE ──────────────────────────────────────────────────
+//
+// Accepting an interest request is not just a status transition — it is an
+// atomic aggregate operation that must update four things in one commit:
+//
+//   1. interest_requests.status  → 'accepted'
+//   2. connections               → new row created
+//   3. listings.current_occupants → incremented by 1
+//   4a. If current_occupants + 1 >= total_capacity:
+//        listings.status → 'filled', listings.filled_at → NOW()
+//        All remaining pending requests → 'expired'
+//   4b. If capacity remains:
+//        Listing stays 'active'. Other pending requests remain open.
+//
+// This keeps the listing + interest_requests + connections aggregate consistent.
+// The DB CHECK constraint (current_occupants <= total_capacity) is a final safety
+// net, but the branch logic above prevents us from even attempting a violation.
 //
 // ─── NOTIFICATION DELIVERY ───────────────────────────────────────────────────
 //
@@ -204,12 +224,39 @@ export const transitionInterestRequest = async (callerId, requestId, targetStatu
 };
 
 // ─── Accept interest request (internal) ──────────────────────────────────────
+//
+// This is the core aggregate-consistency operation in the entire accept flow.
+// Everything that must happen atomically lives inside a single BEGIN/COMMIT:
+//
+//   1. Lock the interest request AND its parent listing with FOR UPDATE so no
+//      concurrent transaction can accept another request or change listing status
+//      while we are deciding what to do.
+//
+//   2. Accept the request (status → 'accepted').
+//
+//   3. Create the connections row.
+//
+//   4. Increment listings.current_occupants.
+//
+//   5. Apply the capacity-exhaustion branch:
+//        A. Exhausted → mark listing 'filled', expire all remaining pending requests.
+//        B. Remaining → leave listing 'active', other requests remain open.
+//
+// Post-commit: fire notifications (never inside the transaction — a notification
+// failure must never roll back a committed state change).
 const _acceptInterestRequest = async (posterId, requestId) => {
 	const client = await pool.connect();
 
 	try {
 		await client.query("BEGIN");
 
+		// Lock both the interest request row AND its parent listing row in a single
+		// query. FOR UPDATE on the JOIN locks all matched rows simultaneously,
+		// preventing concurrent accepts or status changes on either object for the
+		// duration of this transaction.
+		//
+		// We also read total_capacity and current_occupants here so we can make
+		// the capacity-exhaustion decision inside the transaction boundary.
 		const { rows: irRows } = await client.query(
 			`SELECT
          ir.request_id,
@@ -217,11 +264,13 @@ const _acceptInterestRequest = async (posterId, requestId) => {
          ir.listing_id,
          ir.status,
          l.posted_by,
-         l.status AS listing_status,
+         l.status             AS listing_status,
          l.expires_at,
          (l.expires_at <= NOW()) AS listing_is_expired,
-         l.title AS listing_title,
+         l.title              AS listing_title,
          l.listing_type,
+         l.total_capacity,
+         l.current_occupants,
          CASE
            WHEN l.listing_type = 'student_room' THEN u_poster.phone
            ELSE pop.business_phone
@@ -273,6 +322,7 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			throw new AppError(UNAVAILABLE_LISTING_MESSAGE, 422);
 		}
 
+		// Step 1: Accept the interest request.
 		await client.query(
 			`UPDATE interest_requests
        SET status = 'accepted'::request_status_enum, updated_at = NOW()
@@ -280,6 +330,7 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			[requestId],
 		);
 
+		// Step 2: Create the connection row.
 		const connectionType = LISTING_TYPE_TO_CONNECTION_TYPE[ir.listing_type];
 		if (!connectionType) {
 			await client.query("ROLLBACK");
@@ -296,15 +347,84 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 
 		const connectionId = connRows[0].connection_id;
 
-		await expirePendingRequestsForListing(ir.listing_id, client, requestId);
+		// Step 3 & 4: Compute the new occupant count and apply the correct branch.
+		//
+		// The decision is made on values locked at the top of this transaction, so
+		// it is race-free regardless of how many concurrent requests arrive.
+		const newOccupantCount = ir.current_occupants + 1;
+		const capacityExhausted = newOccupantCount >= ir.total_capacity;
+
+		if (capacityExhausted) {
+			// Branch A — capacity exhausted.
+			//
+			// This acceptance fills the last available slot. We transition the listing
+			// to 'filled' (terminal state) and expire every remaining pending request
+			// because no further acceptances are possible.
+			//
+			// The AND status = 'active' guard in the UPDATE acts as a secondary
+			// concurrency check: if another transaction already changed the listing
+			// status (which shouldn't be possible given our FOR UPDATE lock, but
+			// we guard defensively), rowCount is 0 and we surface a 409.
+			const { rowCount: fillRowCount } = await client.query(
+				`UPDATE listings
+         SET current_occupants = $1,
+             status             = 'filled'::listing_status_enum,
+             filled_at          = NOW()
+         WHERE listing_id = $2
+           AND status     = 'active'
+           AND deleted_at IS NULL`,
+				[newOccupantCount, ir.listing_id],
+			);
+
+			if (fillRowCount === 0) {
+				await client.query("ROLLBACK");
+				throw new AppError("Listing status has already changed — please refresh", 409);
+			}
+
+			// Expire all remaining pending requests. The accepted request is already
+			// in 'accepted' status so it won't match the 'pending' filter; we pass
+			// null for excludeRequestId to keep the logic clean.
+			await expirePendingRequestsForListing(ir.listing_id, client, null);
+		} else {
+			// Branch B — capacity remains.
+			//
+			// Simply increment the occupant counter and leave the listing open.
+			// Other pending requests remain valid because more slots are available.
+			const { rowCount: occupancyRowCount } = await client.query(
+				`UPDATE listings
+         SET current_occupants = $1
+         WHERE listing_id = $2
+           AND status     = 'active'
+           AND deleted_at IS NULL`,
+				[newOccupantCount, ir.listing_id],
+			);
+
+			if (occupancyRowCount === 0) {
+				await client.query("ROLLBACK");
+				throw new AppError("Listing status has already changed — please refresh", 409);
+			}
+			// We deliberately do NOT expire other pending requests here. For a
+			// multi-slot listing (total_capacity > 1), those requests are still
+			// meaningful — the poster may accept more of them.
+		}
 
 		await client.query("COMMIT");
 
 		logger.info(
-			{ posterId, requestId, connectionId, studentId: ir.sender_id },
-			"Interest request accepted — connection created",
+			{
+				posterId,
+				requestId,
+				connectionId,
+				studentId: ir.sender_id,
+				newOccupantCount,
+				totalCapacity: ir.total_capacity,
+				capacityExhausted,
+			},
+			"Interest request accepted — connection created, occupancy updated",
 		);
 
+		// Post-commit notifications: these fire after the transaction commits.
+		// A notification failure never rolls back the state change.
 		enqueueNotification({
 			recipientId: ir.sender_id,
 			type: "interest_request_accepted",
@@ -312,11 +432,16 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			entityId: requestId,
 		});
 
-		// FIX (QA #4): Return only the canonical `whatsappLink` key.
-		// The previous code returned both `whatsappLink` and `whatsAppLink` (mixed
-		// casing) for "backward compatibility", but since no real client exists yet
-		// there is nothing to stay compatible with. A single canonical key is cleaner
-		// and prevents future confusion about which key to consume.
+		// Notify the poster when their listing just became filled.
+		if (capacityExhausted) {
+			enqueueNotification({
+				recipientId: posterId,
+				type: "listing_filled",
+				entityType: "listing",
+				entityId: ir.listing_id,
+			});
+		}
+
 		const whatsappLink =
 			ir.poster_phone ?
 				_buildWhatsAppLink(
@@ -332,6 +457,8 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			status: "accepted",
 			connectionId,
 			whatsappLink,
+			// Expose to the UI so it can show "Room is now full" messaging if needed.
+			listingFilled: capacityExhausted,
 		};
 	} catch (err) {
 		try {
