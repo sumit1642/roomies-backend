@@ -17,6 +17,29 @@ const bulkInsertAmenities = async (client, propertyId, amenityIds) => {
 	);
 };
 
+// ─── Location fields that, when changed on a property, must be cascaded ───────
+//
+// The schema comments state that PG/hostel listings inherit their location from
+// the parent property conceptually. The actual denormalized city/locality/
+// address/coordinate columns on the listings rows are projections of the
+// property's canonical values, written at listing-creation time.
+//
+// When these fields change on the property, the linked listing rows must be
+// updated in the same transaction — otherwise search queries that filter by
+// city or run proximity calculations on listing coordinates will use stale data.
+//
+// This map is the single source of truth for which property columns cascade
+// and what the corresponding listing column names are.
+const LOCATION_CASCADE_MAP = {
+	city: "city",
+	address_line: "address_line",
+	locality: "locality",
+	landmark: "landmark",
+	pincode: "pincode",
+	latitude: "latitude",
+	longitude: "longitude",
+};
+
 // ─── Response shape helpers ───────────────────────────────────────────────────
 const fetchPropertyWithAmenities = async (propertyId, client = pool) => {
 	const { rows } = await client.query(
@@ -197,6 +220,22 @@ export const listProperties = async (ownerId, { cursorTime, cursorId, limit = 20
 };
 
 // ─── Update property ──────────────────────────────────────────────────────────
+//
+// Location field changes are cascaded to all linked pg_room and hostel_bed
+// listings within the same transaction. This keeps the denormalized city,
+// address, and coordinate columns on those listing rows consistent with the
+// canonical values on the property — the source of truth.
+//
+// Why in the same transaction? If the property UPDATE commits but the listing
+// fan-out fails (e.g. a constraint violation or a transient error), search
+// results would use stale coordinates or city names until the next manual fix.
+// One atomic commit means either both sides update or neither does.
+//
+// Design: dual-write within one transaction (property row + listing fan-out).
+// This is appropriate at the current scale. If a property were ever linked to
+// thousands of listings, this becomes a long-running lock; at that scale the
+// right model is an eventually-consistent projection via a background job,
+// but that complexity is not warranted here.
 export const updateProperty = async (ownerId, propertyId, body) => {
 	await assertOwnerVerified(ownerId);
 
@@ -233,6 +272,13 @@ export const updateProperty = async (ownerId, propertyId, body) => {
 		throw new AppError("No valid fields provided for update", 400);
 	}
 
+	// Identify which of the changed columns are location fields that need to
+	// be cascaded to linked listings. We build this set before opening the
+	// transaction so we know whether we need the fan-out UPDATE.
+	const changedLocationColumns = setClauses
+		.map((clause) => clause.split(" = ")[0].trim())
+		.filter((col) => col in LOCATION_CASCADE_MAP);
+
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
@@ -267,6 +313,59 @@ export const updateProperty = async (ownerId, propertyId, body) => {
 		if (updateAmenities) {
 			await client.query(`DELETE FROM property_amenities WHERE property_id = $1`, [propertyId]);
 			await bulkInsertAmenities(client, propertyId, body.amenityIds);
+		}
+
+		// ── Location cascade to linked listings ───────────────────────────────────
+		//
+		// If any location fields changed, propagate those exact new values to all
+		// non-deleted pg_room and hostel_bed listings under this property. We use
+		// the values already committed to the property row (via a SELECT) rather
+		// than re-referencing the original `body` entries, so the listing rows
+		// always mirror what the property row actually contains — not what the
+		// caller sent, which could differ in edge cases involving partial failures.
+		//
+		// We target only pg_room and hostel_bed because student_room listings have
+		// their own address fields independent of any property.
+		if (changedLocationColumns.length > 0) {
+			// Read the freshly updated values from the property row itself.
+			const { rows: freshRows } = await client.query(
+				`SELECT ${changedLocationColumns.join(", ")}
+         FROM properties
+         WHERE property_id = $1`,
+				[propertyId],
+			);
+
+			if (freshRows.length) {
+				const fresh = freshRows[0];
+
+				// Build a SET clause for the listing fan-out update from only the
+				// columns that actually changed. Each clause re-reads from the
+				// property row via a correlated subquery — simpler and safer than
+				// rebinding the original body values again.
+				const listingSetClauses = changedLocationColumns.map((col, i) => `${col} = $${i + 2}`);
+				const listingValues = changedLocationColumns.map((col) => fresh[col]);
+
+				const { rowCount: listingUpdateCount } = await client.query(
+					`UPDATE listings
+           SET ${listingSetClauses.join(", ")}
+           WHERE property_id = $1
+             AND listing_type IN ('pg_room', 'hostel_bed')
+             AND deleted_at IS NULL`,
+					[propertyId, ...listingValues],
+				);
+
+				if (listingUpdateCount > 0) {
+					logger.info(
+						{
+							propertyId,
+							ownerId,
+							listingUpdateCount,
+							cascadedColumns: changedLocationColumns,
+						},
+						"Property location change cascaded to linked listings",
+					);
+				}
+			}
 		}
 
 		await client.query("COMMIT");
@@ -320,8 +419,6 @@ export const deleteProperty = async (ownerId, propertyId) => {
 		}
 
 		// Step 2: Lock every non-deleted listing for this property.
-		// We lock the full set (not just active ones) so a concurrent transition
-		// from any non-active status to 'active' is also blocked.
 		await client.query(
 			`SELECT listing_id
        FROM listings
@@ -331,9 +428,7 @@ export const deleteProperty = async (ownerId, propertyId) => {
 			[propertyId],
 		);
 
-		// Step 3: Now that we hold locks on all relevant rows, safely check whether
-		// any listing is currently active. No other transaction can change listing
-		// status while we hold these locks.
+		// Step 3: Safe active-listing check under the lock.
 		const { rows: activeListingRows } = await client.query(
 			`SELECT 1
        FROM listings
