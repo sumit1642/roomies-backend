@@ -57,7 +57,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- Used on users.account_status and checked by the authenticate middleware
 -- (src/middleware/authenticate.js) via the INACTIVE_STATUSES constant before
 -- issuing tokens or allowing access.
-CREATE TYPE account_status_enum AS ENUM (
+CREATE TYPE IF NOT EXISTS account_status_enum AS ENUM (
     'active', 'suspended', 'banned', 'deactivated'
 );
 
