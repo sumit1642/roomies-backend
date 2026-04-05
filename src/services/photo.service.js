@@ -64,8 +64,11 @@ import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingL
 //      moment the listing is created through its entire lifetime.
 export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 	const client = await pool.connect();
+	let photoId = null;
+	let transactionOpen = false;
 	try {
 		await client.query("BEGIN");
+		transactionOpen = true;
 
 		// Step 1 + lock: verify ownership and lock the listing row in one query.
 		// FOR UPDATE acquires a row-level lock on the listing, serialising all
@@ -103,7 +106,7 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 		// Step 3: insert the provisional photo row while holding the lock.
 		// The placeholder URL sentinel prevents the photo from being served before
 		// the worker replaces it with the real WebP URL.
-		const photoId = crypto.randomUUID();
+		photoId = crypto.randomUUID();
 		const placeholderUrl = `processing:${photoId}`;
 
 		await client.query(
@@ -114,6 +117,7 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 		);
 
 		await client.query("COMMIT");
+		transactionOpen = false;
 
 		// Step 4: enqueue the BullMQ processing job after committing.
 		// The job is enqueued outside the transaction because BullMQ writes to
@@ -122,16 +126,35 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 		// cause an unnecessary Postgres rollback. Doing it after commit means the
 		// photo row exists before the worker can possibly run — no orphaned jobs.
 		const queue = getQueue(MEDIA_QUEUE_NAME);
-		await queue.add(
-			"process-photo",
-			{ listingId, photoId, stagingPath, posterId },
-			{
-				attempts: 3,
-				backoff: { type: "exponential", delay: 2000 },
-				removeOnComplete: 100,
-				removeOnFail: 200,
-			},
-		);
+		try {
+			await queue.add(
+				"process-photo",
+				{ listingId, photoId, stagingPath, posterId },
+				{
+					attempts: 3,
+					backoff: { type: "exponential", delay: 2000 },
+					removeOnComplete: 100,
+					removeOnFail: 200,
+				},
+			);
+		} catch (queueErr) {
+			const cleanupResult = await pool.query(
+				`UPDATE listing_photos
+         SET deleted_at = NOW()
+         WHERE photo_id = $1
+           AND listing_id = $2
+           AND deleted_at IS NULL
+           AND photo_url LIKE 'processing:%'`,
+				[photoId, listingId],
+			);
+
+			logger.error(
+				{ queueErr, photoId, listingId, cleanupRowCount: cleanupResult.rowCount },
+				"Photo queue enqueue failed; provisional row soft-deleted",
+			);
+
+			throw new AppError("Photo processing queue is temporarily unavailable. Please retry.", 503);
+		}
 
 		logger.info({ posterId, listingId, photoId, stagingPath, displayOrder: order }, "Photo upload enqueued");
 
@@ -140,10 +163,12 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 		// Roll back if anything fails between BEGIN and COMMIT. If ROLLBACK
 		// itself fails (e.g. the connection is broken), we log and still
 		// re-throw the original error so the HTTP response is a 5xx, not a hang.
-		try {
-			await client.query("ROLLBACK");
-		} catch (rollbackErr) {
-			logger.error({ rollbackErr, err }, "enqueuePhotoUpload: rollback failed");
+		if (transactionOpen) {
+			try {
+				await client.query("ROLLBACK");
+			} catch (rollbackErr) {
+				logger.error({ rollbackErr, err }, "enqueuePhotoUpload: rollback failed");
+			}
 		}
 		throw err;
 	} finally {
@@ -194,7 +219,7 @@ export const getListingPhotos = async (listingId, options = {}) => {
      WHERE listing_id = $1
        AND deleted_at IS NULL
        AND photo_url NOT LIKE 'processing:%'
-     ORDER BY display_order ASC`,
+     ORDER BY display_order ASC, photo_id ASC`,
 		[listingId],
 	);
 	return rows;
@@ -249,9 +274,9 @@ export const deletePhoto = async (posterId, listingId, photoId) => {
            WHERE listing_id = $1
              AND deleted_at IS NULL
              AND photo_url  NOT LIKE 'processing:%'
-           ORDER BY display_order ASC
-           LIMIT 1
-         )`,
+	           ORDER BY display_order ASC, photo_id ASC
+	           LIMIT 1
+	         )`,
 				[listingId],
 			);
 		}
@@ -293,31 +318,31 @@ export const deletePhoto = async (posterId, listingId, photoId) => {
 // checks to the end of the statement by default for most index types, but
 // explicitly clearing first is clearer and avoids any ambiguity.
 export const setCoverPhoto = async (posterId, listingId, photoId) => {
-	// Verify ownership and that the photo exists, is processed (not placeholder),
-	// and is not already the cover (minor optimisation — not a correctness issue).
-	const { rows } = await pool.query(
-		`SELECT lp.is_cover
-     FROM listing_photos lp
-     JOIN listings l ON l.listing_id = lp.listing_id
-     WHERE lp.photo_id   = $1
-       AND lp.listing_id = $2
-       AND l.posted_by   = $3
-       AND lp.deleted_at IS NULL
-       AND lp.photo_url  NOT LIKE 'processing:%'`,
-		[photoId, listingId, posterId],
-	);
-
-	if (!rows.length) {
-		throw new AppError("Photo not found or still processing", 404);
-	}
-	if (rows[0].is_cover) {
-		// Already the cover — idempotent, return success without a DB write
-		return { photoId, isCover: true };
-	}
-
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
+
+		// Validate ownership and lock the target row within the same transaction.
+		const { rows } = await client.query(
+			`SELECT lp.is_cover
+       FROM listing_photos lp
+       JOIN listings l ON l.listing_id = lp.listing_id
+       WHERE lp.photo_id   = $1
+         AND lp.listing_id = $2
+         AND l.posted_by   = $3
+         AND lp.deleted_at IS NULL
+         AND lp.photo_url  NOT LIKE 'processing:%'
+       FOR UPDATE`,
+			[photoId, listingId, posterId],
+		);
+
+		if (!rows.length) {
+			throw new AppError("Photo not found or still processing", 404);
+		}
+		if (rows[0].is_cover) {
+			await client.query("ROLLBACK");
+			return { photoId, isCover: true };
+		}
 
 		// Clear the existing cover (if any) first
 		await client.query(
@@ -327,8 +352,19 @@ export const setCoverPhoto = async (posterId, listingId, photoId) => {
 			[listingId],
 		);
 
-		// Set the new cover
-		await client.query(`UPDATE listing_photos SET is_cover = TRUE WHERE photo_id = $1`, [photoId]);
+		// Set the new cover with guarded predicates to prevent stale writes.
+		const { rowCount } = await client.query(
+			`UPDATE listing_photos
+       SET is_cover = TRUE
+       WHERE photo_id = $1
+         AND listing_id = $2
+         AND deleted_at IS NULL
+         AND photo_url NOT LIKE 'processing:%'`,
+			[photoId, listingId],
+		);
+		if (rowCount !== 1) {
+			throw new AppError("Cover photo update conflicted with a concurrent change. Please retry.", 409);
+		}
 
 		await client.query("COMMIT");
 		logger.info({ posterId, listingId, photoId }, "Cover photo updated");
@@ -361,7 +397,36 @@ export const reorderPhotos = async (posterId, listingId, photos) => {
 	try {
 		await client.query("BEGIN");
 
+		const submittedDisplayOrders = photos.map(({ displayOrder }) => displayOrder);
 		const submittedPhotoIds = photos.map(({ photoId }) => photoId);
+
+		const photoIdFrequency = new Map();
+		for (const photoId of submittedPhotoIds) {
+			photoIdFrequency.set(photoId, (photoIdFrequency.get(photoId) ?? 0) + 1);
+		}
+		const duplicatePhotoIds = [...photoIdFrequency.entries()]
+			.filter(([, count]) => count > 1)
+			.map(([photoId]) => photoId)
+			.sort();
+		if (duplicatePhotoIds.length) {
+			throw new AppError(`Duplicate photo IDs in reorder payload: ${duplicatePhotoIds.join(", ")}`, 422);
+		}
+
+		const displayOrderFrequency = new Map();
+		for (const displayOrder of submittedDisplayOrders) {
+			displayOrderFrequency.set(displayOrder, (displayOrderFrequency.get(displayOrder) ?? 0) + 1);
+		}
+		const duplicateDisplayOrders = [...displayOrderFrequency.entries()]
+			.filter(([, count]) => count > 1)
+			.map(([displayOrder]) => displayOrder)
+			.sort((a, b) => a - b);
+		if (duplicateDisplayOrders.length) {
+			throw new AppError(
+				`Duplicate displayOrder values in reorder payload: ${duplicateDisplayOrders.join(", ")}`,
+				422,
+			);
+		}
+
 		const uniqueSubmittedPhotoIds = [...new Set(submittedPhotoIds)];
 
 		const { rows: existingPhotoRows } = await client.query(
