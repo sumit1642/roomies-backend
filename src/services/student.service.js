@@ -35,7 +35,21 @@ export const getStudentProfile = async (requestingUserId, targetUserId) => {
 	return rows[0];
 };
 
-export const getStudentContactReveal = async (targetUserId) => {
+// Returns contact details for a student profile.
+//
+// Access control is handled entirely upstream by optionalAuthenticate and
+// contactRevealGate before this service is ever reached. This service trusts
+// that the gate already enforced the quota and caller eligibility — its only
+// job here is to fetch the data and shape the response correctly based on
+// which tier the caller belongs to.
+//
+// emailOnly: false — verified users. Returns the full bundle: email + whatsapp_phone.
+// emailOnly: true  — guests and unverified users. Returns email only. The
+//                    whatsapp_phone field is stripped at the service boundary so
+//                    it never exists on any object that leaves this function,
+//                    making it impossible to accidentally serialise or log it
+//                    further down the stack.
+export const getStudentContactReveal = async (targetUserId, emailOnly = false) => {
 	const { rows } = await pool.query(
 		`
 		SELECT
@@ -51,17 +65,25 @@ export const getStudentContactReveal = async (targetUserId) => {
 	);
 
 	if (!rows.length) throw new AppError("Student not found", 404);
-	return rows[0];
+
+	const row = rows[0];
+
+	if (emailOnly) {
+		return {
+			user_id: row.user_id,
+			full_name: row.full_name,
+			email: row.email,
+		};
+	}
+
+	return row;
 };
 
 export const updateStudentProfile = async (requestingUserId, targetUserId, updates) => {
-	// Ownership check — a student can only update their own profile
 	if (requestingUserId !== targetUserId) {
 		throw new AppError("Forbidden", 403);
 	}
 
-	// Build the SET clause dynamically from only the fields that were provided.
-	// Using a map from camelCase request body to snake_case column names.
 	const columnMap = {
 		fullName: "full_name",
 		bio: "bio",
@@ -87,11 +109,8 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 		throw new AppError("No valid fields provided for update", 400);
 	}
 
-	values.push(targetUserId); // for the WHERE clause
+	values.push(targetUserId);
 
-	// Single UPDATE with RETURNING — atomic: if the profile was soft-deleted
-	// between the ownership check and here, rows will be empty and we surface a
-	// clean 404 rather than returning undefined to the caller.
 	const { rows } = await pool.query(
 		`
 		UPDATE student_profiles

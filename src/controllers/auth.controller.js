@@ -37,13 +37,39 @@ const clearAuthCookies = (res) => {
 	});
 };
 
+// Determines whether the caller is a non-browser client that manages its own
+// token lifecycle (e.g. the Android app). When true, tokens are included in the
+// JSON response body. When false, tokens are delivered only via HttpOnly cookies
+// and the body contains only safe session metadata.
+//
+// Browser clients using cookies gain no benefit from receiving raw tokens in the
+// body — they cannot read HttpOnly cookies from JavaScript anyway, and including
+// the tokens in JSON directly undermines the XSS protection that HttpOnly provides
+// by giving any script on the page an additional exfiltration surface.
+//
+// Android clients set X-Client-Transport: bearer to signal that they are managing
+// tokens explicitly and expect them in the response body.
+const isBearerTransport = (req) => req.headers["x-client-transport"] === "bearer";
+
+// Builds the safe body payload for cookie-mode responses. Contains everything
+// the browser UI needs (user identity, roles, verification state) without
+// exposing the raw token strings that only the HttpOnly cookie transport should
+// carry. The sid is included so the client can reference the current session
+// (e.g. for the session management UI) without needing the token itself.
+const buildSafeBody = (tokens) => ({
+	user: tokens.user,
+	sid: tokens.sid,
+});
+
 // ─── Controllers ──────────────────────────────────────────────────────────────
 
 export const register = async (req, res, next) => {
 	try {
 		const tokens = await authService.register(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-		res.status(201).json({ status: "success", data: tokens });
+
+		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
+		res.status(201).json({ status: "success", data });
 	} catch (err) {
 		next(err);
 	}
@@ -53,7 +79,9 @@ export const login = async (req, res, next) => {
 	try {
 		const tokens = await authService.login(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-		res.json({ status: "success", data: tokens });
+
+		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
+		res.json({ status: "success", data });
 	} catch (err) {
 		next(err);
 	}
@@ -97,7 +125,8 @@ export const refresh = async (req, res, next) => {
 
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-		res.json({ status: "success", data: tokens });
+		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
+		res.json({ status: "success", data });
 	} catch (err) {
 		next(err);
 	}
@@ -138,10 +167,6 @@ export const revokeSession = async (req, res, next) => {
 	try {
 		const { sid } = req.params;
 
-		// UUID v4 format check. revokeSessionSchema validates only that sid is a
-		// non-empty string; the controller adds a UUID v4 pattern check so that a
-		// malformed sid returns a consistent 400 AppError via the central error
-		// handler rather than a raw JSON object that bypasses the standard envelope.
 		const isValidSid =
 			typeof sid === "string" &&
 			/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sid);
@@ -166,7 +191,9 @@ export const googleCallback = async (req, res, next) => {
 	try {
 		const tokens = await authService.googleOAuth(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-		res.json({ status: "success", data: tokens });
+
+		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
+		res.json({ status: "success", data });
 	} catch (err) {
 		next(err);
 	}

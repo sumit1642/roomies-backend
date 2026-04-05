@@ -33,7 +33,22 @@ export const getPgOwnerProfile = async (requestingUserId, targetUserId) => {
 	return rows[0];
 };
 
-export const getPgOwnerContactReveal = async (targetUserId) => {
+// Returns contact details for a PG owner profile.
+//
+// Access control is handled entirely upstream by optionalAuthenticate and
+// contactRevealGate before this service is ever reached. This service trusts
+// that the gate already enforced the quota and caller eligibility — its only
+// job here is to fetch the data and shape the response correctly based on
+// which tier the caller belongs to.
+//
+// emailOnly: false — verified users. Returns the full bundle: email + whatsapp_phone
+//                    (business_phone serves as the WhatsApp number for PG owners).
+// emailOnly: true  — guests and unverified users. Returns email only. The
+//                    whatsapp_phone field is stripped at the service boundary so
+//                    it never exists on any object that leaves this function,
+//                    making it impossible to accidentally serialise or log it
+//                    further down the stack.
+export const getPgOwnerContactReveal = async (targetUserId, emailOnly = false) => {
 	const { rows } = await pool.query(
 		`
 		SELECT
@@ -51,7 +66,19 @@ export const getPgOwnerContactReveal = async (targetUserId) => {
 	);
 
 	if (!rows.length) throw new AppError("PG owner profile not found", 404);
-	return rows[0];
+
+	const row = rows[0];
+
+	if (emailOnly) {
+		return {
+			user_id: row.user_id,
+			owner_full_name: row.owner_full_name,
+			business_name: row.business_name,
+			email: row.email,
+		};
+	}
+
+	return row;
 };
 
 export const updatePgOwnerProfile = async (requestingUserId, targetUserId, updates) => {
@@ -85,8 +112,6 @@ export const updatePgOwnerProfile = async (requestingUserId, targetUserId, updat
 
 	values.push(targetUserId);
 
-	// Single UPDATE with RETURNING — atomic: soft-deletes between the ownership
-	// check and here surface as a clean 404 rather than returning undefined.
 	const { rows } = await pool.query(
 		`
 		UPDATE pg_owner_profiles

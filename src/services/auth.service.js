@@ -349,8 +349,32 @@ export const logoutCurrent = async (userId, incomingRefreshToken, authenticatedS
 	if (!authenticatedSid || payload.sid !== authenticatedSid) {
 		throw new AppError("Refresh token session does not match the authenticated session", 403);
 	}
+
+	// Fetch the currently stored token for this session from Redis and compare it
+	// against the incoming token before performing deletion. This rejects two
+	// classes of invalid requests that JWT signature validation alone cannot catch:
+	//
+	//   1. A stale token whose sid is still valid but which was rotated out during
+	//      a prior silent refresh. The new token lives at the same Redis key; the
+	//      old one no longer matches the stored value.
+	//
+	//   2. A replayed token for a session that has already been explicitly revoked
+	//      (e.g. via revokeSession or logoutAll). The Redis key will be absent.
+	//
+	// Matching against the stored value makes logout idempotency-safe in the
+	// correct direction: a caller with the current live token can always log out,
+	// but a caller with a superseded token cannot trigger deletion of the live
+	// session.
+	const storedToken = await redis.get(refreshTokenKey(userId, authenticatedSid));
+	if (!storedToken) {
+		throw new AppError("Session not found or already revoked", 401);
+	}
+	if (storedToken !== incomingRefreshToken) {
+		throw new AppError("Refresh token is invalid or has been superseded", 401);
+	}
+
 	await deleteSessionToken(userId, authenticatedSid);
-	logger.info({ userId: payload.userId, sid: authenticatedSid }, "User logged out from current session");
+	logger.info({ userId, sid: authenticatedSid }, "User logged out from current session");
 };
 
 export const logoutAll = async (userId) => {
