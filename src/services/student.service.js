@@ -3,11 +3,11 @@
 import { pool } from "../db/client.js";
 import { AppError } from "../middleware/errorHandler.js";
 
-export const getStudentProfile = async (userId) => {
+export const getStudentProfile = async (requestingUserId, targetUserId) => {
 	const { rows } = await pool.query(
 		`
 		SELECT
-		sp.profile_id,
+			sp.profile_id,
 			sp.user_id,
 			sp.full_name,
 			sp.date_of_birth,
@@ -18,7 +18,7 @@ export const getStudentProfile = async (userId) => {
 			sp.year_of_study,
 			sp.institution_id,
 			sp.is_aadhaar_verified,
-			u.email,
+			CASE WHEN $2::uuid = sp.user_id THEN u.email ELSE NULL END AS email,
 			u.is_email_verified,
 			u.average_rating,
 			u.rating_count,
@@ -28,10 +28,29 @@ export const getStudentProfile = async (userId) => {
 		WHERE sp.user_id = $1
 		AND sp.deleted_at IS NULL
 		AND u.deleted_at IS NULL`,
-		[userId],
+		[targetUserId, requestingUserId],
 	);
 
 	if (!rows.length) throw new AppError("Student profile not found", 404);
+	return rows[0];
+};
+
+export const getStudentContactReveal = async (targetUserId) => {
+	const { rows } = await pool.query(
+		`
+		SELECT
+			u.user_id,
+			sp.full_name,
+			u.email,
+			u.phone AS whatsapp_phone
+		FROM users u
+		LEFT JOIN student_profiles sp ON sp.user_id = u.user_id AND sp.deleted_at IS NULL
+		WHERE u.user_id = $1
+		AND u.deleted_at IS NULL`,
+		[targetUserId],
+	);
+
+	if (!rows.length) throw new AppError("Student not found", 404);
 	return rows[0];
 };
 

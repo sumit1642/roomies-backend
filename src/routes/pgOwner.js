@@ -2,6 +2,8 @@
 
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
+import { optionalAuthenticate } from "../middleware/optionalAuthenticate.js";
+import { contactRevealGate } from "../middleware/contactRevealGate.js";
 import { authorize } from "../middleware/authorize.js";
 import { validate } from "../middleware/validate.js";
 import { getPgOwnerParamsSchema, updatePgOwnerSchema } from "../validators/pgOwner.validators.js";
@@ -14,6 +16,16 @@ export const pgOwnerRouter = Router();
 // GET is intentionally readable by any authenticated user — students need to
 // view PG owner profiles to evaluate listings and credibility.
 pgOwnerRouter.get("/:userId/profile", authenticate, validate(getPgOwnerParamsSchema), pgOwnerController.getProfile);
+
+// Public contact reveal endpoint: verified users are unlimited; guest/unverified users are capped and then redirected to login/signup by client.
+pgOwnerRouter.get(
+	"/:userId/contact/reveal",
+	optionalAuthenticate,
+	contactRevealGate,
+	validate(getPgOwnerParamsSchema),
+	pgOwnerController.revealContact,
+);
+
 
 // PUT is restricted to pg_owner role — no other role has a legitimate reason to
 // update a PG owner's business profile. authorize('pg_owner') rejects a wrong-role

@@ -3,7 +3,7 @@
 import { pool } from "../db/client.js";
 import { AppError } from "../middleware/errorHandler.js";
 
-export const getPgOwnerProfile = async (userId) => {
+export const getPgOwnerProfile = async (requestingUserId, targetUserId) => {
 	const { rows } = await pool.query(
 		`
 		SELECT
@@ -12,11 +12,11 @@ export const getPgOwnerProfile = async (userId) => {
 			pop.business_name,
 			pop.owner_full_name,
 			pop.business_description,
-			pop.business_phone,
+			CASE WHEN $2::uuid = pop.user_id THEN pop.business_phone ELSE NULL END AS business_phone,
 			pop.operating_since,
 			pop.verification_status,
 			pop.verified_at,
-			u.email,
+			CASE WHEN $2::uuid = pop.user_id THEN u.email ELSE NULL END AS email,
 			u.is_email_verified,
 			u.average_rating,
 			u.rating_count,
@@ -26,7 +26,28 @@ export const getPgOwnerProfile = async (userId) => {
 		WHERE pop.user_id = $1
 		AND pop.deleted_at IS NULL
 		AND u.deleted_at IS NULL`,
-		[userId],
+		[targetUserId, requestingUserId],
+	);
+
+	if (!rows.length) throw new AppError("PG owner profile not found", 404);
+	return rows[0];
+};
+
+export const getPgOwnerContactReveal = async (targetUserId) => {
+	const { rows } = await pool.query(
+		`
+		SELECT
+			u.user_id,
+			pop.owner_full_name,
+			pop.business_name,
+			u.email,
+			pop.business_phone AS whatsapp_phone
+		FROM users u
+		JOIN pg_owner_profiles pop ON pop.user_id = u.user_id
+		WHERE u.user_id = $1
+		AND u.deleted_at IS NULL
+		AND pop.deleted_at IS NULL`,
+		[targetUserId],
 	);
 
 	if (!rows.length) throw new AppError("PG owner profile not found", 404);
