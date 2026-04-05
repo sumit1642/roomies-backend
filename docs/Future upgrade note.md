@@ -1,5 +1,0 @@
----
-File: src/services/listing.service.js
-Current behavior: In getListing(listingId), the listing is read first and then views_count is incremented with a detached pool.query(...).catch(...), so failures are logged and suppressed. This is correct for reliability, but it is still a simple direct database write on every listing view.
-Future upgrade recommendation: When traffic or analytics requirements grow, replace this per-request row update with a dedicated view-tracking design. Options include emitting a queue/event after the listing read, buffering view events in Redis, batching counter flushes to Postgres, and optionally deduplicating repeated views by user/session/time window. If views_count later affects ranking, reporting, or monetization, define whether it should be approximate or strongly consistent before redesigning. The likely code changes would start in src/services/listing.service.js (getListing) and extend into a new async analytics/view-tracking component so listing reads stay fast while view counting becomes more scalable and maintainable.
----
