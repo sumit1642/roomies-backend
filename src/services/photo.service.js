@@ -361,11 +361,44 @@ export const reorderPhotos = async (posterId, listingId, photos) => {
 	try {
 		await client.query("BEGIN");
 
+		const submittedPhotoIds = photos.map(({ photoId }) => photoId);
+		const uniqueSubmittedPhotoIds = [...new Set(submittedPhotoIds)];
+
+		const { rows: existingPhotoRows } = await client.query(
+			`SELECT photo_id
+       FROM listing_photos
+       WHERE listing_id = $1
+         AND deleted_at IS NULL
+         AND photo_id = ANY($2::uuid[])`,
+			[listingId, uniqueSubmittedPhotoIds],
+		);
+
+		const existingPhotoIds = new Set(existingPhotoRows.map(({ photo_id: photoId }) => photoId));
+		const invalidPhotoIds = uniqueSubmittedPhotoIds.filter((photoId) => !existingPhotoIds.has(photoId));
+		if (invalidPhotoIds.length) {
+			throw new AppError(`Invalid photo IDs for this listing: ${invalidPhotoIds.join(", ")}`, 422);
+		}
+
+		// API contract guard: reorder requests must include the full current set
+		// of active photos for the listing (no partial reorder payloads).
+		const { rows: countRows } = await client.query(
+			`SELECT COUNT(*)::int AS total_count
+       FROM listing_photos
+       WHERE listing_id = $1
+         AND deleted_at IS NULL`,
+			[listingId],
+		);
+		const currentPhotoCount = countRows[0].total_count;
+		if (uniqueSubmittedPhotoIds.length !== currentPhotoCount) {
+			throw new AppError(
+				`Reorder payload must include all photos. Submitted ${uniqueSubmittedPhotoIds.length}, expected ${currentPhotoCount}.`,
+				422,
+			);
+		}
+
 		for (const { photoId, displayOrder } of photos) {
-			// The WHERE clause includes listing_id so a client cannot reorder photos
-			// from a different listing by supplying foreign photoIds. Mismatched IDs
-			// simply produce rowCount = 0 for that entry and are silently ignored —
-			// the valid entries still update correctly.
+			// Pre-validation above ensures every submitted photoId belongs to this
+			// listing and is not soft-deleted, so updates are all-or-nothing.
 			await client.query(
 				`UPDATE listing_photos
          SET display_order = $1
