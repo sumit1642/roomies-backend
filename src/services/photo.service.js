@@ -21,6 +21,7 @@ import { AppError } from "../middleware/errorHandler.js";
 import { storageService } from "../storage/index.js";
 import { MEDIA_QUEUE_NAME } from "../workers/mediaProcessor.js";
 import { getQueue } from "../workers/queue.js";
+import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 
 // ─── Upload photo (synchronous half) ─────────────────────────────────────────
 
@@ -156,7 +157,32 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 // display_order ASC. Placeholder rows (photo_url starting with 'processing:')
 // are excluded from this response — the client only sees completed photos.
 // This means a photo that is still being processed is invisible until ready.
-export const getListingPhotos = async (listingId) => {
+//
+// options.skipValidation=true bypasses active/expiry checks and is used by
+// owner-only internal flows (e.g. reorder) that already validated ownership.
+export const getListingPhotos = async (listingId, options = {}) => {
+	const { skipValidation = false } = options;
+
+	const { rows: listingRows } = await pool.query(
+		`SELECT status, expires_at, (expires_at <= NOW()) AS is_expired
+     FROM listings
+     WHERE listing_id = $1
+       AND deleted_at IS NULL`,
+		[listingId],
+	);
+
+	if (!listingRows.length) {
+		throw new AppError("Listing not found", 404);
+	}
+
+	if (!skipValidation && listingRows[0].is_expired) {
+		throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
+	}
+
+	if (!skipValidation && listingRows[0].status !== "active") {
+		throw new AppError(UNAVAILABLE_LISTING_MESSAGE, 422);
+	}
+
 	const { rows } = await pool.query(
 		`SELECT
        photo_id       AS "photoId",
@@ -352,7 +378,7 @@ export const reorderPhotos = async (posterId, listingId, photos) => {
 
 		await client.query("COMMIT");
 		logger.info({ posterId, listingId, photoCount: photos.length }, "Photos reordered");
-		return await getListingPhotos(listingId);
+		return await getListingPhotos(listingId, { skipValidation: true });
 	} catch (err) {
 		await client.query("ROLLBACK");
 		throw err;

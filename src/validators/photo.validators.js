@@ -19,9 +19,12 @@ export const uploadPhotoSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
 	}),
-	body: z.object({
-		displayOrder: z.coerce.number().int().min(0).optional(),
-	}),
+	body: z
+		.object({
+			displayOrder: z.coerce.number().int().min(0).optional(),
+		})
+		.optional()
+		.default({}),
 });
 
 // Used by DELETE /listings/:listingId/photos/:photoId

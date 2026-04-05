@@ -29,6 +29,7 @@ import {
 	setCoverSchema,
 } from "../validators/photo.validators.js";
 import * as photoController from "../controllers/photo.controller.js";
+import { UPLOAD_FIELD_NAME } from "../config/constants.js";
 
 export const listingRouter = Router();
 
@@ -105,7 +106,7 @@ listingRouter.get("/:listingId/photos", authenticate, validate(uploadPhotoSchema
 listingRouter.post(
 	"/:listingId/photos",
 	authenticate,
-	upload.single("photo"),
+	upload.single(UPLOAD_FIELD_NAME),
 	validate(uploadPhotoSchema),
 	photoController.uploadPhoto,
 );

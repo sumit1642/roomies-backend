@@ -1,6 +1,18 @@
 // src/middleware/errorHandler.js
 
 import { logger } from "../logger/index.js";
+import { MAX_UPLOAD_SIZE_BYTES, UPLOAD_FIELD_NAME } from "../config/constants.js";
+
+const formatBytesToHumanReadable = (bytes) => {
+	const units = ["B", "KB", "MB", "GB", "TB"];
+	if (!Number.isFinite(bytes) || bytes <= 0) return "0B";
+
+	const power = Math.max(0, Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1));
+	const value = bytes / 1024 ** power;
+	const rounded = Number.isInteger(value) ? value.toString() : value.toFixed(1);
+
+	return `${rounded}${units[power]}`;
+};
 
 export class AppError extends Error {
 	constructor(message, statusCode = 500) {
@@ -27,6 +39,30 @@ export const errorHandler = (err, req, res, next) => {
 				field: issue.path.join("."),
 				message: issue.message,
 			})),
+		});
+	}
+
+	// Multer upload errors (request-origin issues, not server faults)
+	if (err.name === "MulterError") {
+		if (err.code === "LIMIT_FILE_SIZE") {
+			return res.status(413).json({
+				status: "error",
+				message: `File is too large. Maximum allowed size is ${formatBytesToHumanReadable(
+					MAX_UPLOAD_SIZE_BYTES,
+				)}`,
+			});
+		}
+
+		if (err.code === "LIMIT_UNEXPECTED_FILE") {
+			return res.status(400).json({
+				status: "error",
+				message: `Unexpected file field. Use field name '${UPLOAD_FIELD_NAME}'`,
+			});
+		}
+
+		return res.status(400).json({
+			status: "error",
+			message: "Invalid upload payload",
 		});
 	}
 
