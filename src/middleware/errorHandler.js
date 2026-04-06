@@ -32,6 +32,17 @@ export const errorHandler = (err, req, res, next) => {
 
 	// Zod v4 validation errors
 	if (err.name === "ZodError") {
+		logger.warn(
+			{
+				req: { method: req.method, url: req.url },
+				validationErrors: err.issues.map((issue) => ({
+					field: issue.path.join("."),
+					message: issue.message,
+				})),
+			},
+			"Request validation failed",
+		);
+
 		return res.status(400).json({
 			status: "error",
 			message: "Validation failed",
