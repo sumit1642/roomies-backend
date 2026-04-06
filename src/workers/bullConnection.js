@@ -25,8 +25,25 @@
 //                   that are very hard to diagnose.
 //
 // This module parses all five relevant fields in one place so both queue.js and
-// notificationWorker.js (and mediaProcessor.js, which also parses inline) can
-// import the result instead of duplicating the logic.
+// notificationWorker.js (and mediaProcessor.js) can import the result instead
+// of duplicating the logic.
+//
+// ─── STRICT DB PATH PARSING ───────────────────────────────────────────────────
+//
+// The WHATWG URL API parses a Redis URL like `redis://host:6379/1` into a
+// pathname of "/1". After stripping the leading slash, the DB index is the
+// remaining string. We previously used parseInt() to extract it, which has the
+// same partial-parse problem as in hardDeleteCleanup.js: parseInt("1abc", 10)
+// silently returns 1, routing BullMQ to DB 1 when the operator probably made a
+// typo and meant the default DB 0 (or to catch and fix the misconfiguration).
+//
+// The fix applies the same guard used for SOFT_DELETE_RETENTION_DAYS:
+//   - Only empty/root pathnames ("" or "/") are treated as DB 0 silently.
+//   - Any non-empty remainder must match /^[0-9]+$/ (pure decimal digits).
+//   - Anything else → logger.warn + fall back to DB 0.
+//
+// This means `redis://host:6379/1abc` now emits a warning instead of silently
+// using DB 1, and `redis://host:6379/1` continues to work as before.
 //
 // ─── BACKWARD COMPATIBILITY ───────────────────────────────────────────────────
 //
@@ -39,6 +56,12 @@
 import { config } from "../config/env.js";
 import { logger } from "../logger/index.js";
 
+// Accepts only a contiguous run of decimal digits — no sign, no exponent,
+// no whitespace, no trailing characters. This is the same pattern used in
+// hardDeleteCleanup.js for SOFT_DELETE_RETENTION_DAYS, keeping the two
+// parsing strategies consistent across the codebase.
+const STRICT_DECIMAL_INTEGER_RE = /^[0-9]+$/;
+
 // Parse once at module load time. config.REDIS_URL is already Zod-validated as
 // a valid URL, so `new URL(...)` will not throw here. We still wrap it in a
 // try/catch so any future refactor that runs this before Zod validation doesn't
@@ -48,13 +71,54 @@ let _bullConnection;
 try {
 	const parsed = new URL(config.REDIS_URL);
 
-	// Extract the database index from the URL pathname. The WHATWG URL standard
-	// encodes the Redis DB number as the first path segment, e.g. "/1" for DB 1.
-	// We strip the leading "/" and fall back to 0 for empty or root-only paths.
-	const rawPath = parsed.pathname.replace(/^\//, ""); // strip leading "/"
-	const db = rawPath.length > 0 ? parseInt(rawPath, 10) : 0;
-	const safeDb = Number.isFinite(db) && db >= 0 ? db : 0;
+	// ─── DB index parsing ──────────────────────────────────────────────────────
+	//
+	// Strip the leading "/" from the pathname to isolate the DB index segment.
+	// The WHATWG URL API always includes the leading slash in pathname, so for
+	//   redis://host:6379/1   → pathname="/1"  → rawDbSegment="1"
+	//   redis://host:6379/    → pathname="/"   → rawDbSegment=""
+	//   redis://host:6379     → pathname=""    → rawDbSegment=""
+	const rawDbSegment = parsed.pathname.replace(/^\//, "");
 
+	let db = 0;
+
+	if (rawDbSegment !== "") {
+		// Non-empty segment — must be a pure decimal integer.
+		if (!STRICT_DECIMAL_INTEGER_RE.test(rawDbSegment)) {
+			// Partial-parse case: something like "/1abc" would give rawDbSegment="1abc".
+			// parseInt() would have silently returned 1; we reject it and fall back to 0.
+			logger.warn(
+				{
+					redisUrl: config.REDIS_URL.replace(/:\/\/[^@]+@/, "://***@"), // redact credentials in log
+					rawPathname: parsed.pathname,
+					rawDbSegment,
+					fallback: 0,
+					hint: "The DB path segment must be a plain decimal integer (e.g. '/1' for DB 1, or omit for DB 0)",
+				},
+				`bullConnection: REDIS_URL pathname "${parsed.pathname}" is not a valid DB index — falling back to DB 0`,
+			);
+			// db stays 0 (already set above)
+		} else {
+			// Pure decimal string — Number() conversion is safe here.
+			const _parsed = Number(rawDbSegment);
+
+			if (!Number.isFinite(_parsed) || _parsed < 0) {
+				// This branch is theoretically unreachable because the regex already
+				// ensures non-empty decimal digits, but we guard defensively in case
+				// of a very large number that exceeds Number's safe integer range.
+				logger.warn(
+					{ rawDbSegment, fallback: 0 },
+					"bullConnection: parsed DB index is not a valid non-negative integer — falling back to DB 0",
+				);
+				// db stays 0
+			} else {
+				db = _parsed;
+			}
+		}
+	}
+
+	// ─── ACL username ──────────────────────────────────────────────────────────
+	//
 	// Extract the ACL username from URL userinfo. The WHATWG URL API percent-
 	// decodes the username for us. An empty string means no explicit user was
 	// specified — we omit the field entirely so BullMQ uses its own default
@@ -64,6 +128,8 @@ try {
 	// Password may also be empty for unauthenticated local Redis instances.
 	const password = parsed.password.length > 0 ? parsed.password : undefined;
 
+	// ─── TLS ──────────────────────────────────────────────────────────────────
+	//
 	// ioredis (which BullMQ uses internally) enables TLS when the `tls` option
 	// is a truthy object. Passing `tls: {}` is sufficient — ioredis infers the
 	// host/port from the sibling fields and applies default TLS settings.
@@ -78,7 +144,7 @@ try {
 		...(tls !== undefined && { tls }),
 		// Only include db when it is non-zero to avoid overriding BullMQ's default
 		// with a redundant zero, keeping the connection object minimal and clear.
-		...(safeDb !== 0 && { db: safeDb }),
+		...(db !== 0 && { db }),
 	};
 
 	logger.debug(
@@ -88,7 +154,7 @@ try {
 			hasUsername: username !== undefined,
 			hasPassword: password !== undefined,
 			tls: tls !== undefined,
-			db: safeDb,
+			db,
 		},
 		"BullMQ Redis connection options parsed",
 	);
