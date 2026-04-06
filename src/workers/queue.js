@@ -4,22 +4,13 @@
 
 import { Queue } from "bullmq";
 import { logger } from "../logger/index.js";
-import { config } from "../config/env.js";
+import { bullConnection } from "./bullConnection.js";
 
 const queues = new Map();
 
-// Fix: parse REDIS_URL from validated config instead of reading undefined REDIS_HOST/PORT/PASSWORD vars.
-// This correctly handles Azure Redis which requires rediss:// with a password.
-const redisConnection = new URL(config.REDIS_URL);
-const bullConnection = {
-	host: redisConnection.hostname,
-	port: parseInt(redisConnection.port || "6379", 10),
-	password: redisConnection.password || undefined,
-	tls: redisConnection.protocol === "rediss:" ? {} : undefined,
-};
-
 // Returns the existing Queue instance for `name`, or creates and caches one on first call.
-// All queues share the same Redis connection config sourced from environment variables.
+// All queues share the same Redis connection config sourced from bullConnection.js,
+// which correctly handles ACL usernames, non-zero DB indices, and TLS.
 export const getQueue = (name) => {
 	if (queues.has(name)) return queues.get(name);
 

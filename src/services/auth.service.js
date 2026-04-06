@@ -616,6 +616,33 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 	}
 
 	// ── Path 2: Account linking ───────────────────────────────────────────────
+	//
+	// A user registered with email + password already exists for this email.
+	// We attempt to link their Google ID to their existing account so they can
+	// sign in via either method going forward.
+	//
+	// Two failure scenarios need distinct handling:
+	//
+	//   rowCount === 0 with no DB error:
+	//     The UPDATE matched zero rows because the WHERE clause `AND google_id IS
+	//     NULL` was false — meaning this account already has a google_id. This is
+	//     the normal "same user linking twice" case, or their account was linked
+	//     via another request moments before this one completed. We surface it as
+	//     a deterministic 409 with a user-facing message.
+	//
+	//   Postgres error code 23505 (unique_violation):
+	//     The `google_id` we are trying to write is already present in the
+	//     idx_users_google_id partial unique index, meaning a *different* user
+	//     account is already linked to this Google ID. This is a concurrent race:
+	//     two requests arrived simultaneously trying to link the same googleId to
+	//     two different email-based accounts, and one of them already committed.
+	//     Without this catch the second request would propagate a generic 500
+	//     instead of the correct 409.
+	//
+	//     Why can this happen even though Path 1 checked `findUserByGoogleId`
+	//     first? Because there is no transaction spanning the read in Path 1 and
+	//     the write here in Path 2. A concurrent request can commit between those
+	//     two points, creating the race.
 	const existingByEmail = await findUserByEmail(email);
 
 	if (existingByEmail) {
@@ -623,12 +650,38 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 			throw new AppError(`Account is ${existingByEmail.account_status}`, 401);
 		}
 
-		const { rowCount: linkRowCount } = await pool.query(
-			`UPDATE users SET google_id = $1 WHERE user_id = $2 AND google_id IS NULL AND deleted_at IS NULL`,
-			[googleId, existingByEmail.user_id],
-		);
+		let linkRowCount;
+		try {
+			const { rowCount } = await pool.query(
+				`UPDATE users SET google_id = $1 WHERE user_id = $2 AND google_id IS NULL AND deleted_at IS NULL`,
+				[googleId, existingByEmail.user_id],
+			);
+			linkRowCount = rowCount;
+		} catch (err) {
+			// A 23505 here means another user account already carries this googleId.
+			// This is distinct from the rowCount === 0 case below (which means this
+			// specific account already has a different google_id). We log it with
+			// enough context to distinguish it in monitoring dashboards.
+			if (err.code === "23505") {
+				logger.warn(
+					{ googleId, userId: existingByEmail.user_id, err: err.detail },
+					"googleOAuth account-link: concurrent unique violation — googleId already linked to another account",
+				);
+				throw new AppError("This Google account is already linked to another user", 409);
+			}
+			// Any other DB error is unexpected — re-throw and let the global handler
+			// turn it into a 500 with structured logging.
+			throw err;
+		}
 
 		if (linkRowCount === 0) {
+			// The account exists but already has a google_id set (not NULL), so our
+			// WHERE google_id IS NULL condition excluded it. This means the current
+			// user's account is already linked to a *different* Google account.
+			logger.warn(
+				{ userId: existingByEmail.user_id },
+				"googleOAuth account-link: account already linked to a different Google account",
+			);
 			throw new AppError("This account is already linked to a different Google account", 409);
 		}
 

@@ -52,17 +52,9 @@
 import { Worker } from "bullmq";
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
-import { config } from "../config/env.js";
+import { bullConnection } from "./bullConnection.js";
 
 export const NOTIFICATION_QUEUE_NAME = "notification-delivery";
-
-const redisConnection = new URL(config.REDIS_URL);
-const bullConnection = {
-	host: redisConnection.hostname,
-	port: parseInt(redisConnection.port || "6379", 10),
-	password: redisConnection.password || undefined,
-	tls: redisConnection.protocol === "rediss:" ? {} : undefined,
-};
 
 // ─── Notification message contract ────────────────────────────────────────────
 //

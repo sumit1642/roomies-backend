@@ -1,7 +1,7 @@
 // src/cron/hardDeleteCleanup.js
 //
 // Scheduled maintenance job: permanently remove rows that have been soft-deleted
-// for more than 90 days across all tables that carry a deleted_at column.
+// for more than N days across all tables that carry a deleted_at column.
 //
 // ─── DESIGN NOTES ────────────────────────────────────────────────────────────
 //
@@ -31,19 +31,75 @@
 // We run all deletes in one transaction so either all aged rows are cleaned or
 // none are — no half-committed state that leaves orphaned child rows.
 //
-// Idempotency: the WHERE predicate (deleted_at < NOW() - INTERVAL '90 days') is
-// stable. Re-running within the same 90-day window is a safe no-op.
+// Idempotency: the WHERE predicate (deleted_at < cutoff) is stable. Re-running
+// within the same window is a safe no-op.
 //
 // Safety note: we deliberately do NOT hard-delete users, properties, or listings
 // in this job without first ensuring all their dependents are removed. The
 // ordering below handles this correctly.
+//
+// ─── RETENTION VALIDATION ────────────────────────────────────────────────────
+//
+// SOFT_DELETE_RETENTION_DAYS is validated at module load time rather than lazily
+// at the first cron tick. The reasons:
+//
+//   1. An invalid value (e.g. the string "abc") would produce SQL like
+//      `NOW() - ('NaN' * INTERVAL '1 day')` which is a runtime Postgres error on
+//      every single cron tick, filling logs with noise and never cleaning anything.
+//
+//   2. A negative value (e.g. "-1") would make the cutoff move into the future
+//      (NOW() - (-1 day) = tomorrow), causing the WHERE clause to match recently
+//      soft-deleted rows and hard-deleting them far too soon.
+//
+//   3. A zero value would hard-delete rows immediately upon soft-deletion, which
+//      is never the intended behaviour.
+//
+// The valid range is 1..3650 (one day to ten years). Values outside this range
+// fall back to the safe default of 90 days with a warning log rather than
+// crashing the server — hard-delete cleanup is a maintenance task, not a
+// critical path, and the fallback is always safe.
+//
+// The validated retention is passed as a query *parameter* (not interpolated into
+// SQL text), preventing any possibility of SQL injection from a misconfigured
+// environment variable and keeping the query planner's plan stable across runs.
 
 import cron from "node-cron";
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 
 const SCHEDULE = process.env.CRON_HARD_DELETE ?? "0 4 * * 0"; // Sundays at 04:00
-const RETENTION_DAYS = parseInt(process.env.SOFT_DELETE_RETENTION_DAYS ?? "90", 10);
+const DEFAULT_RETENTION_DAYS = 90;
+const MIN_RETENTION_DAYS = 1;
+const MAX_RETENTION_DAYS = 3650; // ~10 years
+
+// ─── Retention validation (runs at module load, not per tick) ─────────────────
+//
+// We validate once here rather than inside the job runner because:
+//   a) It surfaces misconfiguration at startup, where it is most visible.
+//   b) It guarantees RETENTION_DAYS is a safe integer for the life of the process
+//      without re-parsing the env var on every run.
+const _rawRetention = parseInt(process.env.SOFT_DELETE_RETENTION_DAYS ?? "", 10);
+
+let RETENTION_DAYS;
+if (!Number.isFinite(_rawRetention) || _rawRetention < MIN_RETENTION_DAYS || _rawRetention > MAX_RETENTION_DAYS) {
+	const provided = process.env.SOFT_DELETE_RETENTION_DAYS;
+	logger.warn(
+		{
+			provided: provided ?? "(not set)",
+			fallback: DEFAULT_RETENTION_DAYS,
+			validRange: `${MIN_RETENTION_DAYS}–${MAX_RETENTION_DAYS}`,
+		},
+		provided !== undefined ?
+			`cron:hardDeleteCleanup — SOFT_DELETE_RETENTION_DAYS="${provided}" is invalid ` +
+				`(must be an integer between ${MIN_RETENTION_DAYS} and ${MAX_RETENTION_DAYS}); ` +
+				`falling back to ${DEFAULT_RETENTION_DAYS} days`
+		:	`cron:hardDeleteCleanup — SOFT_DELETE_RETENTION_DAYS not set; ` +
+				`using default of ${DEFAULT_RETENTION_DAYS} days`,
+	);
+	RETENTION_DAYS = DEFAULT_RETENTION_DAYS;
+} else {
+	RETENTION_DAYS = _rawRetention;
+}
 
 const runHardDeleteCleanup = async () => {
 	const startedAt = Date.now();
@@ -55,74 +111,101 @@ const runHardDeleteCleanup = async () => {
 	try {
 		await client.query("BEGIN");
 
-		const cutoff = `NOW() - INTERVAL '${RETENTION_DAYS} days'`;
+		// The cutoff timestamp is computed entirely inside Postgres using a
+		// parameterized interval so RETENTION_DAYS is never interpolated into SQL
+		// text. This has two benefits:
+		//
+		//   1. Safety: even though RETENTION_DAYS is already validated above, using
+		//      a parameter closes off any theoretical injection path.
+		//
+		//   2. Stability: Postgres receives the same query text on every run and can
+		//      reuse a cached query plan rather than re-planning a freshly-generated
+		//      SQL string.
+		//
+		// `($1::int * INTERVAL '1 day')` multiplies the integer retention count by
+		// a typed interval literal. This is the standard Postgres idiom for building
+		// a dynamic interval from a numeric parameter.
+		const cutoffExpr = `NOW() - ($1::int * INTERVAL '1 day')`;
+		// All DELETE queries receive RETENTION_DAYS as their first (and only) parameter.
+		const p = [RETENTION_DAYS];
 
 		// Deletion order: deepest dependents first, then work up toward root entities.
 
 		// 1. rating_reports (depends on ratings)
 		const { rowCount: rr } = await client.query(
-			`DELETE FROM rating_reports WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM rating_reports WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.rating_reports = rr;
 
 		// 2. ratings (depends on connections and users)
 		const { rowCount: ra } = await client.query(
-			`DELETE FROM ratings WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM ratings WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.ratings = ra;
 
 		// 3. notifications (depends on users)
 		const { rowCount: no } = await client.query(
-			`DELETE FROM notifications WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM notifications WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.notifications = no;
 
 		// 4. connections (depends on interest_requests, listings, users)
 		const { rowCount: co } = await client.query(
-			`DELETE FROM connections WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM connections WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.connections = co;
 
 		// 5. interest_requests (depends on listings and users)
 		const { rowCount: ir } = await client.query(
-			`DELETE FROM interest_requests WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM interest_requests WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.interest_requests = ir;
 
 		// 6. saved_listings (depends on listings and users)
 		const { rowCount: sl } = await client.query(
-			`DELETE FROM saved_listings WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM saved_listings WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.saved_listings = sl;
 
 		// 7. listing_photos (ON DELETE CASCADE from listings, but we also clean
 		//    explicitly-soft-deleted photos that outlived their parent listing)
 		const { rowCount: lp } = await client.query(
-			`DELETE FROM listing_photos WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM listing_photos WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.listing_photos = lp;
 
 		// 8. listings (depends on properties and users; cascade handles listing_preferences
 		//    and listing_amenities automatically via ON DELETE CASCADE)
 		const { rowCount: li } = await client.query(
-			`DELETE FROM listings WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM listings WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.listings = li;
 
 		// 9. verification_requests (depends on users)
 		const { rowCount: vr } = await client.query(
-			`DELETE FROM verification_requests WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM verification_requests WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.verification_requests = vr;
 
 		// 10. pg_owner_profiles and student_profiles (depend on users)
 		const { rowCount: pop } = await client.query(
-			`DELETE FROM pg_owner_profiles WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM pg_owner_profiles WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.pg_owner_profiles = pop;
 
 		const { rowCount: sp } = await client.query(
-			`DELETE FROM student_profiles WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM student_profiles WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.student_profiles = sp;
 
@@ -130,19 +213,22 @@ const runHardDeleteCleanup = async () => {
 
 		// 12. properties (depends on users)
 		const { rowCount: pr } = await client.query(
-			`DELETE FROM properties WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM properties WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.properties = pr;
 
 		// 13. institutions (no hard dependencies from other tables after above)
 		const { rowCount: ins } = await client.query(
-			`DELETE FROM institutions WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM institutions WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.institutions = ins;
 
 		// 14. users — last, after all dependents are cleared
 		const { rowCount: us } = await client.query(
-			`DELETE FROM users WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}`,
+			`DELETE FROM users WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			p,
 		);
 		results.users = us;
 
@@ -152,11 +238,14 @@ const runHardDeleteCleanup = async () => {
 
 		if (totalDeleted > 0) {
 			logger.info(
-				{ ...results, totalDeleted, durationMs: Date.now() - startedAt },
+				{ ...results, totalDeleted, retentionDays: RETENTION_DAYS, durationMs: Date.now() - startedAt },
 				"cron:hardDeleteCleanup — rows permanently deleted",
 			);
 		} else {
-			logger.debug({ durationMs: Date.now() - startedAt }, "cron:hardDeleteCleanup — no aged rows to delete");
+			logger.debug(
+				{ retentionDays: RETENTION_DAYS, durationMs: Date.now() - startedAt },
+				"cron:hardDeleteCleanup — no aged rows to delete",
+			);
 		}
 	} catch (err) {
 		try {
@@ -164,7 +253,10 @@ const runHardDeleteCleanup = async () => {
 		} catch (rollbackErr) {
 			logger.error({ rollbackErr }, "cron:hardDeleteCleanup — rollback failed");
 		}
-		logger.error({ err, durationMs: Date.now() - startedAt }, "cron:hardDeleteCleanup — run failed");
+		logger.error(
+			{ err, retentionDays: RETENTION_DAYS, durationMs: Date.now() - startedAt },
+			"cron:hardDeleteCleanup — run failed",
+		);
 	} finally {
 		client.release();
 	}

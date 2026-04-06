@@ -8,22 +8,12 @@ import { Worker } from "bullmq";
 import { pool } from "../db/client.js";
 import { storageService } from "../storage/index.js";
 import { logger } from "../logger/index.js";
-import { config } from "../config/env.js";
+import { bullConnection } from "./bullConnection.js";
 
 export const MEDIA_QUEUE_NAME = "media-processing";
 
 const MAX_DIMENSION_PX = 1200;
 const WEBP_QUALITY = 80;
-
-// Fix: parse REDIS_URL from validated config instead of reading undefined REDIS_HOST/PORT/PASSWORD vars.
-// This correctly handles Azure Redis which requires rediss:// with a password.
-const redisConnection = new URL(config.REDIS_URL);
-const bullConnection = {
-	host: redisConnection.hostname,
-	port: parseInt(redisConnection.port || "6379", 10),
-	password: redisConnection.password || undefined,
-	tls: redisConnection.protocol === "rediss:" ? {} : undefined,
-};
 
 export const startMediaWorker = () => {
 	const worker = new Worker(
