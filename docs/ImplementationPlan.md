@@ -453,6 +453,8 @@ PATCH  /api/v1/admin/reports/:reportId/resolve
 
 Schedules overridable via env vars: `CRON_LISTING_EXPIRY`, `CRON_EXPIRY_WARNING`, `CRON_HARD_DELETE`. Retention period overridable via `SOFT_DELETE_RETENTION_DAYS`.
 
+**`SOFT_DELETE_RETENTION_DAYS` format requirement:** must be a plain decimal integer with no prefix, suffix, or sign — e.g. `"90"`, not `"90days"`, `"-30"`, or `"1e2"`. Values that fail this check emit a `warn` log and fall back to the default of `90` days. The strict parse (`/^[0-9]+$/` before any numeric conversion) is intentional: `parseInt()` silently accepts a leading numeric portion and would use a completely different retention period than the operator intended without any warning.
+
 ### `phase5/admin` ⏳ NOT STARTED
 
 Files to create: extensions to `src/routes/admin.js` and new service/controller files for user management, rating visibility management, email worker, and analytics.

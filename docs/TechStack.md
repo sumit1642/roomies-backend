@@ -88,6 +88,8 @@
 
 **Connection:** Each queue and worker uses a connection config parsed from `config.REDIS_URL` (supports `rediss://` for Azure Cache for Redis with TLS). Queue instances are managed by the singleton registry in `src/workers/queue.js` — `getQueue(name)` returns a cached instance, preventing duplicate Redis connections.
 
+**Redis DB path validation:** The DB index is extracted from the URL pathname (e.g. `/1` for DB 1). The segment after stripping the leading `/` must be a plain decimal integer matching `/^[0-9]+$/`. A malformed segment like `/1abc` would previously have been silently parsed as DB `1` via `parseInt()`; it now emits a `warn` log (with credentials redacted) and falls back to DB `0`. An empty or root-only pathname (`/` or absent) is treated as DB `0` without any warning, which is the normal case for most deployments.
+
 **Queues and workers:**
 
 | Queue name | Worker file | Concurrency | Used for |
@@ -168,6 +170,8 @@ All jobs registered in `server.js` after Redis + DB are confirmed healthy. Each 
 | `src/cron/hardDeleteCleanup.js` | `0 4 * * 0` | `CRON_HARD_DELETE` |
 
 Retention period for `hardDeleteCleanup` overridable via `SOFT_DELETE_RETENTION_DAYS` (default `90`).
+
+**`SOFT_DELETE_RETENTION_DAYS` format requirement:** must be a plain decimal integer with no prefix, suffix, or sign — e.g. `"90"`, not `"90days"`, `"-30"`, or `"1e2"`. Values that fail this check emit a `warn` log and fall back to the default of `90` days. The strict parse (`/^[0-9]+$/` before any numeric conversion) is intentional: `parseInt()` silently accepts a leading numeric portion and would use a completely different retention period than the operator intended without any warning.
 
 ---
 
