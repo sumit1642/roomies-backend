@@ -9,19 +9,45 @@ export const healthRouter = Router();
 
 const PROBE_TIMEOUT_MS = 3000;
 
-// Races a promise against a timeout and clears the timer either way.
+// ─── Timeout error detection ──────────────────────────────────────────────────
 //
-// The previous implementation using a bare Promise.race() left the setTimeout
-// handle running even after the primary promise settled. Under high-frequency
-// probe traffic (e.g. Azure load balancer hitting /health every few seconds),
-// this means accumulating live timer handles that are never cleaned up — a slow
-// but real memory and event-loop pressure leak.
+// Checks whether an error represents a timeout rather than a connectivity or
+// other failure. A string-match on err.message is brittle because error messages
+// are not part of any stable contract — they differ across Node.js versions,
+// pg versions, and Redis client versions, and they can change without notice.
 //
-// The fix: capture the timeoutId and call clearTimeout() in a .finally() block
-// on the primary promise, so the timer is cancelled as soon as the operation
-// succeeds or fails — whichever comes first. The timeout promise is still there
-// to win the race if the primary hangs, but if the primary settles normally the
-// timeout handle is discarded immediately.
+// We check in priority order:
+//   1. Well-known error codes (ETIMEDOUT, ECONNABORTED) — the most reliable signal.
+//   2. Well-known error names (TimeoutError) — used by some promise-based libraries.
+//   3. Instance checks against built-in timeout error types — future-proofing.
+//   4. Case-insensitive regex on the message — last resort for anything else.
+const isTimeoutError = (err) => {
+	if (!err) return false;
+
+	// Explicit error codes set by the OS or Node.js networking layer.
+	if (err.code === "ETIMEDOUT" || err.code === "ECONNABORTED" || err.code === "ESOCKETTIMEDOUT") {
+		return true;
+	}
+
+	// Error name used by some promise-based timeout wrappers and newer runtimes.
+	if (err.name === "TimeoutError" || err.name === "AbortError") {
+		return true;
+	}
+
+	// Fall back to a case-insensitive pattern match on the message as a last
+	// resort. This catches the message produced by our own withTimeout() helper
+	// ("... probe timed out after ...") as well as any third-party timeout messages.
+	if (typeof err.message === "string" && /timed?\s*out/i.test(err.message)) {
+		return true;
+	}
+
+	return false;
+};
+
+// ─── withTimeout ──────────────────────────────────────────────────────────────
+//
+// Races a promise against a timeout and clears the timer either way to prevent
+// accumulating live timer handles across high-frequency health-check calls.
 const withTimeout = (promise, label) => {
 	let timeoutId;
 
@@ -32,8 +58,6 @@ const withTimeout = (promise, label) => {
 		);
 	});
 
-	// Wrap the primary promise so that, regardless of whether it resolves or
-	// rejects, the pending timeout handle is cleared before the result propagates.
 	const guardedPromise = promise.finally(() => clearTimeout(timeoutId));
 
 	return Promise.race([guardedPromise, timeoutPromise]);
@@ -43,29 +67,8 @@ const withTimeout = (promise, label) => {
 // Returns 200 if server, database, and Redis are all reachable.
 // Returns 503 if any dependency is degraded or timed out.
 //
-// ─── WHY WE SANITISE THE RESPONSE ────────────────────────────────────────────
-//
-// Raw Node/pg/redis error messages can contain infrastructure details that
-// external clients have no business seeing: internal hostnames, port numbers,
-// SSL certificate error details, Azure connection string fragments, and so on.
-// Leaking these in a public HTTP response is an information-disclosure
-// vulnerability — it gives an attacker a precise map of your internal topology
-// from a single unauthenticated probe.
-//
-// We already log the full error object (with all its detail) via logger.error,
-// which goes to your structured log aggregator (Pino → Azure Monitor / stdout).
-// That is exactly the right audience for detailed failure context. The HTTP
-// response audience is a load balancer, a status-page service, or a developer
-// checking health — none of them need the raw error string.
-//
-// The public response therefore uses a fixed vocabulary of sanitised statuses:
-//   "ok"        — the probe succeeded
-//   "unhealthy" — the probe failed for any reason other than timeout
-//   "timeout"   — the probe timed out waiting for a response
-//
-// These three values are expressive enough for any downstream consumer to act
-// on (restart a service, page on-call, mark the instance out of rotation) while
-// revealing nothing about the internal failure mechanism.
+// Error details are logged server-side and never exposed in the response body
+// to avoid leaking internal topology (hostnames, ports, SSL details, etc.).
 healthRouter.get("/", async (req, res) => {
 	const health = {
 		status: "ok",
@@ -79,11 +82,9 @@ healthRouter.get("/", async (req, res) => {
 	try {
 		await withTimeout(pool.query("SELECT 1"), "database");
 	} catch (err) {
-		// Log the full, unredacted error internally — this is where infrastructure
-		// detail belongs. The response gets a sanitised status only.
 		logger.error({ err }, "Health probe: database unreachable");
 		health.status = "degraded";
-		health.services.database = err.message?.includes("timed out") ? "timeout" : "unhealthy";
+		health.services.database = isTimeoutError(err) ? "timeout" : "unhealthy";
 	}
 
 	try {
@@ -91,7 +92,7 @@ healthRouter.get("/", async (req, res) => {
 	} catch (err) {
 		logger.error({ err }, "Health probe: redis unreachable");
 		health.status = "degraded";
-		health.services.redis = err.message?.includes("timed out") ? "timeout" : "unhealthy";
+		health.services.redis = isTimeoutError(err) ? "timeout" : "unhealthy";
 	}
 
 	res.status(health.status === "ok" ? 200 : 503).json(health);

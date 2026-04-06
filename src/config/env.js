@@ -11,14 +11,6 @@ const envFile = process.env.ENV_FILE;
 if (envFile) {
 	dotenv.config({ path: envFile });
 } else {
-	// Two separate dotenv.config() calls are intentional here — do not collapse
-	// them into one. dotenv.config() never overwrites variables that are already
-	// set in process.env, so the call order establishes a clear priority chain:
-	//
-	//   1. .env.local is loaded first — any variable defined here wins.
-	//   2. .env is loaded second — only fills in variables NOT already set by
-	//      .env.local, acting as a project-wide fallback (e.g. for CI pipelines
-	//      or bare `node src/server.js` invocations without an npm script).
 	dotenv.config({ path: ".env.local" });
 	dotenv.config({ path: ".env" });
 }
@@ -50,44 +42,24 @@ const envSchema = z.object({
 	// Storage adapter selector.
 	// 'local'  → LocalDiskAdapter  (development — writes to /uploads on disk)
 	// 'azure'  → AzureBlobAdapter  (production — writes to Azure Blob Storage)
-	// Switching adapters requires only an env var change — no code changes.
 	STORAGE_ADAPTER: z.enum(["local", "azure"]).default("local"),
 
-	// ─── Azure Blob Storage ────────────────────────────────────────────────────
-	// Required when STORAGE_ADAPTER=azure. Optional otherwise so that local dev
-	// boots cleanly without Azure credentials.
-	//
-	// AZURE_STORAGE_CONNECTION_STRING:
-	//   Full connection string from Azure Portal → Storage Account →
-	//   Security + networking → Access keys → key1 → Connection string.
-	//   Format: DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...
-	//
-	// AZURE_STORAGE_CONTAINER:
-	//   The blob container name you created inside your storage account.
-	//   Example: "roomies-uploads"
-	//   Container must exist before deployment — create it in the Azure portal
-	//   or with the Azure CLI: az storage container create --name roomies-uploads
+	// Azure Blob Storage — required when STORAGE_ADAPTER=azure, optional otherwise.
 	AZURE_STORAGE_CONNECTION_STRING: z.string().optional(),
 	AZURE_STORAGE_CONTAINER: z.string().optional(),
 
-	// ─── Azure Communication Services (Phase 5 email worker) ─────────────────
-	// Required when the email-queue BullMQ worker switches from Nodemailer/Ethereal
-	// to ACS for production email delivery. Optional for all current phases.
-	//
-	// ACS_CONNECTION_STRING:
-	//   From Azure Portal → Communication Services → Keys → Connection string.
-	//
-	// ACS_FROM_EMAIL:
-	//   A verified sender address in your ACS resource.
-	//   Must be verified in Azure Portal → Communication Services → Email →
-	//   Domains before ACS will send mail from it.
+	// Azure Communication Services (Phase 5 email worker) — optional for current phases.
 	ACS_CONNECTION_STRING: z.string().optional(),
 	ACS_FROM_EMAIL: z.email({ error: "ACS_FROM_EMAIL must be a valid email address" }).optional(),
 
 	// CORS — comma-separated list of allowed origins in production.
-	// Example: "https://roomies.in,https://www.roomies.in"
-	// Not required in development (origin:true is used instead).
 	ALLOWED_ORIGINS: z.string().optional(),
+
+	// TRUST_PROXY controls Express's proxy trust setting.
+	// "false" or "0" → false (no proxy trust, local dev default)
+	// "1", "2", etc. → numeric hop count (production behind load balancers)
+	// This value is parsed into a number or boolean false in the config export below.
+	TRUST_PROXY: z.string().optional().default("false"),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -101,10 +73,41 @@ if (!parsed.success) {
 	process.exit(1);
 }
 
-// Parse ALLOWED_ORIGINS into an array once at startup so app.js never touches
-// process.env directly. An empty array is the safe default — app.js has a
-// startup guard that crashes loudly if ALLOWED_ORIGINS is empty in production.
+// When STORAGE_ADAPTER is azure, we require the Azure Blob config to be present.
+// This is a cross-field constraint that Zod's superRefine handles after parsing.
+if (parsed.data.STORAGE_ADAPTER === "azure") {
+	const missing = [];
+	if (!parsed.data.AZURE_STORAGE_CONNECTION_STRING) missing.push("AZURE_STORAGE_CONNECTION_STRING");
+	if (!parsed.data.AZURE_STORAGE_CONTAINER) missing.push("AZURE_STORAGE_CONTAINER");
+	if (missing.length > 0) {
+		console.error(
+			`❌  STORAGE_ADAPTER is "azure" but the following required variables are missing:\n` +
+				missing.map((v) => `   ${v}`).join("\n") +
+				`\n\nAdd them to your env file or Azure App Service application settings.\n`,
+		);
+		process.exit(1);
+	}
+}
+
+// Parse TRUST_PROXY into the type Express expects: a positive integer for
+// hop count, or boolean false to disable proxy trust entirely.
+// "false" and "0" both map to false. Any other string that parses as a
+// positive integer becomes that number. Anything else defaults to false
+// with a warning so misconfiguration is never silently swallowed.
+const parseTrustProxy = (raw) => {
+	const trimmed = (raw ?? "false").trim().toLowerCase();
+	if (trimmed === "false" || trimmed === "0") return false;
+	const n = Number(trimmed);
+	if (Number.isInteger(n) && n > 0) return n;
+	console.warn(
+		`[config] TRUST_PROXY="${raw}" is not a valid value (expected "false", "0", or a positive integer). ` +
+			`Defaulting to false (no proxy trust).`,
+	);
+	return false;
+};
+
 export const config = {
 	...parsed.data,
 	ALLOWED_ORIGINS: parsed.data.ALLOWED_ORIGINS ? parsed.data.ALLOWED_ORIGINS.split(",").map((o) => o.trim()) : [],
+	TRUST_PROXY: parseTrustProxy(parsed.data.TRUST_PROXY),
 };

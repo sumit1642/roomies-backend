@@ -13,9 +13,10 @@ import { config } from "./config/env.js";
 export const app = express();
 
 // Explicit proxy trust policy so req.ip is accurate behind reverse proxies
-// (used by OTP verify IP throttling). In production we run behind a proxy; in
-// local development we keep direct socket IP behavior.
-app.set("trust proxy", config.NODE_ENV === "production" ? 1 : false);
+// (used by OTP verify IP throttling). TRUST_PROXY is parsed at startup into
+// either a positive integer (hop count) or false — never a string — so Express
+// receives exactly the type it expects.
+app.set("trust proxy", config.TRUST_PROXY);
 
 // ─── Security headers ──────────────────────────────────────────────────────
 app.use(helmet());
@@ -29,10 +30,6 @@ app.use(helmet());
 //
 // Guard: if we are running in production and ALLOWED_ORIGINS is empty, every
 // credentialed cross-origin request will be silently rejected by the browser.
-// This is almost certainly a misconfiguration, not intentional — so we crash
-// loudly at boot rather than serving a broken API for hours before anyone
-// notices. It is far better to fail a deployment than to silently open a
-// security gap or leave the frontend unable to authenticate.
 if (config.NODE_ENV !== "development" && config.ALLOWED_ORIGINS.length === 0) {
 	logger.fatal(
 		"ALLOWED_ORIGINS is empty in a non-development environment. " +
