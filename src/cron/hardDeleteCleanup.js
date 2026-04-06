@@ -40,8 +40,8 @@
 //
 // ─── RETENTION VALIDATION ────────────────────────────────────────────────────
 //
-// SOFT_DELETE_RETENTION_DAYS is validated at module load time rather than lazily
-// at the first cron tick. The reasons:
+// SOFT_DELETE_RETENTION_DAYS is validated at module load time (fail-fast pattern)
+// rather than lazily at the first cron tick. The reasons:
 //
 //   1. An invalid value (e.g. the string "abc") would produce SQL like
 //      `NOW() - ('NaN' * INTERVAL '1 day')` which is a runtime Postgres error on
@@ -59,8 +59,21 @@
 // crashing the server — hard-delete cleanup is a maintenance task, not a
 // critical path, and the fallback is always safe.
 //
-// The validated retention is passed as a query *parameter* (not interpolated into
-// SQL text), preventing any possibility of SQL injection from a misconfigured
+// ─── STRICT INTEGER PARSING ──────────────────────────────────────────────────
+//
+// We deliberately avoid parseInt() for parsing SOFT_DELETE_RETENTION_DAYS.
+// parseInt() uses a "leading numeric portion" strategy: parseInt("90days", 10)
+// silently returns 90, parseInt("1e2", 10) returns 1 (stops at the non-digit
+// 'e'). Both would pass the range check and result in a silently wrong retention
+// period — exactly the kind of misconfiguration that is hard to notice in prod.
+//
+// Instead we require the trimmed env string to match /^[0-9]+$/ — a contiguous
+// run of decimal digits with nothing else — before converting. Any deviation
+// triggers the warning + fallback path. Only trimming leading/trailing whitespace
+// is allowed as a leniency (common copy-paste artifact with no semantic intent).
+//
+// The validated retention is then passed as a query *parameter* (not interpolated
+// into SQL text), preventing any possibility of SQL injection from a misconfigured
 // environment variable and keeping the query planner's plan stable across runs.
 
 import cron from "node-cron";
@@ -72,33 +85,72 @@ const DEFAULT_RETENTION_DAYS = 90;
 const MIN_RETENTION_DAYS = 1;
 const MAX_RETENTION_DAYS = 3650; // ~10 years
 
-// ─── Retention validation (runs at module load, not per tick) ─────────────────
+// ─── Strict retention parsing (runs at module load, not per tick) ─────────────
 //
 // We validate once here rather than inside the job runner because:
 //   a) It surfaces misconfiguration at startup, where it is most visible.
 //   b) It guarantees RETENTION_DAYS is a safe integer for the life of the process
 //      without re-parsing the env var on every run.
-const _rawRetention = parseInt(process.env.SOFT_DELETE_RETENTION_DAYS ?? "", 10);
+//
+// Parsing strategy:
+//   1. Read the raw string and trim surrounding whitespace (the only leniency).
+//   2. Treat undefined or empty string as "not set" → use default at debug level.
+//   3. For non-empty values, gate on /^[0-9]+$/ before any numeric conversion.
+//      This rejects "90days", "1e2", "-30", "0x5A", " 30 " (post-trim "30" is
+//      fine, but pre-trim with internal spaces like "9 0" is not).
+//   4. Convert with Number() — safe here since the regex already guarantees a
+//      pure decimal digit string, making parseInt() and Number() equivalent.
+//   5. Range-check 1..3650 and warn + fallback on violation.
+const _envRetention = process.env.SOFT_DELETE_RETENTION_DAYS;
+const _trimmed = typeof _envRetention === "string" ? _envRetention.trim() : undefined;
+const STRICT_DECIMAL_INTEGER_RE = /^[0-9]+$/;
 
 let RETENTION_DAYS;
-if (!Number.isFinite(_rawRetention) || _rawRetention < MIN_RETENTION_DAYS || _rawRetention > MAX_RETENTION_DAYS) {
-	const provided = process.env.SOFT_DELETE_RETENTION_DAYS;
+
+if (_trimmed === undefined || _trimmed === "") {
+	// Not configured — this is the normal case for most deployments. Use default
+	// at debug level; no operator action needed.
+	logger.debug(
+		{ fallback: DEFAULT_RETENTION_DAYS },
+		`cron:hardDeleteCleanup — SOFT_DELETE_RETENTION_DAYS not set; using default of ${DEFAULT_RETENTION_DAYS} days`,
+	);
+	RETENTION_DAYS = DEFAULT_RETENTION_DAYS;
+} else if (!STRICT_DECIMAL_INTEGER_RE.test(_trimmed)) {
+	// Non-empty but contains non-digit characters. parseInt() would silently
+	// accept the leading numeric portion (e.g. "90days" → 90); we reject it
+	// entirely and fall back so the misconfiguration is not silently swallowed.
 	logger.warn(
 		{
-			provided: provided ?? "(not set)",
+			provided: _envRetention,
+			trimmed: _trimmed,
 			fallback: DEFAULT_RETENTION_DAYS,
 			validRange: `${MIN_RETENTION_DAYS}–${MAX_RETENTION_DAYS}`,
+			hint: "Must be a plain decimal integer with no prefix, suffix, or sign (e.g. '90')",
 		},
-		provided !== undefined ?
-			`cron:hardDeleteCleanup — SOFT_DELETE_RETENTION_DAYS="${provided}" is invalid ` +
-				`(must be an integer between ${MIN_RETENTION_DAYS} and ${MAX_RETENTION_DAYS}); ` +
-				`falling back to ${DEFAULT_RETENTION_DAYS} days`
-		:	`cron:hardDeleteCleanup — SOFT_DELETE_RETENTION_DAYS not set; ` +
-				`using default of ${DEFAULT_RETENTION_DAYS} days`,
+		`cron:hardDeleteCleanup — SOFT_DELETE_RETENTION_DAYS="${_envRetention}" is not a plain decimal integer; ` +
+			`falling back to ${DEFAULT_RETENTION_DAYS} days`,
 	);
 	RETENTION_DAYS = DEFAULT_RETENTION_DAYS;
 } else {
-	RETENTION_DAYS = _rawRetention;
+	// Regex guarantees a pure decimal digit string — Number() conversion is safe.
+	const _parsed = Number(_trimmed);
+
+	if (!Number.isFinite(_parsed) || _parsed < MIN_RETENTION_DAYS || _parsed > MAX_RETENTION_DAYS) {
+		// Valid integer format but outside the allowed range (e.g. "0" or "99999").
+		logger.warn(
+			{
+				provided: _envRetention,
+				parsed: _parsed,
+				fallback: DEFAULT_RETENTION_DAYS,
+				validRange: `${MIN_RETENTION_DAYS}–${MAX_RETENTION_DAYS}`,
+			},
+			`cron:hardDeleteCleanup — SOFT_DELETE_RETENTION_DAYS="${_envRetention}" is out of the valid range ` +
+				`(${MIN_RETENTION_DAYS}–${MAX_RETENTION_DAYS}); falling back to ${DEFAULT_RETENTION_DAYS} days`,
+		);
+		RETENTION_DAYS = DEFAULT_RETENTION_DAYS;
+	} else {
+		RETENTION_DAYS = _parsed;
+	}
 }
 
 const runHardDeleteCleanup = async () => {
