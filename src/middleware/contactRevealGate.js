@@ -62,7 +62,7 @@ const anonFingerprint = (req) => {
 };
 
 const limitReachedResponse = (res) =>
-	res.status(401).json({
+	res.status(429).json({
 		status: "error",
 		message: "Free contact reveal limit reached. Please log in or sign up to continue.",
 		code: "CONTACT_REVEAL_LIMIT_REACHED",
