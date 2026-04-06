@@ -1,28 +1,4 @@
 // src/services/connection.service.js
-//
-// ─── WHAT A CONNECTION IS ─────────────────────────────────────────────────────
-//
-// A connections row is created atomically when a poster accepts an interest
-// request (see interest.service.js _acceptInterestRequest). At birth, both
-// confirmation flags are FALSE and confirmation_status is 'pending'.
-//
-// This service handles everything that happens AFTER that creation:
-//   1. Either party independently confirms the real-world interaction happened.
-//   2. When both have confirmed, confirmation_status flips to 'confirmed'.
-//   3. Phase 4 ratings become submittable once status = 'confirmed'.
-//
-// ─── THE ACTOR RESOLUTION PATTERN ────────────────────────────────────────────
-//
-// Connections are two-party resources. The caller's role (initiator vs.
-// counterpart) is resolved by comparing req.user.userId against the two party
-// IDs on the row. If neither matches, the caller is a third party and receives
-// 404 — not 403. Returning 403 would confirm the resource exists.
-//
-// ─── NOTIFICATION DELIVERY ───────────────────────────────────────────────────
-//
-// Post-commit notifications go through the shared enqueueNotification helper
-// in src/workers/notificationQueue.js, which uses the getQueue() singleton
-// registry so all services share one Redis connection for this queue.
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
@@ -30,6 +6,9 @@ import { AppError } from "../middleware/errorHandler.js";
 import { enqueueNotification } from "../workers/notificationQueue.js";
 
 // ─── Confirm connection ───────────────────────────────────────────────────────
+// Either party flips their own confirmation flag. When both flags become true,
+// confirmation_status transitions to 'confirmed' in the same atomic UPDATE.
+// Post-commit notifications are sent to both parties only on that transition.
 export const confirmConnection = async (callerId, connectionId) => {
 	let client;
 	let conn;
@@ -39,6 +18,9 @@ export const confirmConnection = async (callerId, connectionId) => {
 		client = await pool.connect();
 		await client.query("BEGIN");
 
+		// Lock the row and verify party membership in one query.
+		// If the caller is not a party or the row does not exist, zero rows are
+		// returned and we throw 404 — existence is never leaked to non-parties.
 		const { rows: prevRows } = await client.query(
 			`SELECT confirmation_status
        FROM connections
@@ -56,7 +38,9 @@ export const confirmConnection = async (callerId, connectionId) => {
 
 		previousStatus = prevRows[0].confirmation_status;
 
-		const { rowCount, rows } = await client.query(
+		// Single atomic UPDATE: flips the caller's flag and conditionally promotes
+		// confirmation_status to 'confirmed' when both flags become true.
+		const { rows } = await client.query(
 			`UPDATE connections
        SET
          initiator_confirmed   = CASE
@@ -90,7 +74,10 @@ export const confirmConnection = async (callerId, connectionId) => {
 			[connectionId, callerId],
 		);
 
-		if (rowCount === 0) {
+		// The FOR UPDATE above already guarantees the row exists and the caller is
+		// a party, so rowCount === 0 here would indicate a concurrent hard-delete
+		// between SELECT and UPDATE — treat as 404.
+		if (!rows.length) {
 			await client.query("ROLLBACK");
 			throw new AppError("Connection not found", 404);
 		}
@@ -150,6 +137,9 @@ export const confirmConnection = async (callerId, connectionId) => {
 };
 
 // ─── Get single connection (detail view) ─────────────────────────────────────
+// Both parties can view full detail including each other's confirmation status.
+// Third parties receive 404 — the WHERE clause never leaks resource existence.
+// other_party_name uses only display names; email is never exposed as a fallback.
 export const getConnection = async (callerId, connectionId) => {
 	const { rows } = await pool.query(
 		`SELECT
@@ -178,7 +168,7 @@ export const getConnection = async (callerId, connectionId) => {
             ELSE c.initiator_id
        END AS other_party_id,
 
-       COALESCE(sp_other.full_name, pop_other.owner_full_name, u_other.email)
+       COALESCE(sp_other.full_name, pop_other.owner_full_name)
          AS other_party_name,
 
        sp_other.profile_photo_url AS other_party_photo_url,
@@ -250,6 +240,8 @@ export const getConnection = async (callerId, connectionId) => {
 };
 
 // ─── Get my connections (dashboard feed) ─────────────────────────────────────
+// Returns all connections the caller is a party to, newest first.
+// other_party_name uses only display names; email is never exposed as a fallback.
 export const getMyConnections = async (userId, filters) => {
 	const { confirmationStatus, connectionType, cursorTime, cursorId, limit = 20 } = filters;
 
@@ -304,7 +296,7 @@ export const getMyConnections = async (userId, filters) => {
             ELSE c.initiator_id
        END AS other_party_id,
 
-       COALESCE(sp_other.full_name, pop_other.owner_full_name, u_other.email)
+       COALESCE(sp_other.full_name, pop_other.owner_full_name)
          AS other_party_name,
 
        sp_other.profile_photo_url AS other_party_photo_url,

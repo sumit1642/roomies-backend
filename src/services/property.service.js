@@ -5,7 +5,6 @@ import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { assertPgOwnerVerified as assertOwnerVerified } from "../db/utils/pgOwner.js";
 
-// ─── Amenity bulk-insert helper ───────────────────────────────────────────────
 const bulkInsertAmenities = async (client, propertyId, amenityIds) => {
 	if (!amenityIds.length) return;
 	const placeholders = amenityIds.map((_, i) => `($1, $${i + 2})`).join(", ");
@@ -17,19 +16,8 @@ const bulkInsertAmenities = async (client, propertyId, amenityIds) => {
 	);
 };
 
-// ─── Location fields that, when changed on a property, must be cascaded ───────
-//
-// The schema comments state that PG/hostel listings inherit their location from
-// the parent property conceptually. The actual denormalized city/locality/
-// address/coordinate columns on the listings rows are projections of the
-// property's canonical values, written at listing-creation time.
-//
-// When these fields change on the property, the linked listing rows must be
-// updated in the same transaction — otherwise search queries that filter by
-// city or run proximity calculations on listing coordinates will use stale data.
-//
-// This map is the single source of truth for which property columns cascade
-// and what the corresponding listing column names are.
+// Location fields that, when changed on a property, must cascade to all linked
+// pg_room and hostel_bed listings so proximity search and city filters stay consistent.
 const LOCATION_CASCADE_MAP = {
 	city: "city",
 	address_line: "address_line",
@@ -40,7 +28,6 @@ const LOCATION_CASCADE_MAP = {
 	longitude: "longitude",
 };
 
-// ─── Response shape helpers ───────────────────────────────────────────────────
 const fetchPropertyWithAmenities = async (propertyId, client = pool) => {
 	const { rows } = await client.query(
 		`SELECT
@@ -220,22 +207,8 @@ export const listProperties = async (ownerId, { cursorTime, cursorId, limit = 20
 };
 
 // ─── Update property ──────────────────────────────────────────────────────────
-//
-// Location field changes are cascaded to all linked pg_room and hostel_bed
-// listings within the same transaction. This keeps the denormalized city,
-// address, and coordinate columns on those listing rows consistent with the
-// canonical values on the property — the source of truth.
-//
-// Why in the same transaction? If the property UPDATE commits but the listing
-// fan-out fails (e.g. a constraint violation or a transient error), search
-// results would use stale coordinates or city names until the next manual fix.
-// One atomic commit means either both sides update or neither does.
-//
-// Design: dual-write within one transaction (property row + listing fan-out).
-// This is appropriate at the current scale. If a property were ever linked to
-// thousands of listings, this becomes a long-running lock; at that scale the
-// right model is an eventually-consistent projection via a background job,
-// but that complexity is not warranted here.
+// Location field changes cascade to all linked pg_room and hostel_bed listings
+// within the same transaction to keep city/address/coordinates consistent.
 export const updateProperty = async (ownerId, propertyId, body) => {
 	await assertOwnerVerified(ownerId);
 
@@ -272,9 +245,6 @@ export const updateProperty = async (ownerId, propertyId, body) => {
 		throw new AppError("No valid fields provided for update", 400);
 	}
 
-	// Identify which of the changed columns are location fields that need to
-	// be cascaded to linked listings. We build this set before opening the
-	// transaction so we know whether we need the fan-out UPDATE.
 	const changedLocationColumns = setClauses
 		.map((clause) => clause.split(" = ")[0].trim())
 		.filter((col) => col in LOCATION_CASCADE_MAP);
@@ -315,19 +285,7 @@ export const updateProperty = async (ownerId, propertyId, body) => {
 			await bulkInsertAmenities(client, propertyId, body.amenityIds);
 		}
 
-		// ── Location cascade to linked listings ───────────────────────────────────
-		//
-		// If any location fields changed, propagate those exact new values to all
-		// non-deleted pg_room and hostel_bed listings under this property. We use
-		// the values already committed to the property row (via a SELECT) rather
-		// than re-referencing the original `body` entries, so the listing rows
-		// always mirror what the property row actually contains — not what the
-		// caller sent, which could differ in edge cases involving partial failures.
-		//
-		// We target only pg_room and hostel_bed because student_room listings have
-		// their own address fields independent of any property.
 		if (changedLocationColumns.length > 0) {
-			// Read the freshly updated values from the property row itself.
 			const { rows: freshRows } = await client.query(
 				`SELECT ${changedLocationColumns.join(", ")}
          FROM properties
@@ -338,10 +296,6 @@ export const updateProperty = async (ownerId, propertyId, body) => {
 			if (freshRows.length) {
 				const fresh = freshRows[0];
 
-				// Build a SET clause for the listing fan-out update from only the
-				// columns that actually changed. Each clause re-reads from the
-				// property row via a correlated subquery — simpler and safer than
-				// rebinding the original body values again.
 				const listingSetClauses = changedLocationColumns.map((col, i) => `${col} = $${i + 2}`);
 				const listingValues = changedLocationColumns.map((col) => fresh[col]);
 
@@ -383,19 +337,13 @@ export const updateProperty = async (ownerId, propertyId, body) => {
 };
 
 // ─── Delete property (soft) ───────────────────────────────────────────────────
+// Locks the property row then all its non-deleted listing rows to prevent a
+// TOCTOU race where a concurrent status change could create an active listing
+// after the check but before the soft-delete commits.
 //
-// Concurrency strategy:
-//   1. Lock the property row (FOR UPDATE) — prevents concurrent deletes.
-//   2. Lock ALL non-deleted listings for this property (FOR UPDATE) — prevents
-//      a concurrent listing status-change from slipping between our active-listing
-//      check and the property soft-delete. Without locking the listing rows, the
-//      following race is possible:
-//        T1 (us):       SELECT active listings → 0 rows
-//        T2 (other):    UPDATE listing SET status='active' → succeeds
-//        T1 (us):       UPDATE properties SET deleted_at = NOW() → also succeeds
-//      Result: a live 'active' listing pointing at a soft-deleted property.
-//      Holding a row-level lock on all listings blocks T2 until T1 commits,
-//      closing the race entirely.
+// The active listing guard includes (expires_at IS NULL OR expires_at > NOW())
+// so expired listings — which can never be reactivated from 'expired' status —
+// do not falsely block property deletion.
 export const deleteProperty = async (ownerId, propertyId) => {
 	await assertOwnerVerified(ownerId);
 
@@ -403,7 +351,7 @@ export const deleteProperty = async (ownerId, propertyId) => {
 	try {
 		await client.query("BEGIN");
 
-		// Step 1: Lock the property row itself.
+		// Step 1: lock the property row.
 		const { rows: propertyRows } = await client.query(
 			`SELECT property_id
        FROM properties
@@ -418,7 +366,7 @@ export const deleteProperty = async (ownerId, propertyId) => {
 			throw new AppError("Property not found", 404);
 		}
 
-		// Step 2: Lock every non-deleted listing for this property.
+		// Step 2: lock all non-deleted listing rows for this property.
 		await client.query(
 			`SELECT listing_id
        FROM listings
@@ -428,12 +376,15 @@ export const deleteProperty = async (ownerId, propertyId) => {
 			[propertyId],
 		);
 
-		// Step 3: Safe active-listing check under the lock.
+		// Step 3: check for non-expired active listings under the lock.
+		// Expired listings (status = 'expired' or expires_at in the past) are
+		// terminal and can never be reactivated, so they do not block deletion.
 		const { rows: activeListingRows } = await client.query(
 			`SELECT 1
        FROM listings
        WHERE property_id = $1
          AND status      = 'active'
+         AND (expires_at IS NULL OR expires_at > NOW())
          AND deleted_at  IS NULL
        LIMIT 1`,
 			[propertyId],
@@ -443,7 +394,7 @@ export const deleteProperty = async (ownerId, propertyId) => {
 			throw new AppError("Deactivate or remove all active listings before deleting this property", 409);
 		}
 
-		// Step 4: Soft-delete the property.
+		// Step 4: soft-delete the property.
 		await client.query(
 			`UPDATE properties
        SET deleted_at = NOW()

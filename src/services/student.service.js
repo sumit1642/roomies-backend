@@ -5,8 +5,7 @@ import { AppError } from "../middleware/errorHandler.js";
 
 export const getStudentProfile = async (requestingUserId, targetUserId) => {
 	const { rows } = await pool.query(
-		`
-		SELECT
+		`SELECT
 			sp.profile_id,
 			sp.user_id,
 			sp.full_name,
@@ -35,32 +34,28 @@ export const getStudentProfile = async (requestingUserId, targetUserId) => {
 	return rows[0];
 };
 
-// Returns contact details for a student profile.
+// Returns contact details for a student. Requires an active student_profiles row
+// (INNER JOIN, not LEFT JOIN) so only users who actually have a student profile
+// can be returned — preventing PG owners or admin accounts from being exposed
+// through this endpoint even if their user_id is known.
 //
-// Access control is handled entirely upstream by optionalAuthenticate and
-// contactRevealGate before this service is ever reached. This service trusts
-// that the gate already enforced the quota and caller eligibility — its only
-// job here is to fetch the data and shape the response correctly based on
-// which tier the caller belongs to.
-//
-// emailOnly: false — verified users. Returns the full bundle: email + whatsapp_phone.
-// emailOnly: true  — guests and unverified users. Returns email only. The
-//                    whatsapp_phone field is stripped at the service boundary so
-//                    it never exists on any object that leaves this function,
-//                    making it impossible to accidentally serialise or log it
-//                    further down the stack.
+// emailOnly: false — verified callers; returns email + whatsapp_phone (u.phone).
+// emailOnly: true  — guests/unverified callers; returns email only.
+// The whatsapp_phone field is stripped at this boundary so it never reaches
+// the response serialiser for restricted callers.
 export const getStudentContactReveal = async (targetUserId, emailOnly = false) => {
 	const { rows } = await pool.query(
-		`
-		SELECT
+		`SELECT
 			u.user_id,
 			sp.full_name,
 			u.email,
 			u.phone AS whatsapp_phone
 		FROM users u
-		LEFT JOIN student_profiles sp ON sp.user_id = u.user_id AND sp.deleted_at IS NULL
-		WHERE u.user_id = $1
-		AND u.deleted_at IS NULL`,
+		JOIN student_profiles sp
+		  ON sp.user_id    = u.user_id
+		 AND sp.deleted_at IS NULL
+		WHERE u.user_id    = $1
+		  AND u.deleted_at IS NULL`,
 		[targetUserId],
 	);
 
@@ -112,8 +107,7 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 	values.push(targetUserId);
 
 	const { rows } = await pool.query(
-		`
-		UPDATE student_profiles
+		`UPDATE student_profiles
 		SET ${setClauses.join(", ")}
 		WHERE user_id = $${paramIndex}
 		AND deleted_at IS NULL

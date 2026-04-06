@@ -13,13 +13,9 @@ import { findUserByEmail, findUserByGoogleId } from "../db/utils/auth.js";
 import { findInstitutionByDomain } from "../db/utils/institutions.js";
 import { sendOtpEmail } from "./email.service.js";
 
-// ─── Google OAuth client ──────────────────────────────────────────────────────
 const googleOAuthClient = config.GOOGLE_CLIENT_ID ? new OAuth2Client(config.GOOGLE_CLIENT_ID) : null;
 
-// ─── Account status guard ─────────────────────────────────────────────────────
 const INACTIVE_ACCOUNT_STATUSES = new Set(["suspended", "banned", "deactivated"]);
-
-// ─── TTL helpers ──────────────────────────────────────────────────────────────
 
 export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) => {
 	if (typeof expiresIn === "number" && Number.isFinite(expiresIn) && expiresIn > 0) {
@@ -29,8 +25,6 @@ export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) =
 	const value = String(expiresIn ?? "").trim();
 	if (!value) return fallbackSeconds;
 
-	// jsonwebtoken accepts numeric strings too. We interpret plain digits as
-	// seconds so env values like JWT_EXPIRES_IN=900 behave as expected.
 	if (/^\d+$/.test(value)) {
 		return Number.parseInt(value, 10);
 	}
@@ -42,12 +36,6 @@ export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) =
 	return Number.parseInt(amount, 10) * multipliers[unit.toLowerCase()];
 };
 
-// ─── Token helpers ───────────────────────────────────────────────────────────
-
-// Normalize TTLs once at startup. jwt.sign treats a plain digit-only string
-// (e.g. "900") as milliseconds, not seconds, which would make tokens expire
-// almost immediately. By converting to a numeric seconds value here we ensure
-// consistent behaviour regardless of how the env var is formatted.
 const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
 const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
 
@@ -66,9 +54,7 @@ const issueSessionId = () => crypto.randomUUID();
 const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
 const userSessionsKey = (userId) => `userSessions:${userId}`;
 
-export const parseTtlSeconds_EXPORTED = parseTtlSeconds; // re-export alias kept for compat
-
-const REFRESH_TTL = REFRESH_TTL_SECONDS;
+export const parseTtlSeconds_EXPORTED = parseTtlSeconds;
 
 const buildTokenResponse = (userId, sid, email, roles, isEmailVerified) => {
 	const accessToken = issueAccessToken(userId, email, roles, sid);
@@ -77,9 +63,9 @@ const buildTokenResponse = (userId, sid, email, roles, isEmailVerified) => {
 };
 
 const storeRefreshToken = async (userId, sid, refreshToken) => {
-	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
+	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL_SECONDS;
 	const multi = redis.multi();
-	multi.setEx(refreshTokenKey(userId, sid), REFRESH_TTL, refreshToken);
+	multi.setEx(refreshTokenKey(userId, sid), REFRESH_TTL_SECONDS, refreshToken);
 	multi.zAdd(userSessionsKey(userId), { score: expiryTimestamp, value: sid });
 	await multi.exec();
 };
@@ -105,7 +91,7 @@ export const casRefreshToken = async (
 	sid,
 	expectedOldToken,
 	newToken,
-	ttl = REFRESH_TTL,
+	ttl = REFRESH_TTL_SECONDS,
 	expiryTimestamp = Math.floor(Date.now() / 1000) + ttl,
 ) => {
 	const result = await redis.eval(casRefreshTokenScript, {
@@ -115,22 +101,29 @@ export const casRefreshToken = async (
 	return result === 1;
 };
 
-// ─── verifyRefreshTokenPayload ────────────────────────────────────────────────
+// Verifies the refresh token JWT and returns { userId, sid }.
 //
-// Verifies the refresh token JWT and returns its payload. Handles two cases:
+// Legacy tokens (issued before per-session keys) lack a sid. When detected,
+// this function reads the old per-user key (userSessionsKey), generates a fresh
+// sid, migrates to the per-session scheme atomically via MULTI/EXEC, and deletes
+// the legacy key.
 //
-//   Modern tokens:  payload contains both userId and sid. Used directly.
-//
-//   Legacy tokens:  payload contains userId but no sid. These were minted before
-//                   per-session keys were introduced. We attempt a fallback
-//                   lookup using the old per-user key (userSessionsKey) to
-//                   find any stored token, generate a fresh sid, re-issue and
-//                   rotate under the new per-session key, and delete the old
-//                   per-user key so subsequent calls use the modern path.
-//                   If no legacy entry is found, we throw 401 — the session has
-//                   expired or never existed.
-//
-// Returns { userId, sid } — always a complete pair on success.
+// RACE WINDOW (legacy path only — acceptable by design):
+// There is a TOCTOU gap between reading legacyToken via
+//   redis.get(legacyKey)        where legacyKey = userSessionsKey(userId)
+// and the subsequent MULTI/EXEC that writes the new per-session key, removes
+// the old legacyKey, and rotates incomingRefreshToken to newRefreshToken.
+// A concurrent request with the same incomingRefreshToken could also read
+// legacyToken and pass the comparison, then both issue new session IDs. The
+// worst outcome is two valid sessions derived from one legacy token — the next
+// call to verifyRefreshTokenPayload on either will use the modern per-session
+// path and succeed normally. This race is acceptable because:
+//   1. Legacy tokens are a transitional artefact being phased out; new logins
+//      always produce per-session tokens with a sid.
+//   2. Making the legacy migration fully atomic would require a Lua script that
+//      duplicates the rotation logic for a shrinking population of tokens.
+//   3. Worst case is a harmless duplicate session, not data loss or privilege
+//      escalation. The next refresh on either session will CAS-rotate correctly.
 export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 	let payload;
 	try {
@@ -158,19 +151,14 @@ export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 	const legacyToken = await redis.get(legacyKey).catch(() => null);
 
 	if (!legacyToken || legacyToken !== incomingRefreshToken) {
-		// No legacy session found or token mismatch — session has expired or been revoked.
 		throw new AppError("Refresh token is invalid or has been revoked", 401);
 	}
 
-	// Issue a new sid and migrate the session to the per-session key scheme.
 	const newSid = issueSessionId();
-	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
+	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL_SECONDS;
 
-	// Atomically: store under the new per-session key, add sid to the sorted set,
-	// and delete the old legacy per-user key. If this partially fails the caller
-	// will get a 401 on the next attempt, which is safe.
 	const multi = redis.multi();
-	multi.setEx(refreshTokenKey(payload.userId, newSid), REFRESH_TTL, incomingRefreshToken);
+	multi.setEx(refreshTokenKey(payload.userId, newSid), REFRESH_TTL_SECONDS, incomingRefreshToken);
 	multi.zAdd(userSessionsKey(payload.userId), { score: expiryTimestamp, value: newSid });
 	multi.del(legacyKey);
 	await multi.exec();
@@ -183,8 +171,8 @@ export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 	return { userId: payload.userId, sid: newSid };
 };
 
-// Internal sync version used by logoutCurrent where async migration is not needed
-// (logout just needs to validate and extract; migration happens on refresh, not logout).
+// Sync variant used by logoutCurrent — migration is not needed there because
+// logout only needs to validate and identify the session to revoke.
 const _verifyRefreshTokenPayloadSync = (incomingRefreshToken) => {
 	let payload;
 	try {
@@ -204,16 +192,12 @@ const _verifyRefreshTokenPayloadSync = (incomingRefreshToken) => {
 	return payload;
 };
 
-// ─── OTP helpers ─────────────────────────────────────────────────────────────
-
-const OTP_TTL = 600; // 10 minutes in seconds
+const OTP_TTL = 600;
 const OTP_MAX_ATTEMPTS = 5;
 const OTP_IP_WINDOW_SECONDS = 15 * 60;
 const OTP_IP_MAX_ATTEMPTS = 50;
 
 const generateOtp = () => String(crypto.randomInt(100000, 1000000));
-
-// ─── Service methods ─────────────────────────────────────────────────────────
 
 export const register = async ({ email, password, role, fullName, businessName }) => {
 	if (role === "pg_owner" && !businessName?.trim()) {
@@ -350,21 +334,6 @@ export const logoutCurrent = async (userId, incomingRefreshToken, authenticatedS
 		throw new AppError("Refresh token session does not match the authenticated session", 403);
 	}
 
-	// Fetch the currently stored token for this session from Redis and compare it
-	// against the incoming token before performing deletion. This rejects two
-	// classes of invalid requests that JWT signature validation alone cannot catch:
-	//
-	//   1. A stale token whose sid is still valid but which was rotated out during
-	//      a prior silent refresh. The new token lives at the same Redis key; the
-	//      old one no longer matches the stored value.
-	//
-	//   2. A replayed token for a session that has already been explicitly revoked
-	//      (e.g. via revokeSession or logoutAll). The Redis key will be absent.
-	//
-	// Matching against the stored value makes logout idempotency-safe in the
-	// correct direction: a caller with the current live token can always log out,
-	// but a caller with a superseded token cannot trigger deletion of the live
-	// session.
 	const storedToken = await redis.get(refreshTokenKey(userId, authenticatedSid));
 	if (!storedToken) {
 		throw new AppError("Session not found or already revoked", 401);
@@ -427,7 +396,6 @@ export const listSessions = async (userId, currentSid) => {
 	}
 
 	if (staleSids.length > 0) {
-		// Intentionally pass stale members variadically for bulk zRem cleanup.
 		await redis.zRem(sessionsKey, ...staleSids);
 	}
 
@@ -444,12 +412,8 @@ export const revokeSession = async (userId, sid) => {
 };
 
 export const refresh = async (incomingRefreshToken) => {
-	// verifyRefreshTokenPayload is async to handle the legacy-token migration path.
 	const { userId, sid } = await verifyRefreshTokenPayload(incomingRefreshToken);
 
-	// Load fresh user state from DB — the refresh token payload may be up to
-	// 7 days old, so roles and account status could have changed since it was
-	// issued. Never trust stale payload data for authorization decisions.
 	const { rows: userRows } = await pool.query(
 		`SELECT email, is_email_verified, account_status FROM users WHERE user_id = $1 AND deleted_at IS NULL`,
 		[userId],
@@ -467,14 +431,14 @@ export const refresh = async (incomingRefreshToken) => {
 
 	const tokens = buildTokenResponse(userId, sid, userRows[0].email, roles, userRows[0].is_email_verified);
 
-	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
+	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL_SECONDS;
 
 	const rotated = await casRefreshToken(
 		userId,
 		sid,
 		incomingRefreshToken,
 		tokens.refreshToken,
-		REFRESH_TTL,
+		REFRESH_TTL_SECONDS,
 		expiryTimestamp,
 	);
 	if (!rotated) {
@@ -558,7 +522,6 @@ export const verifyOtp = async (userId, otp, ipAddress) => {
 	logger.info({ userId }, "Email verified via OTP");
 };
 
-// ─── Google OAuth ─────────────────────────────────────────────────────────────
 export const googleOAuth = async ({ idToken, role, fullName, businessName }) => {
 	if (!googleOAuthClient) {
 		throw new AppError("Google OAuth is not configured on this server", 503);
@@ -588,7 +551,7 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 		throw new AppError("Google account does not have a verified email address", 400);
 	}
 
-	// ── Path 1: Returning OAuth user ──────────────────────────────────────────
+	// Path 1: returning OAuth user
 	const existingByGoogleId = await findUserByGoogleId(googleId);
 
 	if (existingByGoogleId) {
@@ -615,34 +578,9 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 		return tokens;
 	}
 
-	// ── Path 2: Account linking ───────────────────────────────────────────────
-	//
-	// A user registered with email + password already exists for this email.
-	// We attempt to link their Google ID to their existing account so they can
-	// sign in via either method going forward.
-	//
-	// Two failure scenarios need distinct handling:
-	//
-	//   rowCount === 0 with no DB error:
-	//     The UPDATE matched zero rows because the WHERE clause `AND google_id IS
-	//     NULL` was false — meaning this account already has a google_id. This is
-	//     the normal "same user linking twice" case, or their account was linked
-	//     via another request moments before this one completed. We surface it as
-	//     a deterministic 409 with a user-facing message.
-	//
-	//   Postgres error code 23505 (unique_violation):
-	//     The `google_id` we are trying to write is already present in the
-	//     idx_users_google_id partial unique index, meaning a *different* user
-	//     account is already linked to this Google ID. This is a concurrent race:
-	//     two requests arrived simultaneously trying to link the same googleId to
-	//     two different email-based accounts, and one of them already committed.
-	//     Without this catch the second request would propagate a generic 500
-	//     instead of the correct 409.
-	//
-	//     Why can this happen even though Path 1 checked `findUserByGoogleId`
-	//     first? Because there is no transaction spanning the read in Path 1 and
-	//     the write here in Path 2. A concurrent request can commit between those
-	//     two points, creating the race.
+	// Path 2: account linking — email-based account exists, no google_id yet.
+	// AND google_id IS NULL guards against concurrent linking races; a 23505
+	// means a different account already claimed this googleId.
 	const existingByEmail = await findUserByEmail(email);
 
 	if (existingByEmail) {
@@ -658,10 +596,6 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 			);
 			linkRowCount = rowCount;
 		} catch (err) {
-			// A 23505 here means another user account already carries this googleId.
-			// This is distinct from the rowCount === 0 case below (which means this
-			// specific account already has a different google_id). We log it with
-			// enough context to distinguish it in monitoring dashboards.
 			if (err.code === "23505") {
 				logger.warn(
 					{ googleId, userId: existingByEmail.user_id, err: err.detail },
@@ -669,15 +603,10 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 				);
 				throw new AppError("This Google account is already linked to another user", 409);
 			}
-			// Any other DB error is unexpected — re-throw and let the global handler
-			// turn it into a 500 with structured logging.
 			throw err;
 		}
 
 		if (linkRowCount === 0) {
-			// The account exists but already has a google_id set (not NULL), so our
-			// WHERE google_id IS NULL condition excluded it. This means the current
-			// user's account is already linked to a *different* Google account.
 			logger.warn(
 				{ userId: existingByEmail.user_id },
 				"googleOAuth account-link: account already linked to a different Google account",
@@ -704,7 +633,7 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 		return tokens;
 	}
 
-	// ── Path 3: New user registration ─────────────────────────────────────────
+	// Path 3: new user registration via Google.
 	if (!role) {
 		throw new AppError("Role is required for new account registration via Google", 400);
 	}

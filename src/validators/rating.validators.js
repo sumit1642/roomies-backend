@@ -1,45 +1,17 @@
 // src/validators/rating.validators.js
-//
-// ─── FIX: cursorTime validated as strict ISO 8601 datetime ───────────────────
-// Previously accepted any string; now uses z.iso.datetime({ offset: true })
-// consistent with every other paginated endpoint.
-//
-// ─── FIX: shared dimensionScoreSchema ────────────────────────────────────────
-// cleanlinessScore, communicationScore, reliabilityScore, and valueScore all
-// share the same validation rule (optional integer 1–5). Extracting them into
-// a single schema removes the repetition and ensures any future change
-// (e.g. extending the scale to 1–10) only needs to happen in one place.
 
 import { z } from "zod";
+import { keysetPaginationQuerySchema } from "./pagination.validators.js";
 
-// ─── Shared sub-schemas ───────────────────────────────────────────────────────
-
-// Reusable optional 1–5 dimension score. Used for all four dimension fields on
-// a rating submission. Keeping the error message generic ("Score must be between
-// 1 and 5") means we don't encode the field name in the schema — the path in
-// the Zod issue already tells the caller which field failed.
+// Reusable optional 1–5 dimension score for cleanliness, communication,
+// reliability, and value fields. Keeping one definition prevents drift
+// if the scale ever changes.
 const dimensionScoreSchema = z.coerce
 	.number()
 	.int()
 	.min(1, { error: "Score must be between 1 and 5" })
 	.max(5, { error: "Score must be between 1 and 5" })
 	.optional();
-
-// Keyset pagination used by all four read endpoints.
-const paginationQuerySchema = z
-	.object({
-		cursorTime: z.iso.datetime({ offset: true }).optional(),
-		cursorId: z.uuid({ error: "cursorId must be a valid UUID" }).optional(),
-		limit: z.coerce.number().int().min(1).max(100).default(20),
-	})
-	.refine(
-		(data) => {
-			const hasTime = data.cursorTime !== undefined;
-			const hasId = data.cursorId !== undefined;
-			return hasTime === hasId;
-		},
-		{ error: "cursorTime and cursorId must be provided together" },
-	);
 
 // ─── Submit rating ─────────────────────────────────────────────────────────────
 export const submitRatingSchema = z.object({
@@ -66,8 +38,8 @@ export const submitRatingSchema = z.object({
 		comment: z
 			.string()
 			.trim()
-			.min(1, { message: "comment cannot be empty" })
-			.max(2000, { message: "comment must not exceed 2000 characters" })
+			.min(1, { error: "comment cannot be empty" })
+			.max(2000, { error: "comment must not exceed 2000 characters" })
 			.optional(),
 	}),
 });
@@ -84,12 +56,12 @@ export const getPublicRatingsSchema = z.object({
 	params: z.object({
 		userId: z.uuid({ error: "Invalid user ID" }),
 	}),
-	query: paginationQuerySchema,
+	query: keysetPaginationQuerySchema,
 });
 
 // ─── Get my given ratings ──────────────────────────────────────────────────────
 export const getMyGivenRatingsSchema = z.object({
-	query: paginationQuerySchema,
+	query: keysetPaginationQuerySchema,
 });
 
 // ─── Get public ratings for a property ────────────────────────────────────────
@@ -97,5 +69,5 @@ export const getPublicPropertyRatingsSchema = z.object({
 	params: z.object({
 		propertyId: z.uuid({ error: "Invalid property ID" }),
 	}),
-	query: paginationQuerySchema,
+	query: keysetPaginationQuerySchema,
 });

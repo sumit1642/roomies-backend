@@ -1,50 +1,4 @@
 // src/services/interest.service.js
-//
-// ─── SCHEMA COLUMN REFERENCE ─────────────────────────────────────────────────
-//
-// interest_requests columns (from roomies_db_setup.sql):
-//   request_id        — PK (NOT interest_request_id)
-//   sender_id         — the student who expressed interest (NOT student_id)
-//   listing_id
-//   message
-//   status            — type: request_status_enum
-//                       values: 'pending','accepted','declined','withdrawn','expired'
-//   created_at, updated_at, deleted_at
-//
-// listings columns relevant here:
-//   listing_id
-//   posted_by         — the poster's user_id (NOT poster_id)
-//   listing_type      — drives connection_type derivation
-//   total_capacity    — how many occupants the listing can hold
-//   current_occupants — how many have been accepted so far
-//   status
-//   deleted_at
-//
-// connections.interest_request_id — nullable FK added in the Phase 3 migration.
-//
-// ─── OCCUPANCY STATE MACHINE ──────────────────────────────────────────────────
-//
-// Accepting an interest request is not just a status transition — it is an
-// atomic aggregate operation that must update four things in one commit:
-//
-//   1. interest_requests.status  → 'accepted'
-//   2. connections               → new row created
-//   3. listings.current_occupants → incremented by 1
-//   4a. If current_occupants + 1 >= total_capacity:
-//        listings.status → 'filled', listings.filled_at → NOW()
-//        All remaining pending requests → 'expired'
-//   4b. If capacity remains:
-//        Listing stays 'active'. Other pending requests remain open.
-//
-// This keeps the listing + interest_requests + connections aggregate consistent.
-// The DB CHECK constraint (current_occupants <= total_capacity) is a final safety
-// net, but the branch logic above prevents us from even attempting a violation.
-//
-// ─── NOTIFICATION DELIVERY ───────────────────────────────────────────────────
-//
-// Every state transition fires a post-commit notification through the shared
-// enqueueNotification helper. A notification failure never rolls back a state
-// change.
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
@@ -57,7 +11,6 @@ const _buildWhatsAppLink = (phone, message) => {
 	return `https://wa.me/${phone}?text=${encoded}`;
 };
 
-// ─── connection_type derivation ───────────────────────────────────────────────
 const LISTING_TYPE_TO_CONNECTION_TYPE = {
 	student_room: "student_roommate",
 	pg_room: "pg_stay",
@@ -65,6 +18,9 @@ const LISTING_TYPE_TO_CONNECTION_TYPE = {
 };
 
 // ─── Create interest request ─────────────────────────────────────────────────
+// A student expresses interest in a listing. Only one active (pending or
+// accepted) interest request per student per listing is allowed; the partial
+// unique index idx_interest_requests_no_duplicates enforces this at DB level.
 export const createInterestRequest = async (studentId, listingId, data) => {
 	const { message } = data;
 
@@ -101,13 +57,19 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 		throw new AppError("You cannot express interest in your own listing", 422);
 	}
 
+	// ON CONFLICT predicate must exactly match the partial unique index:
+	//   idx_interest_requests_no_duplicates ON (sender_id, listing_id)
+	//   WHERE status IN ('pending','accepted') AND deleted_at IS NULL
+	// The original clause incorrectly included "AND deleted_at IS NULL" inside
+	// the ON CONFLICT WHERE, which caused PostgreSQL to skip conflict detection
+	// for soft-deleted rows and allowed duplicate active requests to be inserted.
+	// The fix removes that extra predicate so the clause matches the index exactly.
 	const { rows } = await pool.query(
 		`INSERT INTO interest_requests
        (sender_id, listing_id, message, status)
      VALUES ($1, $2, $3, 'pending')
      ON CONFLICT (sender_id, listing_id)
        WHERE status IN ('pending', 'accepted')
-         AND deleted_at IS NULL
      DO NOTHING
      RETURNING request_id, sender_id, listing_id, message, status, created_at`,
 		[studentId, listingId, message ?? null],
@@ -139,6 +101,8 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 };
 
 // ─── Transition interest request status ──────────────────────────────────────
+// Routes accepted → _acceptInterestRequest (atomic multi-step).
+// Routes declined/withdrawn → simple UPDATE with actor ownership check.
 export const transitionInterestRequest = async (callerId, requestId, targetStatus) => {
 	const ALLOWED_STATUSES = new Set(["accepted", "declined", "withdrawn"]);
 	if (!ALLOWED_STATUSES.has(targetStatus)) {
@@ -224,39 +188,19 @@ export const transitionInterestRequest = async (callerId, requestId, targetStatu
 };
 
 // ─── Accept interest request (internal) ──────────────────────────────────────
-//
-// This is the core aggregate-consistency operation in the entire accept flow.
-// Everything that must happen atomically lives inside a single BEGIN/COMMIT:
-//
-//   1. Lock the interest request AND its parent listing with FOR UPDATE so no
-//      concurrent transaction can accept another request or change listing status
-//      while we are deciding what to do.
-//
-//   2. Accept the request (status → 'accepted').
-//
-//   3. Create the connections row.
-//
-//   4. Increment listings.current_occupants.
-//
-//   5. Apply the capacity-exhaustion branch:
-//        A. Exhausted → mark listing 'filled', expire all remaining pending requests.
-//        B. Remaining → leave listing 'active', other requests remain open.
-//
-// Post-commit: fire notifications (never inside the transaction — a notification
-// failure must never roll back a committed state change).
+// Atomically: accepts the request, creates the connection row, increments
+// current_occupants, and (if capacity exhausted) marks the listing 'filled'
+// and expires all remaining pending requests. All within one BEGIN/COMMIT.
+// Post-commit notifications are fire-and-forget via enqueueNotification.
 const _acceptInterestRequest = async (posterId, requestId) => {
 	const client = await pool.connect();
 
 	try {
 		await client.query("BEGIN");
 
-		// Lock both the interest request row AND its parent listing row in a single
-		// query. FOR UPDATE on the JOIN locks all matched rows simultaneously,
-		// preventing concurrent accepts or status changes on either object for the
-		// duration of this transaction.
-		//
-		// We also read total_capacity and current_occupants here so we can make
-		// the capacity-exhaustion decision inside the transaction boundary.
+		// Lock both the interest request and its parent listing simultaneously.
+		// FOR UPDATE on the JOIN prevents concurrent accepts or listing status
+		// changes for the duration of this transaction.
 		const { rows: irRows } = await client.query(
 			`SELECT
          ir.request_id,
@@ -322,7 +266,6 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			throw new AppError(UNAVAILABLE_LISTING_MESSAGE, 422);
 		}
 
-		// Step 1: Accept the interest request.
 		await client.query(
 			`UPDATE interest_requests
        SET status = 'accepted'::request_status_enum, updated_at = NOW()
@@ -330,7 +273,6 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			[requestId],
 		);
 
-		// Step 2: Create the connection row.
 		const connectionType = LISTING_TYPE_TO_CONNECTION_TYPE[ir.listing_type];
 		if (!connectionType) {
 			await client.query("ROLLBACK");
@@ -347,24 +289,10 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 
 		const connectionId = connRows[0].connection_id;
 
-		// Step 3 & 4: Compute the new occupant count and apply the correct branch.
-		//
-		// The decision is made on values locked at the top of this transaction, so
-		// it is race-free regardless of how many concurrent requests arrive.
 		const newOccupantCount = ir.current_occupants + 1;
 		const capacityExhausted = newOccupantCount >= ir.total_capacity;
 
 		if (capacityExhausted) {
-			// Branch A — capacity exhausted.
-			//
-			// This acceptance fills the last available slot. We transition the listing
-			// to 'filled' (terminal state) and expire every remaining pending request
-			// because no further acceptances are possible.
-			//
-			// The AND status = 'active' guard in the UPDATE acts as a secondary
-			// concurrency check: if another transaction already changed the listing
-			// status (which shouldn't be possible given our FOR UPDATE lock, but
-			// we guard defensively), rowCount is 0 and we surface a 409.
 			const { rowCount: fillRowCount } = await client.query(
 				`UPDATE listings
          SET current_occupants = $1,
@@ -381,15 +309,8 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 				throw new AppError("Listing status has already changed — please refresh", 409);
 			}
 
-			// Expire all remaining pending requests. The accepted request is already
-			// in 'accepted' status so it won't match the 'pending' filter; we pass
-			// null for excludeRequestId to keep the logic clean.
 			await expirePendingRequestsForListing(ir.listing_id, client, null);
 		} else {
-			// Branch B — capacity remains.
-			//
-			// Simply increment the occupant counter and leave the listing open.
-			// Other pending requests remain valid because more slots are available.
 			const { rowCount: occupancyRowCount } = await client.query(
 				`UPDATE listings
          SET current_occupants = $1
@@ -403,9 +324,6 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 				await client.query("ROLLBACK");
 				throw new AppError("Listing status has already changed — please refresh", 409);
 			}
-			// We deliberately do NOT expire other pending requests here. For a
-			// multi-slot listing (total_capacity > 1), those requests are still
-			// meaningful — the poster may accept more of them.
 		}
 
 		await client.query("COMMIT");
@@ -423,8 +341,6 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			"Interest request accepted — connection created, occupancy updated",
 		);
 
-		// Post-commit notifications: these fire after the transaction commits.
-		// A notification failure never rolls back the state change.
 		enqueueNotification({
 			recipientId: ir.sender_id,
 			type: "interest_request_accepted",
@@ -432,7 +348,6 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			entityId: requestId,
 		});
 
-		// Notify the poster when their listing just became filled.
 		if (capacityExhausted) {
 			enqueueNotification({
 				recipientId: posterId,
@@ -457,7 +372,6 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 			status: "accepted",
 			connectionId,
 			whatsappLink,
-			// Expose to the UI so it can show "Room is now full" messaging if needed.
 			listingFilled: capacityExhausted,
 		};
 	} catch (err) {
@@ -473,6 +387,7 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 };
 
 // ─── Get single interest request ─────────────────────────────────────────────
+// Both the sender and the listing poster can fetch detail. Third parties get 404.
 export const getInterestRequest = async (callerId, requestId) => {
 	const { rows } = await pool.query(
 		`SELECT
@@ -534,6 +449,7 @@ export const getInterestRequest = async (callerId, requestId) => {
 };
 
 // ─── Get interest requests for a listing (poster's view) ─────────────────────
+// Only the listing poster can call this. Returns keyset-paginated requests.
 export const getInterestRequestsForListing = async (posterId, listingId, filters) => {
 	const { rows: listingRows } = await pool.query(
 		`SELECT listing_id FROM listings
@@ -626,6 +542,7 @@ export const getInterestRequestsForListing = async (posterId, listingId, filters
 };
 
 // ─── Get my interest requests (student's view) ───────────────────────────────
+// Returns all requests the authenticated student has sent, keyset-paginated.
 export const getMyInterestRequests = async (studentId, filters) => {
 	const { status, cursorTime, cursorId, limit = 20 } = filters;
 
@@ -702,6 +619,8 @@ export const getMyInterestRequests = async (studentId, filters) => {
 };
 
 // ─── Expire pending requests for a listing ───────────────────────────────────
+// Bulk-expires all pending interest requests on a listing. Called inside
+// transactions when a listing is deactivated, deleted, or filled.
 export const expirePendingRequestsForListing = async (listingId, client = pool, excludeRequestId = null) => {
 	const params = [listingId];
 	let excludeClause = "";

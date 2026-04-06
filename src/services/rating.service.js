@@ -1,30 +1,4 @@
 // src/services/rating.service.js
-//
-// ─── FIXES IN THIS VERSION ────────────────────────────────────────────────────
-//
-// 1. SELF-RATING PREVENTION
-//    User ratings: WHERE EXISTS requires cross-party pairing so reviewer and
-//    reviewee must be the two different participants. Property ratings: the owner
-//    cannot rate their own property using their own connection.
-//
-// 2. DUPLICATE DETECTION AFTER rowCount === 0
-//    After the gated INSERT returns 0 rows, a targeted lookup checks for an
-//    existing (reviewer_id, connection_id, reviewee_id) row before throwing 409.
-//
-// 3. getRatingsForConnection RETURNS ARRAYS
-//    { myRatings: Rating[], theirRatings: Rating[] } so multiple ratings against
-//    the same connection are never silently dropped.
-//
-// 4. EMAIL LEAK FIXED IN PUBLIC READ ENDPOINTS
-//    pg_owner_profiles JOIN added; raw email never exposed.
-//
-// 5. SHARED NOTIFICATION QUEUE
-//    Local Queue setup replaced with the shared enqueueNotification helper.
-//
-// 6. OWNER_ID CAPTURED IN INSERT CTE (property ratings)
-//    The property rating INSERT uses a WITH gate AS (...) CTE that selects the
-//    property owner alongside the eligibility check. RETURNING includes the
-//    owner_id from that CTE, eliminating the redundant SELECT after the INSERT.
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
@@ -32,6 +6,15 @@ import { AppError } from "../middleware/errorHandler.js";
 import { enqueueNotification } from "../workers/notificationQueue.js";
 
 // ─── Submit rating ─────────────────────────────────────────────────────────────
+// Ratings require a confirmed connection between reviewer and reviewee.
+// The INSERT uses WHERE EXISTS to atomically verify eligibility, preventing
+// a rating without a confirmed interaction at the database level.
+//
+// ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING matches the
+// partial unique index idx_ratings_one_per_connection exactly. The original code
+// incorrectly appended "WHERE deleted_at IS NULL" to the ON CONFLICT clause,
+// which PostgreSQL does not support — conflict predicates must match the index
+// definition verbatim, which has no deleted_at predicate.
 export const submitRating = async (reviewerId, data) => {
 	const {
 		connectionId,
@@ -45,7 +28,7 @@ export const submitRating = async (reviewerId, data) => {
 		comment,
 	} = data;
 
-	// ── Step 1: Polymorphic reviewee existence check ──────────────────────────
+	// Step 1: polymorphic reviewee existence check before the gated INSERT.
 	if (revieweeType === "user") {
 		const { rows } = await pool.query(`SELECT 1 FROM users WHERE user_id = $1 AND deleted_at IS NULL`, [
 			revieweeId,
@@ -58,7 +41,9 @@ export const submitRating = async (reviewerId, data) => {
 		if (!rows.length) throw new AppError("Reviewee property not found", 404);
 	}
 
-	// ── Step 2: Atomic gating INSERT ──────────────────────────────────────────
+	// Step 2: atomic gated INSERT.
+	// WHERE EXISTS verifies: connection exists and is confirmed, caller is a
+	// party, and caller and reviewee are different parties (no self-rating).
 	let result;
 	if (revieweeType === "user") {
 		result = await pool.query(
@@ -78,8 +63,7 @@ export const submitRating = async (reviewerId, data) => {
              (counterpart_id = $1 AND initiator_id  = $4)
            )
        )
-       ON CONFLICT (reviewer_id, connection_id, reviewee_id)
-	   		WHERE deleted_at IS NULL DO NOTHING
+       ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING
        RETURNING rating_id, created_at`,
 			[
 				reviewerId,
@@ -95,15 +79,8 @@ export const submitRating = async (reviewerId, data) => {
 			],
 		);
 	} else {
-		// Property rating: capture the property's owner_id from the eligibility CTE
-		// so we can notify them without an extra round-trip query.
-		//
-		// WITH gate AS (...) selects owner_id from the connection/listing/property
-		// join that already performs all the eligibility checks. INSERT ... SELECT
-		// ... FROM gate means zero rows are inserted when the CTE is empty (same
-		// semantics as the previous WHERE EXISTS pattern). RETURNING includes
-		// (SELECT owner_id FROM gate) as a scalar subquery so the application
-		// receives owner_id alongside rating_id and created_at.
+		// Property path: the WITH gate CTE captures owner_id alongside eligibility
+		// so the notification can fire without a second query.
 		result = await pool.query(
 			`WITH gate AS (
          SELECT p.owner_id
@@ -126,10 +103,9 @@ export const submitRating = async (reviewerId, data) => {
           reliability_score, value_score, review_text)
        SELECT $1, $2, $3::reviewee_type_enum, $4, $5, $6, $7, $8, $9, $10
        FROM gate
-       ON CONFLICT (reviewer_id, connection_id, reviewee_id)
-	   		WHERE deleted_at IS NULL DO NOTHING
-   			RETURNING rating_id, created_at,
-   			(SELECT owner_id FROM gate) AS owner_id`,
+       ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING
+       RETURNING rating_id, created_at,
+         (SELECT owner_id FROM gate) AS owner_id`,
 			[
 				reviewerId,
 				connectionId,
@@ -145,7 +121,10 @@ export const submitRating = async (reviewerId, data) => {
 		);
 	}
 
-	// ── Step 3: Interpret rowCount ─────────────────────────────────────────────
+	// Step 3: interpret rowCount === 0.
+	// Zero rows means either: (a) the connection does not exist or caller is not
+	// a party → 404; (b) connection exists but is unconfirmed → 422;
+	// (c) ON CONFLICT fired (duplicate) → 409.
 	if (result.rowCount === 0) {
 		const { rows: connRows } = await pool.query(
 			`SELECT connection_id, confirmation_status
@@ -184,7 +163,7 @@ export const submitRating = async (reviewerId, data) => {
 
 	logger.info({ reviewerId, connectionId, revieweeType, revieweeId, ratingId, overallScore }, "Rating submitted");
 
-	// ── Step 4: Post-commit notification ──────────────────────────────────────
+	// Step 4: post-commit notification.
 	if (revieweeType === "user") {
 		enqueueNotification({
 			recipientId: revieweeId,
@@ -193,7 +172,6 @@ export const submitRating = async (reviewerId, data) => {
 			entityId: ratingId,
 		});
 	} else {
-		// owner_id was captured by the INSERT CTE RETURNING clause — no extra query.
 		const ownerId = result.rows[0].owner_id;
 		if (ownerId) {
 			enqueueNotification({
@@ -209,6 +187,8 @@ export const submitRating = async (reviewerId, data) => {
 };
 
 // ─── Get ratings for a connection ─────────────────────────────────────────────
+// Returns { myRatings: Rating[], theirRatings: Rating[] } for both parties.
+// Only the two connection parties can call this; third parties get 404.
 export const getRatingsForConnection = async (callerId, connectionId) => {
 	const { rows: connRows } = await pool.query(
 		`SELECT initiator_id, counterpart_id
@@ -269,6 +249,7 @@ export const getRatingsForConnection = async (callerId, connectionId) => {
 };
 
 // ─── Get public ratings for a user ────────────────────────────────────────────
+// No auth required. Returns paginated visible ratings received by the user.
 export const getPublicRatings = async (userId, filters) => {
 	const { cursorTime, cursorId, limit = 20 } = filters;
 
@@ -350,6 +331,8 @@ export const getPublicRatings = async (userId, filters) => {
 };
 
 // ─── Get my given ratings ──────────────────────────────────────────────────────
+// The authenticated user's full history of ratings they submitted.
+// Includes is_visible so reviewers can see their own hidden ratings.
 export const getMyGivenRatings = async (reviewerId, filters) => {
 	const { cursorTime, cursorId, limit = 20 } = filters;
 
@@ -458,6 +441,7 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
 };
 
 // ─── Get public ratings for a property ────────────────────────────────────────
+// No auth required. 404 if property does not exist.
 export const getPublicPropertyRatings = async (propertyId, filters) => {
 	const { rows: propRows } = await pool.query(
 		`SELECT 1 FROM properties WHERE property_id = $1 AND deleted_at IS NULL`,

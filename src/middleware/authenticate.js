@@ -6,19 +6,15 @@ import { AppError } from "./errorHandler.js";
 import { findUserById } from "../db/utils/auth.js";
 import { redis } from "../cache/client.js";
 import { pool } from "../db/client.js";
-import { casRefreshToken, parseTtlSeconds } from "../services/auth.service.js";
+import { casRefreshToken, parseTtlSeconds, verifyRefreshTokenPayload } from "../services/auth.service.js";
 
 const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
 const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
 const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
 
-// used in auth.controller.js — a cookie set with sameSite:'strict' must also be
-// cleared/replaced with sameSite:'strict'. Inconsistent options cause browsers to
-// treat them as different cookies, leaving the old one in place.
-//
-// Defined at module scope for the same reason as INACTIVE_STATUSES — allocated
-// once, reused on every silent refresh rather than on every request that doesn't
-// need it.
+// Cookie options are module-scope constants because a cookie set with a given
+// sameSite/secure configuration must be cleared or replaced with the exact same
+// flags — mismatched options cause browsers to treat them as different cookies.
 const ACCESS_COOKIE_OPTIONS = {
 	httpOnly: true,
 	secure: config.NODE_ENV === "production",
@@ -31,20 +27,12 @@ const REFRESH_COOKIE_OPTIONS = {
 	sameSite: "strict",
 	maxAge: REFRESH_TTL_SECONDS * 1000,
 };
-const REFRESH_TTL = REFRESH_TTL_SECONDS;
+
 const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
 
-//
-// Priority chain: cookie first, then Authorization header.
-//
-// Why this order? Cookies are the more secure transport — they are HttpOnly and
-// cannot be read or exfiltrated by JavaScript. If the request carries an access
-// token cookie, that is the browser client and we use the secure path. If the
-// cookie is absent but a Bearer header is present, that is the Android client
-// (or any API consumer) managing its own token lifecycle.
-//
-// Returns { token, source } where source is 'cookie' or 'header'.
-// Returns null if neither is present.
+// Extracts the access token from req.cookies.accessToken (priority) or the
+// Authorization: Bearer header. Returns { token, source } or null.
+// Cookie takes priority so browser clients always use the secure HttpOnly path.
 const extractToken = (req) => {
 	const cookieToken = req.cookies?.accessToken;
 	if (cookieToken) {
@@ -59,30 +47,25 @@ const extractToken = (req) => {
 	return null;
 };
 
+// Attempts a silent refresh when the access token cookie is expired.
+// Uses verifyRefreshTokenPayload (which migrates legacy tokens that lack a sid)
+// rather than raw jwt.verify, so users with pre-sid tokens are not forced to
+// re-login when their access token expires.
 //
-// Only attempted when:
-//   1. The access token came from a cookie (source === 'cookie')
-//   2. The access token is expired (not malformed — expired is recoverable)
-//   3. A refresh token cookie is present
-//   4. The refresh token is valid and matches the Redis-stored value
-//
-// On success: issues a new access token, sets it as a replacement cookie on the
-// outgoing response, and returns the userId from the validated refresh payload so
-// the middleware can load the user and continue the request normally.
-//
-// On failure: returns null. The middleware then falls through to a 401.
-// Failures here are not thrown — a silent-refresh failure means the session has
-// genuinely ended (both tokens expired or refresh token revoked) and a 401 is
-// the correct, expected outcome.
+// On success: issues a new access token and rotates the refresh token via CAS,
+// sets replacement cookies, and returns { userId, sid }.
+// On any failure: returns null — the caller will respond with 401.
 const attemptSilentRefresh = async (req, res) => {
 	const refreshToken = req.cookies?.refreshToken;
 	if (!refreshToken) return null;
 
 	let refreshPayload;
 	try {
-		refreshPayload = jwt.verify(refreshToken, config.JWT_REFRESH_SECRET);
+		// verifyRefreshTokenPayload handles legacy tokens (no sid) by migrating them
+		// to the per-session key scheme. Raw jwt.verify would reject those tokens,
+		// forcing a re-login unnecessarily.
+		refreshPayload = await verifyRefreshTokenPayload(refreshToken);
 	} catch {
-		// Expired or malformed refresh token — session is over, return null for 401
 		return null;
 	}
 
@@ -90,18 +73,13 @@ const attemptSilentRefresh = async (req, res) => {
 		return null;
 	}
 
+	// Verify the token is still stored in Redis (not revoked via logout/revokeSession).
 	const storedToken = await redis.get(refreshTokenKey(refreshPayload.userId, refreshPayload.sid));
 	if (!storedToken || storedToken !== refreshToken) {
-		// Token has been revoked (logout from another device) — return null for 401
 		return null;
 	}
 
-	// We sign a minimal payload here — the full user shape is loaded from the DB
-	// below in the main middleware body, just as it is for a normal non-expired request.
-	// This avoids any stale data from the refresh token payload being used as req.user.
-	//
-	// We need roles and email for the JWT payload. Load them fresh rather than
-	// trusting the refresh token payload which was issued up to 7 days ago.
+	// Load fresh user state — the refresh token payload can be up to 7 days old.
 	const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [
 		refreshPayload.userId,
 	]);
@@ -114,9 +92,7 @@ const attemptSilentRefresh = async (req, res) => {
 	if (INACTIVE_STATUSES.has(userRows[0].account_status)) return null;
 
 	const roles = roleRows.map((r) => r.role_name);
-	// Use numeric seconds for jwt.sign to match auth.service.js behaviour.
-	// jsonwebtoken interprets digit-only strings (e.g. "900") as milliseconds,
-	// so normalizing to numeric seconds prevents near-instant token expiry.
+
 	const newAccessToken = jwt.sign(
 		{ userId: refreshPayload.userId, email: userRows[0].email, roles, sid: refreshPayload.sid },
 		config.JWT_SECRET,
@@ -127,34 +103,29 @@ const attemptSilentRefresh = async (req, res) => {
 		config.JWT_REFRESH_SECRET,
 		{ expiresIn: REFRESH_TTL_SECONDS },
 	);
-	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL;
+	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL_SECONDS;
 
 	const rotated = await casRefreshToken(
 		refreshPayload.userId,
 		refreshPayload.sid,
 		refreshToken,
 		newRefreshToken,
-		REFRESH_TTL,
+		REFRESH_TTL_SECONDS,
 		expiryTimestamp,
 	);
 	if (!rotated) {
 		return null;
 	}
+
 	res.cookie("accessToken", newAccessToken, ACCESS_COOKIE_OPTIONS);
 	res.cookie("refreshToken", newRefreshToken, REFRESH_COOKIE_OPTIONS);
 
 	return { userId: refreshPayload.userId, sid: refreshPayload.sid };
 };
 
-//
 // Verifies the access token, loads the user from DB, and attaches req.user.
-//
-// Token source determines what happens on expiry:
-//   cookie source  → attempt silent refresh transparently (browser UX)
-//   header source  → return 401 immediately (Android handles refresh explicitly)
-//
-// Any failure — missing token, bad token, non-expired but invalid, user not
-// found, inactive account — results in a 401.
+// Cookie-source expired tokens trigger a silent refresh (browser UX).
+// Header-source expired tokens return 401 immediately (Android handles refresh explicitly).
 export const authenticate = async (req, res, next) => {
 	try {
 		const extracted = extractToken(req);
@@ -169,20 +140,13 @@ export const authenticate = async (req, res, next) => {
 		try {
 			payload = jwt.verify(token, config.JWT_SECRET);
 		} catch (err) {
-			// On expiry, only browser clients (cookie source) get a silent refresh attempt.
-			// Android (header source) receives a 401 and handles refresh itself.
 			if (err.name === "TokenExpiredError" && source === "cookie") {
 				const session = await attemptSilentRefresh(req, res);
 				if (!session?.userId) {
-					// Both tokens expired or refresh revoked — session is over
 					return next(new AppError("Session expired", 401));
 				}
-				// Silent refresh succeeded — reconstruct a minimal payload so the rest
-				// of the middleware can load the user from the DB normally.
 				payload = session;
 			} else {
-				// JsonWebTokenError (malformed token) or header-source expiry —
-				// propagate to global error handler for consistent 401 formatting.
 				return next(err);
 			}
 		}
@@ -196,8 +160,6 @@ export const authenticate = async (req, res, next) => {
 			return next(new AppError(`Account is ${user.account_status}`, 401));
 		}
 
-		// Attach req.user — shape used by every downstream middleware and handler.
-		// Unchanged from before this branch — all existing handlers continue to work.
 		req.user = {
 			userId: user.user_id,
 			sid: payload.sid ?? null,
