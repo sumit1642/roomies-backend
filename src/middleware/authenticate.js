@@ -138,7 +138,7 @@ const attemptSilentRefresh = async (req, res) => {
 		expiryTimestamp,
 	);
 	if (!rotated) {
-		throw new AppError("Refresh token is invalid or has been revoked", 401);
+		return null;
 	}
 	res.cookie("accessToken", newAccessToken, ACCESS_COOKIE_OPTIONS);
 	res.cookie("refreshToken", newRefreshToken, REFRESH_COOKIE_OPTIONS);
