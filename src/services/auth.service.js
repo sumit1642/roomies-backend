@@ -346,6 +346,22 @@ export const logoutCurrent = async (userId, incomingRefreshToken, authenticatedS
 	logger.info({ userId, sid: authenticatedSid }, "User logged out from current session");
 };
 
+export const logoutByRefreshToken = async (incomingRefreshToken) => {
+	const payload = _verifyRefreshTokenPayloadSync(incomingRefreshToken);
+	const { userId, sid } = payload;
+
+	const storedToken = await redis.get(refreshTokenKey(userId, sid));
+	if (!storedToken) {
+		throw new AppError("Session not found or already revoked", 401);
+	}
+	if (storedToken !== incomingRefreshToken) {
+		throw new AppError("Refresh token is invalid or has been superseded", 401);
+	}
+
+	await deleteSessionToken(userId, sid);
+	logger.info({ userId, sid }, "User logged out by refresh token");
+};
+
 export const logoutAll = async (userId) => {
 	const now = Math.floor(Date.now() / 1000);
 	const sessionsKey = userSessionsKey(userId);
