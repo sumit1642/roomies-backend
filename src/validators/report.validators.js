@@ -23,7 +23,7 @@ export const submitReportSchema = z.object({
 		reason: z.enum(["fake", "abusive", "conflict_of_interest", "other"], {
 			error: "reason must be one of: fake, abusive, conflict_of_interest, other",
 		}),
-		explanation: z.string().min(1).max(2000).optional(),
+		explanation: z.string().trim().min(1).max(2000).optional(),
 	}),
 });
 
