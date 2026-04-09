@@ -17,6 +17,7 @@
 
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
+import { publicRatingsLimiter } from "../middleware/rateLimiter.js";
 import { validate } from "../middleware/validate.js";
 import {
 	submitRatingSchema,
@@ -38,10 +39,16 @@ ratingRouter.get("/me/given", authenticate, validate(getMyGivenRatingsSchema), r
 // ─── Parameterised routes after all static routes ─────────────────────────────
 
 // Public — no authenticate middleware
-ratingRouter.get("/user/:userId", validate(getPublicRatingsSchema), ratingController.getPublicRatings);
+ratingRouter.get(
+	"/user/:userId",
+	publicRatingsLimiter,
+	validate(getPublicRatingsSchema),
+	ratingController.getPublicRatings,
+);
 
 ratingRouter.get(
 	"/property/:propertyId",
+	publicRatingsLimiter,
 	validate(getPublicPropertyRatingsSchema),
 	ratingController.getPublicPropertyRatings,
 );

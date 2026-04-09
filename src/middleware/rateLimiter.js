@@ -104,3 +104,20 @@ export const authLimiter = rateLimit({
 		message: "Too many requests — please wait 15 minutes before trying again",
 	},
 });
+
+// ─── Public rating reads — anti-enumeration / anti-scraping ────────────────
+// Applied on unauthenticated public endpoints under /ratings/user/:userId and
+// /ratings/property/:propertyId to reduce aggressive scraping while keeping
+// normal browsing traffic unaffected.
+export const publicRatingsLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 120,
+	standardHeaders: true,
+	legacyHeaders: false,
+	store: makeRedisStore("rl:ratings:public:"),
+	passOnStoreError: true,
+	message: {
+		status: "error",
+		message: "Too many rating lookup requests — please wait a few minutes before trying again",
+	},
+});
