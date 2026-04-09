@@ -35,7 +35,7 @@ export const validate = (schema) => (req, res, next) => {
 	// req.query may be a non-writable getter in Express 5, so we use
 	// Object.defineProperty to safely replace it with an own data property.
 	// Only do this when Zod actually produced a query shape (not undefined).
-	if (result.data.query !== undefined) {
+	if (result.data.query != null) {
 		Object.defineProperty(req, "query", {
 			value: result.data.query,
 			configurable: true,
