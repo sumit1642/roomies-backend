@@ -42,7 +42,7 @@ export const optionalAuthenticate = async (req, res, next) => {
 		req.user = {
 			userId: user.user_id,
 			email: user.email,
-			roles: user.roles,
+			roles: user.roles ?? [],
 			isEmailVerified: user.is_email_verified,
 			accountStatus: user.account_status,
 		};
