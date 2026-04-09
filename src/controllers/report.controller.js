@@ -6,6 +6,8 @@
 
 import * as reportService from "../services/report.service.js";
 
+const UUID_V1_TO_V5_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 // POST /api/v1/ratings/:ratingId/report
 // Any authenticated user who is a party to the underlying connection can report
 // a rating. The service enforces the party-membership check.
@@ -23,10 +25,22 @@ export const submitReport = async (req, res, next) => {
 export const getReportQueue = async (req, res, next) => {
 	try {
 		const { cursorTime, cursorId, limit } = req.query;
-		const parsedLimit = limit ? Number(limit) : undefined;
+
+		const parsedCursorTime =
+			typeof cursorTime === "string" ?
+				(() => {
+					const dt = new Date(cursorTime);
+					return Number.isNaN(dt.getTime()) ? undefined : dt;
+				})()
+			:	undefined;
+
+		const parsedCursorId =
+			typeof cursorId === "string" && UUID_V1_TO_V5_REGEX.test(cursorId) ? cursorId : undefined;
+
+		const parsedLimit = limit !== undefined ? Number(limit) : undefined;
 		const result = await reportService.getReportQueue({
-			cursorTime,
-			cursorId,
+			cursorTime: parsedCursorTime,
+			cursorId: parsedCursorId,
 			limit: Number.isNaN(parsedLimit) ? undefined : parsedLimit,
 		});
 		res.json({ status: "success", data: result });
