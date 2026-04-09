@@ -35,6 +35,8 @@ import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 
+const UUID_V1_TO_V5_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 // ─── Get notification feed ────────────────────────────────────────────────────
 //
 // Returns the authenticated user's paginated notification feed.
@@ -176,6 +178,12 @@ export const markRead = async (userId, { notificationIds, all }) => {
 
 	if (!Array.isArray(notificationIds) || notificationIds.length === 0) {
 		throw new AppError("notificationIds must be a non-empty array when all is not true", 400);
+	}
+
+	for (const id of notificationIds) {
+		if (typeof id !== "string" || !UUID_V1_TO_V5_REGEX.test(id)) {
+			throw new AppError("notificationIds must contain only valid UUID strings", 400);
+		}
 	}
 
 	// Selective mark-read. notificationIds is validated above (and by the Zod
