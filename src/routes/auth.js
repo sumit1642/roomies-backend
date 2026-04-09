@@ -36,9 +36,15 @@ authRouter.post("/logout", validate(logoutCurrentSchema), authController.logout)
 // valid access token is required to identify which session to revoke.
 authRouter.post("/logout/current", authenticate, validate(logoutCurrentSchema), authController.logout);
 
-authRouter.post("/logout/all", authenticate, authController.logoutAll);
-authRouter.get("/sessions", authenticate, validate(listSessionsSchema), authController.listSessions);
-authRouter.delete("/sessions/:sid", authenticate, validate(revokeSessionSchema), authController.revokeSession);
+authRouter.post("/logout/all", authLimiter, authenticate, authController.logoutAll);
+authRouter.get("/sessions", authLimiter, authenticate, validate(listSessionsSchema), authController.listSessions);
+authRouter.delete(
+	"/sessions/:sid",
+	authLimiter,
+	authenticate,
+	validate(revokeSessionSchema),
+	authController.revokeSession,
+);
 
 // refreshSchema now accepts an optional body — browser clients send no body and
 // carry the token in the HttpOnly cookie.
