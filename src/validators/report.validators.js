@@ -47,16 +47,15 @@ export const resolveReportSchema = z.object({
 	params: z.object({
 		reportId: z.uuid({ error: "Invalid report ID" }),
 	}),
-	body: z.object({
-		resolution: z.enum(["resolved_removed", "resolved_kept"], {
-			error: "resolution must be one of: resolved_removed, resolved_kept",
-		}),
-		adminNotes: z.string().min(1).max(1000).optional(),
-	}).refine(
-		(data) => data.resolution !== "resolved_removed" || Boolean(data.adminNotes?.trim()),
-		{
+	body: z
+		.object({
+			resolution: z.enum(["resolved_removed", "resolved_kept"], {
+				error: "resolution must be one of: resolved_removed, resolved_kept",
+			}),
+			adminNotes: z.string().trim().min(1).max(1000).optional(),
+		})
+		.refine((data) => data.resolution !== "resolved_removed" || Boolean(data.adminNotes?.trim()), {
 			message: "adminNotes is required when resolution is resolved_removed",
 			path: ["adminNotes"],
-		},
-	),
+		}),
 });
