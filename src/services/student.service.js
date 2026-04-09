@@ -39,11 +39,18 @@ export const getStudentProfile = async (requestingUserId, targetUserId) => {
 // can be returned — preventing PG owners or admin accounts from being exposed
 // through this endpoint even if their user_id is known.
 //
-// emailOnly: false — verified callers; returns email + whatsapp_phone (u.phone).
+// emailOnly: false — only honoured when requester is authorised; otherwise
+// forced to email-only.
 // emailOnly: true  — guests/unverified callers; returns email only.
 // The whatsapp_phone field is stripped at this boundary so it never reaches
 // the response serialiser for restricted callers.
-export const getStudentContactReveal = async (targetUserId, emailOnly = false) => {
+export const getStudentContactReveal = async (targetUserId, emailOnly = false, requestingUserId = null) => {
+	// Mirror the ownership-style sensitivity rule used in getStudentProfile:
+	// only the profile owner is authorised to see additional private contact
+	// data from this service boundary.
+	const isRequesterAuthorisedForFullContact = requestingUserId === targetUserId;
+	const effectiveEmailOnly = emailOnly || !isRequesterAuthorisedForFullContact;
+
 	const { rows } = await pool.query(
 		`SELECT
 			u.user_id,
@@ -63,7 +70,7 @@ export const getStudentContactReveal = async (targetUserId, emailOnly = false) =
 
 	const row = rows[0];
 
-	if (emailOnly) {
+	if (effectiveEmailOnly) {
 		return {
 			user_id: row.user_id,
 			full_name: row.full_name,

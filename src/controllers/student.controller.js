@@ -32,7 +32,11 @@ export const revealContact = async (req, res, next) => {
 			return next(new AppError("Contact reveal gate context is missing — internal configuration error", 500));
 		}
 		const emailOnly = req.contactReveal.emailOnly;
-		const contact = await studentService.getStudentContactReveal(req.params.userId, emailOnly);
+		const contact = await studentService.getStudentContactReveal(
+			req.params.userId,
+			emailOnly,
+			req.user?.userId ?? null,
+		);
 		res.json({ status: "success", data: contact });
 	} catch (err) {
 		next(err);
