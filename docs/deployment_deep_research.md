@@ -1,4 +1,13 @@
-# Deployment Plan
+# Deployment Plan (Research Notes, Archived)
+
+> ⚠️ **Historical research notes — not the source of truth.**
+>
+> This document contains earlier exploration and cost assumptions.
+> For current deployment decisions and execution steps, use:
+>
+> - `docs/Deployment.md` (canonical deployment plan)
+>
+> Last reviewed: **2026-04-09**
 
 This deployment plan uses Azure PaaS services (and Vercel for the frontend) to host the Roomies API and its data components. All resources live in a single **Resource Group** in the **Central India (Pune)** region【39†L1-L4】. We will organize Azure services by role: database, cache, storage, secrets, compute, and email. Budget is tight (₹800–900/month target), so we’ll use free tiers where possible and the smallest paid SKUs for critical parts. The initial deployment is manual (from the `main` branch), with GitHub Actions CI/CD to follow after testing. Below are the detailed components and steps.
 

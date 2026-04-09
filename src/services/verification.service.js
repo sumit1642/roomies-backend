@@ -14,8 +14,13 @@ import { AppError } from "../middleware/errorHandler.js";
 //   rollbackErr  — the error thrown by client.query("ROLLBACK")
 //   originalErr  — the error that triggered the rollback in the first place
 //   context      — plain object with { adminUserId, requestId } for log correlation
-const handleRollbackFailure = (rollbackErr, originalErr, { adminUserId, requestId }) => {
-	logger.error({ rollbackErr, originalErr, adminUserId, requestId }, "Rollback failed during verification operation");
+const handleRollbackFailure = (
+	rollbackErr,
+	originalErr,
+	context,
+	message = "Rollback failed during verification operation",
+) => {
+	logger.error({ rollbackErr, originalErr, ...context }, message);
 };
 
 // ─── Document submission ──────────────────────────────────────────────────────
