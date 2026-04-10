@@ -118,7 +118,7 @@ export const logoutAll = async (req, res, next) => {
 
 export const refresh = async (req, res, next) => {
 	try {
-		const incomingRefreshToken = req.body.refreshToken ?? req.cookies?.refreshToken;
+		const incomingRefreshToken = req.body?.refreshToken ?? req.cookies?.refreshToken;
 		if (!incomingRefreshToken) {
 			return next(new AppError("Refresh token is required", 401));
 		}
