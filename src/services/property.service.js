@@ -180,7 +180,7 @@ export const listProperties = async (ownerId, { cursorTime, cursorId, limit = 20
         FROM listings l
         WHERE l.property_id = p.property_id
           AND l.status = 'active'
-          AND l.expires_at > NOW()
+					AND (l.expires_at IS NULL OR l.expires_at > NOW())
           AND l.deleted_at IS NULL
       ) AS active_listing_count
     FROM properties p
