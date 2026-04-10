@@ -243,7 +243,8 @@ export const getConnection = async (callerId, connectionId) => {
 // Returns all connections the caller is a party to, newest first.
 // other_party_name uses only display names; email is never exposed as a fallback.
 export const getMyConnections = async (userId, filters) => {
-	const { confirmationStatus, connectionType, cursorTime, cursorId, limit = 20 } = filters;
+	const { confirmationStatus, connectionType, cursorTime, cursorId, limit: rawLimit = 20 } = filters;
+	const limit = Math.min(Math.max(1, rawLimit), 100); // Cap between 1 and 100
 
 	const clauses = [`(c.initiator_id = $1 OR c.counterpart_id = $1)`, `c.deleted_at IS NULL`];
 	const params = [userId];
