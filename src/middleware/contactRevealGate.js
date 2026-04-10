@@ -62,8 +62,38 @@ end
 return count
 `;
 
+let warnedMissingTrustProxy = false;
+
+// anonFingerprint depends on req.ip for client identity. In Express, req.ip
+// reflects the real client IP behind a reverse proxy only when
+// req.app.get('trust proxy') is configured. If an X-Forwarded-For header is
+// present while trust proxy is disabled, we log a warning and defensively
+// fall back to the first forwarded IP for fingerprinting.
 const anonFingerprint = (req) => {
-	const ip = req.ip ?? "unknown-ip";
+	const trustProxy = req.app?.get?.("trust proxy");
+	const xForwardedFor = req.headers?.["x-forwarded-for"];
+	const trustProxyEnabled = Boolean(trustProxy);
+
+	let ip = req.ip ?? "unknown-ip";
+	if (!trustProxyEnabled && typeof xForwardedFor === "string" && xForwardedFor.trim()) {
+		if (!warnedMissingTrustProxy) {
+			warnedMissingTrustProxy = true;
+			logger.warn(
+				{
+					trustProxy,
+					reqIp: req.ip,
+					xForwardedFor,
+				},
+				"contactRevealGate: X-Forwarded-For present but req.app.get('trust proxy') is disabled; anonFingerprint will use forwarded fallback IP",
+			);
+		}
+
+		const forwardedIp = xForwardedFor.split(",")[0]?.trim();
+		if (forwardedIp) {
+			ip = forwardedIp;
+		}
+	}
+
 	const ua = req.get("user-agent") ?? "unknown-ua";
 	return crypto.createHash("sha256").update(`${ip}|${ua}`).digest("hex");
 };
