@@ -127,7 +127,7 @@ export const contactRevealGate = async (req, res, next) => {
 				);
 			}
 
-			logger.info(
+			logger.debug(
 				{
 					event: "guest_contact_reveal_attempt",
 					fingerprintHash: fingerprint,
