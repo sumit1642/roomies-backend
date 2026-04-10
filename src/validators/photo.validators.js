@@ -56,7 +56,7 @@ export const reorderPhotosSchema = z.object({
 					displayOrder: z.coerce.number().int().min(0),
 				}),
 			)
-			.min(1, { error: "photos array must contain at least one entry" })
+			.min(1, { message: "photos array must contain at least one entry" })
 			.superRefine((photos, ctx) => {
 				const seenPhotoIds = new Map();
 				const seenDisplayOrders = new Map();
