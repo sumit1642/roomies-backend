@@ -30,12 +30,19 @@ const JOB_OPTIONS = {
 };
 
 export const enqueueNotification = (payload) => {
-	getQueue(NOTIFICATION_QUEUE_NAME)
-		.add("send-notification", payload, JOB_OPTIONS)
-		.catch((err) => {
-			logger.error(
-				{ err, type: payload?.type, entityType: payload?.entityType, entityId: payload?.entityId },
-				"Failed to enqueue notification"
-			);
-		});
+	try {
+		getQueue(NOTIFICATION_QUEUE_NAME)
+			.add("send-notification", payload, JOB_OPTIONS)
+			.catch((err) => {
+				logger.error(
+					{ err, type: payload?.type, entityType: payload?.entityType, entityId: payload?.entityId },
+					"Failed to enqueue notification"
+				);
+			});
+	} catch (err) {
+		logger.error(
+			{ err, type: payload?.type, entityType: payload?.entityType, entityId: payload?.entityId },
+			"Failed to enqueue notification"
+		);
+	}
 };
