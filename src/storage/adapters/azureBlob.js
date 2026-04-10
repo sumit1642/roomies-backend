@@ -103,7 +103,8 @@ export class AzureBlobAdapter {
 			const parsed = new URL(url);
 			// Reconstruct origin + pathname — drop search and hash entirely.
 			pathOnlyUrl = `${parsed.origin}${parsed.pathname}`;
-		} catch {
+		} catch (err) {
+			logger.warn({ err, url }, "AzureBlobAdapter: failed to parse delete URL; falling back to raw string");
 			// If url is somehow not a valid URL (e.g. a relative path in tests),
 			// fall through with the original string; the containerPrefix check below
 			// will handle it gracefully.
