@@ -50,6 +50,12 @@ export class AzureBlobAdapter {
 	// the JS-side promise). The timer is cleared in a finally block so it doesn't
 	// keep the event loop alive if the upload finishes before the deadline.
 	async upload(buffer, listingId, filename) {
+		if (!listingId || typeof listingId !== "string") {
+			throw new AppError("Invalid listingId for upload", 400);
+		}
+		if (!filename || typeof filename !== "string" || filename.includes("/") || filename.includes("\\")) {
+			throw new AppError("Invalid filename for upload", 400);
+		}
 		const blobPath = `listings/${listingId}/${filename}`;
 		const blockBlobClient = this.container.getBlockBlobClient(blobPath);
 
