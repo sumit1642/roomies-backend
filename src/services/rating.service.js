@@ -248,6 +248,31 @@ export const getRatingsForConnection = async (callerId, connectionId) => {
 	return { myRatings, theirRatings };
 };
 
+const buildCursorClause = (cursorTime, cursorId, paramIndex) => {
+	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
+	if (!hasCursor) {
+		return { clause: null, params: [], nextIndex: paramIndex };
+	}
+
+	return {
+		clause: `(r.created_at < $${paramIndex} OR (r.created_at = $${paramIndex} AND r.rating_id > $${paramIndex + 1}::uuid))`,
+		params: [cursorTime, cursorId],
+		nextIndex: paramIndex + 2,
+	};
+};
+
+const buildNextCursor = (fetchedRows, limit) => {
+	if (fetchedRows.length <= limit) {
+		return null;
+	}
+
+	const lastVisibleRow = fetchedRows[limit - 1];
+	return {
+		cursorTime: lastVisibleRow.created_at.toISOString(),
+		cursorId: lastVisibleRow.rating_id,
+	};
+};
+
 // ─── Get public ratings for a user ────────────────────────────────────────────
 // No auth required. Returns paginated visible ratings received by the user.
 export const getPublicRatings = async (userId, filters) => {
@@ -260,17 +285,21 @@ export const getPublicRatings = async (userId, filters) => {
 		`r.deleted_at    IS NULL`,
 	];
 	const params = [userId];
-	let p = 2;
+	let paramIndex = 2;
 
-	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
-	if (hasCursor) {
-		clauses.push(`(r.created_at < $${p} OR (r.created_at = $${p} AND r.rating_id > $${p + 1}::uuid))`);
-		params.push(cursorTime, cursorId);
-		p += 2;
+	const {
+		clause: cursorClause,
+		params: cursorParams,
+		nextIndex,
+	} = buildCursorClause(cursorTime, cursorId, paramIndex);
+	if (cursorClause) {
+		clauses.push(cursorClause);
+		params.push(...cursorParams);
 	}
+	paramIndex = nextIndex;
 
 	params.push(limit + 1);
-	const limitParam = p;
+	const limitParam = paramIndex;
 
 	const { rows } = await pool.query(
 		`SELECT
@@ -300,16 +329,8 @@ export const getPublicRatings = async (userId, filters) => {
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].rating_id,
-			}
-		:	null;
+	const items = rows.slice(0, limit);
+	const nextCursor = buildNextCursor(rows, limit);
 
 	return {
 		items: items.map((row) => ({
@@ -338,17 +359,21 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
 
 	const clauses = [`r.reviewer_id = $1`, `r.deleted_at  IS NULL`];
 	const params = [reviewerId];
-	let p = 2;
+	let paramIndex = 2;
 
-	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
-	if (hasCursor) {
-		clauses.push(`(r.created_at < $${p} OR (r.created_at = $${p} AND r.rating_id > $${p + 1}::uuid))`);
-		params.push(cursorTime, cursorId);
-		p += 2;
+	const {
+		clause: cursorClause,
+		params: cursorParams,
+		nextIndex,
+	} = buildCursorClause(cursorTime, cursorId, paramIndex);
+	if (cursorClause) {
+		clauses.push(cursorClause);
+		params.push(...cursorParams);
 	}
+	paramIndex = nextIndex;
 
 	params.push(limit + 1);
-	const limitParam = p;
+	const limitParam = paramIndex;
 
 	const { rows } = await pool.query(
 		`SELECT
@@ -405,16 +430,8 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].rating_id,
-			}
-		:	null;
+	const items = rows.slice(0, limit);
+	const nextCursor = buildNextCursor(rows, limit);
 
 	return {
 		items: items.map((row) => ({
@@ -458,17 +475,21 @@ export const getPublicPropertyRatings = async (propertyId, filters) => {
 		`r.deleted_at    IS NULL`,
 	];
 	const params = [propertyId];
-	let p = 2;
+	let paramIndex = 2;
 
-	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
-	if (hasCursor) {
-		clauses.push(`(r.created_at < $${p} OR (r.created_at = $${p} AND r.rating_id > $${p + 1}::uuid))`);
-		params.push(cursorTime, cursorId);
-		p += 2;
+	const {
+		clause: cursorClause,
+		params: cursorParams,
+		nextIndex,
+	} = buildCursorClause(cursorTime, cursorId, paramIndex);
+	if (cursorClause) {
+		clauses.push(cursorClause);
+		params.push(...cursorParams);
 	}
+	paramIndex = nextIndex;
 
 	params.push(limit + 1);
-	const limitParam = p;
+	const limitParam = paramIndex;
 
 	const { rows } = await pool.query(
 		`SELECT
@@ -498,16 +519,8 @@ export const getPublicPropertyRatings = async (propertyId, filters) => {
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].rating_id,
-			}
-		:	null;
+	const items = rows.slice(0, limit);
+	const nextCursor = buildNextCursor(rows, limit);
 
 	return {
 		items: items.map((row) => ({
