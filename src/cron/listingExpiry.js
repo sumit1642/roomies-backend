@@ -47,7 +47,8 @@ const runListingExpiry = async () => {
 		// interest-request cleanup and notifications below — no second query needed.
 		const { rows: expiredRows } = await client.query(
 			`UPDATE listings
-       SET status = 'expired'::listing_status_enum
+			 SET status = 'expired'::listing_status_enum,
+					 updated_at = NOW()
        WHERE status     = 'active'
          AND expires_at < NOW()
          AND deleted_at IS NULL
