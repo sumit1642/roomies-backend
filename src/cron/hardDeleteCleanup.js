@@ -157,10 +157,11 @@ const runHardDeleteCleanup = async () => {
 	const startedAt = Date.now();
 	logger.info({ retentionDays: RETENTION_DAYS }, "cron:hardDeleteCleanup — starting run");
 
-	const client = await pool.connect();
+	let client;
 	const results = {};
 
 	try {
+		client = await pool.connect();
 		await client.query("BEGIN");
 
 		// The cutoff timestamp is computed entirely inside Postgres using a
@@ -300,17 +301,21 @@ const runHardDeleteCleanup = async () => {
 			);
 		}
 	} catch (err) {
-		try {
-			await client.query("ROLLBACK");
-		} catch (rollbackErr) {
-			logger.error({ rollbackErr }, "cron:hardDeleteCleanup — rollback failed");
+		if (client) {
+			try {
+				await client.query("ROLLBACK");
+			} catch (rollbackErr) {
+				logger.error({ rollbackErr }, "cron:hardDeleteCleanup — rollback failed");
+			}
 		}
 		logger.error(
 			{ err, retentionDays: RETENTION_DAYS, durationMs: Date.now() - startedAt },
 			"cron:hardDeleteCleanup — run failed",
 		);
 	} finally {
-		client.release();
+		if (client) {
+			client.release();
+		}
 	}
 };
 
