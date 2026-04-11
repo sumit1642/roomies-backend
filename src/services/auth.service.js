@@ -52,6 +52,7 @@ const issueRefreshToken = (userId, sid) =>
 const issueSessionId = () => crypto.randomUUID();
 
 const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
+const legacyRefreshKey = (userId) => `refreshToken:${userId}`;
 const userSessionsKey = (userId) => `userSessions:${userId}`;
 
 export const parseTtlSeconds_EXPORTED = parseTtlSeconds;
@@ -110,7 +111,7 @@ export const casRefreshToken = async (
 //
 // RACE WINDOW (legacy path only — acceptable by design):
 // There is a TOCTOU gap between reading legacyToken via
-//   redis.get(legacyKey)        where legacyKey = userSessionsKey(userId)
+//   redis.get(legacyRefreshKey(userId))
 // and the subsequent MULTI/EXEC that writes the new per-session key, removes
 // the old legacyKey, and rotates incomingRefreshToken to newRefreshToken.
 // A concurrent request with the same incomingRefreshToken could also read
@@ -147,8 +148,32 @@ export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 		"verifyRefreshTokenPayload: legacy token without sid — attempting migration",
 	);
 
-	const legacyKey = userSessionsKey(payload.userId);
-	const legacyToken = await redis.get(legacyKey).catch(() => null);
+	const legacyCandidates = [legacyRefreshKey(payload.userId), userSessionsKey(payload.userId)];
+	let legacyKey;
+	let legacyToken = null;
+
+	for (const candidateKey of legacyCandidates) {
+		const candidateType = await redis.type(candidateKey).catch(() => "none");
+
+		if (candidateType === "string") {
+			const token = await redis.get(candidateKey).catch(() => null);
+			if (token) {
+				legacyKey = candidateKey;
+				legacyToken = token;
+				break;
+			}
+			continue;
+		}
+
+		if (candidateType === "zset") {
+			const members = await redis.zRange(candidateKey, 0, -1).catch(() => []);
+			if (members.length === 1) {
+				legacyKey = candidateKey;
+				legacyToken = members[0];
+				break;
+			}
+		}
+	}
 
 	if (!legacyToken || legacyToken !== incomingRefreshToken) {
 		throw new AppError("Refresh token is invalid or has been revoked", 401);
@@ -160,7 +185,9 @@ export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 	const multi = redis.multi();
 	multi.setEx(refreshTokenKey(payload.userId, newSid), REFRESH_TTL_SECONDS, incomingRefreshToken);
 	multi.zAdd(userSessionsKey(payload.userId), { score: expiryTimestamp, value: newSid });
-	multi.del(legacyKey);
+	if (legacyKey) {
+		multi.del(legacyKey);
+	}
 	await multi.exec();
 
 	logger.info(
