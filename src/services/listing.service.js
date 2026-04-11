@@ -707,6 +707,7 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
          AND l.posted_by  = $3
          AND l.status     = $4
          AND l.deleted_at IS NULL
+				 AND ($1 <> 'active' OR l.expires_at > NOW())
          AND (
            $1 <> 'active'
            OR l.property_id IS NULL
@@ -722,7 +723,32 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 		);
 
 		if (!updatedRows.length) {
-			throw new AppError("Listing status has already changed — please refresh", 409);
+			const { rows: currentRows } = await client.query(
+				`SELECT status, expires_at
+         FROM listings
+         WHERE listing_id = $1
+           AND posted_by  = $2
+           AND deleted_at IS NULL`,
+				[listingId, posterId],
+			);
+
+			if (!currentRows.length) {
+				throw new AppError("Listing not found", 404);
+			}
+
+			const currentRow = currentRows[0];
+			const isNowExpired =
+				currentRow.expires_at ? new Date(currentRow.expires_at).getTime() <= Date.now() : false;
+
+			if (newStatus === "active" && isNowExpired) {
+				throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
+			}
+
+			if (currentRow.status !== currentStatus) {
+				throw new AppError("Listing status has already changed — please refresh", 409);
+			}
+
+			throw new AppError("Listing status update could not be applied — please refresh", 409);
 		}
 
 		if (deactivating) {
