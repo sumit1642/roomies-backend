@@ -62,6 +62,7 @@ const start = async () => {
 			isShuttingDown = true;
 
 			logger.info(`${signal} received — shutting down gracefully`);
+			let serverCloseFailed = false;
 
 			setTimeout(() => {
 				logger.fatal("Shutdown timeout exceeded — forcing exit");
@@ -97,8 +98,8 @@ const start = async () => {
 				await serverClosePromise;
 				logger.info("HTTP server closed");
 			} catch (err) {
-				logger.fatal({ err }, "Error closing HTTP server");
-				process.exit(1);
+				serverCloseFailed = true;
+				logger.error({ err }, "Error closing HTTP server — continuing shutdown cleanup");
 			}
 
 			// Step 4: Close BullMQ workers (drain in-flight jobs, then disconnect).
@@ -145,7 +146,7 @@ const start = async () => {
 			}
 
 			logger.info("Shutdown complete");
-			process.exit(0);
+			process.exit(serverCloseFailed ? 1 : 0);
 		};
 
 		process.on("SIGINT", shutdown("SIGINT"));
