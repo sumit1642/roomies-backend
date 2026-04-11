@@ -466,7 +466,8 @@ export const getInterestRequestsForListing = async (posterId, listingId, filters
 		throw new AppError("You do not own this listing", 403);
 	}
 
-	const { status, cursorTime, cursorId, limit = 20 } = filters;
+	const { status, cursorTime, cursorId, limit: rawLimit = 20 } = filters;
+	const limit = Math.min(Math.max(1, rawLimit), 100);
 
 	const clauses = [`ir.listing_id = $1`, `ir.deleted_at IS NULL`];
 	const params = [listingId];
