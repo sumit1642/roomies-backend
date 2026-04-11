@@ -127,7 +127,12 @@ const start = async () => {
 
 			// Step 6: Close the dedicated rate-limit Redis client. Without this the
 			// socket stays open and Node will not exit cleanly.
-			await closeRateLimitRedisClient();
+			try {
+				await closeRateLimitRedisClient();
+				logger.info("Rate-limit Redis client closed");
+			} catch (rateLimitRedisErr) {
+				logger.error({ err: rateLimitRedisErr }, "Error closing rate-limit Redis client");
+			}
 
 			// Step 7: Close the PostgreSQL pool.
 			try {
