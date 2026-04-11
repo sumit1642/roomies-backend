@@ -19,7 +19,7 @@
 // transaction so the DB is always consistent: no pending request points at
 // an expired listing after this job runs.
 //
-// Notification: after the transaction commits we enqueue listing_expiring
+// Notification: after the transaction commits we enqueue listing_expired
 // notifications for the affected posters. Using the shared enqueueNotification
 // helper means a Redis failure never rolls back the DB state change.
 
@@ -85,7 +85,7 @@ const runListingExpiry = async () => {
 			for (const row of expiredRows) {
 				enqueueNotification({
 					recipientId: row.posted_by,
-					type: "listing_expiring", // closest available type for "has now expired"
+					type: "listing_expired",
 					entityType: "listing",
 					entityId: row.listing_id,
 				});

@@ -80,8 +80,10 @@ const NOTIFICATION_MESSAGES = {
 	// ── ACTIVE: fired from rating.service.js ──────────────────────────────────
 	rating_received: "You received a new rating",
 
-	// ── ACTIVE: fired from cron/listingExpiry.js and cron/expiryWarning.js ─────
+	// ── ACTIVE: fired from cron/expiryWarning.js ────────────────────────────────
 	listing_expiring: "One of your listings is expiring soon",
+	// ── ACTIVE: fired from cron/listingExpiry.js ────────────────────────────────
+	listing_expired: "One of your listings has expired",
 
 	// ── ACTIVE: fired from interest.service.js when a listing becomes filled ───
 	// Emitted post-commit in _acceptInterestRequest when capacity is exhausted.
