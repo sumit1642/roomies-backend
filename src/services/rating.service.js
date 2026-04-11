@@ -28,6 +28,10 @@ export const submitRating = async (reviewerId, data) => {
 		comment,
 	} = data;
 
+	if (revieweeType !== "user" && revieweeType !== "property") {
+		throw new AppError("Invalid revieweeType: must be 'user' or 'property'", 400);
+	}
+
 	// Step 1: polymorphic reviewee existence check before the gated INSERT.
 	if (revieweeType === "user") {
 		const { rows } = await pool.query(`SELECT 1 FROM users WHERE user_id = $1 AND deleted_at IS NULL`, [
