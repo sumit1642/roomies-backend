@@ -202,6 +202,7 @@ CREATE TYPE notification_type_enum AS ENUM (
     'connection_requested',
     'rating_received',
     'listing_expiring',
+    'listing_expired',
     'listing_filled',
     'verification_approved',
     'verification_rejected',
@@ -373,6 +374,7 @@ is_phone_verified BOOLEAN NOT NULL DEFAULT FALSE,
 
 -- Denormalized rating aggregates updated by the update_rating_aggregates
 -- trigger in Zone 4. Never written by application code directly.
+
 average_rating    NUMERIC(3, 2)       NOT NULL DEFAULT 0.00,
     rating_count      INTEGER             NOT NULL DEFAULT 0,
 
@@ -457,6 +459,7 @@ user_id UUID NOT NULL UNIQUE REFERENCES users (user_id) ON DELETE RESTRICT,
 -- ON DELETE SET NULL: if an institution is soft-deleted and eventually hard-
 -- deleted, we null out this reference rather than cascading the delete to
 -- the student's profile. Historical profiles survive institution removal.
+
 institution_id      UUID        REFERENCES institutions (institution_id) ON DELETE SET NULL,
 
     full_name           VARCHAR(255) NOT NULL,
@@ -505,6 +508,7 @@ CREATE OR REPLACE TRIGGER trg_student_profiles_updated_at
 -- operations on properties and listings.
 -- -----------------------------------------------------------------------------
 
+
 CREATE TABLE IF NOT EXISTS pg_owner_profiles
 (
     profile_id           UUID                     PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -518,6 +522,7 @@ CREATE TABLE IF NOT EXISTS pg_owner_profiles
 -- from the personal phone stored in users so PG owners control what is
 -- publicly visible to students. Used to build the WhatsApp deep-link
 -- (wa.me/91{phone}) returned when an interest request is accepted.
+
 business_phone       VARCHAR(20),
     operating_since      SMALLINT,
 
@@ -573,6 +578,7 @@ preference_key VARCHAR(100) NOT NULL,
 
 -- Example values: 'non_smoker', 'vegetarian', 'night_owl', 'early_bird',
 --                 'okay', 'not_okay', '3' (for a 1-5 scale)
+
 preference_value VARCHAR(100) NOT NULL,
 
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -673,6 +679,7 @@ CREATE TABLE IF NOT EXISTS amenities
 -- Stores a string like 'wifi' that maps to a Lucide React icon component
 -- on the frontend. Keeping icon names in the DB means the frontend never
 -- needs a hardcoded icon-name map — it reads the icon name from the API.
+
 icon_name  VARCHAR(100),
 
     created_at TIMESTAMPTZ           NOT NULL DEFAULT NOW(),
@@ -700,6 +707,7 @@ CREATE OR REPLACE TRIGGER trg_amenities_updated_at
 -- by the update_rating_aggregates trigger in Zone 4. They are never written
 -- directly by application code.
 -- -----------------------------------------------------------------------------
+
 
 CREATE TABLE IF NOT EXISTS properties
 (
@@ -731,6 +739,7 @@ status property_status_enum NOT NULL DEFAULT 'active',
 
 -- Denormalized rating aggregates. Never written by application code —
 -- updated automatically by update_rating_aggregates trigger.
+
 average_rating NUMERIC(3, 2)      NOT NULL DEFAULT 0.00,
     rating_count   INTEGER            NOT NULL DEFAULT 0,
 
@@ -1088,6 +1097,7 @@ sender_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
 listing_id UUID NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
 
 -- Optional intro message from the student to the poster.
+
 message    TEXT,
 
     status     request_status_enum NOT NULL DEFAULT 'pending',
@@ -1171,6 +1181,7 @@ start_date DATE, end_date DATE,
 -- Each party independently flips their own boolean via confirmConnection().
 -- When both are TRUE, confirmation_status is updated to 'confirmed' in the
 -- same atomic UPDATE statement.
+
 initiator_confirmed   BOOLEAN                  NOT NULL DEFAULT FALSE,
     counterpart_confirmed BOOLEAN                  NOT NULL DEFAULT FALSE,
 
@@ -1264,6 +1275,7 @@ entity_type VARCHAR(50), entity_id UUID,
 message TEXT,
 
 -- BullMQ job ID used to make worker retries idempotent via ON CONFLICT DO NOTHING.
+
 idempotency_key   VARCHAR(100) UNIQUE,
 
     is_read           BOOLEAN                   NOT NULL DEFAULT FALSE,
@@ -1352,6 +1364,7 @@ review_text TEXT,
 -- Controls visibility for admin moderation. When FALSE, the rating does not
 -- appear in public feeds and is excluded from the average_rating cache.
 -- The row is preserved for audit history and report cross-references.
+
 is_visible          BOOLEAN           NOT NULL DEFAULT TRUE,
 
     created_at          TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
