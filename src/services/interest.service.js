@@ -289,7 +289,7 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 
 		const connectionId = connRows[0].connection_id;
 
-		const newOccupantCount = ir.current_occupants + 1;
+		const newOccupantCount = (ir.current_occupants ?? 0) + 1;
 		const capacityExhausted = newOccupantCount >= ir.total_capacity;
 
 		if (capacityExhausted) {
