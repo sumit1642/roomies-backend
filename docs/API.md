@@ -1,57 +1,63 @@
-# Roomies — API Reference
+# Roomies API Reference
 
-**Base URL:** `https://your-domain.com/api/v1` (production) · `http://localhost:3000/api/v1` (local dev)
+`docs/API.md` is the API front door. The detailed endpoint-by-endpoint documentation lives in `docs/api/`.
 
-**All endpoints return JSON.** Successful responses follow `{ "status": "success", "data": { ... } }`. Error responses follow `{ "status": "error", "message": "..." }`.
+## Base URLs
 
----
+- Local development: `http://localhost:3000/api/v1`
+- Production: `https://<your-domain-or-app-service-host>/api/v1`
 
-## Table of Contents
+All endpoints return JSON. File upload endpoints accept `multipart/form-data` requests but still return JSON responses.
 
-1. [Authentication & Transport](#1-authentication--transport)
-2. [Auth Endpoints](#2-auth-endpoints)
-3. [Student Profiles](#3-student-profiles)
-4. [PG Owner Profiles](#4-pg-owner-profiles)
-5. [Contact Reveal](#5-contact-reveal)
-6. [Admin — Verification](#6-admin--verification)
-7. [Properties](#7-properties)
-8. [Listings](#8-listings)
-9. [Listing Photos](#9-listing-photos)
-10. [Listing Preferences](#10-listing-preferences)
-11. [Saved Listings](#11-saved-listings)
-12. [Interest Requests](#12-interest-requests)
-13. [Connections](#13-connections)
-14. [Notifications](#14-notifications)
-15. [Ratings](#15-ratings)
-16. [Reports](#16-reports)
-17. [Admin — Moderation](#17-admin--moderation)
-18. [Health Check](#18-health-check)
-19. [Pagination](#19-pagination)
-20. [Error Reference](#20-error-reference)
+## Transport Modes
 
----
+Roomies supports two auth transports at the same time.
 
-## 1. Authentication & Transport
+### Cookie Mode
 
-### Token Delivery
+Intended for browser clients.
 
-Every auth response (register, login, refresh, OAuth) delivers tokens in two places simultaneously:
+- Auth endpoints set `accessToken` and `refreshToken` as `HttpOnly` cookies.
+- Browser responses receive a safe JSON body that includes session metadata and user identity, but not raw token strings.
+- The browser should rely on cookies instead of manually storing bearer tokens.
 
-**HttpOnly cookies** (for browser clients):
-- `accessToken` — short-lived (default 15 min), `httpOnly`, `secure` in production, `sameSite: strict`
-- `refreshToken` — long-lived (default 7 days), same flags
+Typical auth success body in cookie mode:
 
-**JSON response body** (for mobile/API clients):
 ```json
 {
   "status": "success",
   "data": {
-    "accessToken": "eyJ...",
-    "refreshToken": "eyJ...",
-    "sid": "uuid-of-session",
     "user": {
-      "userId": "uuid",
-      "email": "student@iitb.ac.in",
+      "userId": "11111111-1111-4111-8111-111111111111",
+      "email": "priya@iitb.ac.in",
+      "roles": ["student"],
+      "isEmailVerified": true
+    },
+    "sid": "22222222-2222-4222-8222-222222222222"
+  }
+}
+```
+
+### Bearer Mode
+
+Intended for Android, mobile, and non-browser API clients.
+
+- Send `X-Client-Transport: bearer` on auth endpoints.
+- Send `Authorization: Bearer <access-token>` on protected endpoints.
+- Auth responses include raw `accessToken` and `refreshToken` strings in the JSON body.
+
+Typical auth success body in bearer mode:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "sid": "22222222-2222-4222-8222-222222222222",
+    "user": {
+      "userId": "11111111-1111-4111-8111-111111111111",
+      "email": "priya@iitb.ac.in",
       "roles": ["student"],
       "isEmailVerified": true
     }
@@ -59,205 +65,120 @@ Every auth response (register, login, refresh, OAuth) delivers tokens in two pla
 }
 ```
 
-Browser clients receive a **safe body** (no raw token strings) unless the `X-Client-Transport: bearer` header is sent. Android and other non-browser clients should send this header to receive tokens in the body.
+## Global Auth Rules
 
-### Sending the Access Token
+- Protected endpoints accept cookie auth and bearer auth unless a feature doc says otherwise.
+- Silent refresh happens only when the expired access token came from the `accessToken` cookie.
+- Expired bearer tokens do not silently refresh. They return `401`.
+- Users may have multiple roles. The `roles` array in the auth payload is authoritative.
 
-**Browser:** Cookies are sent automatically — no extra code needed.
+## Common Response Envelopes
 
-**Android / API clients:** Include the `Authorization` header:
-```
-Authorization: Bearer eyJ...
-```
+Success with data:
 
-### Silent Refresh (Browser Only)
-
-When the access token cookie expires, the `authenticate` middleware automatically attempts a silent refresh using the refresh token cookie. The browser never sees a 401 — the new access token cookie is set transparently on the next request. This only works for cookie-sourced tokens. A Bearer header with an expired token always returns 401 immediately.
-
-### Roles
-
-Users can hold multiple roles. The `roles` array in the token payload contains all roles for the user: `"student"`, `"pg_owner"`, or `"admin"`. A user who is both a student and a PG owner will have both in their array.
-
----
-
-## 2. Auth Endpoints
-
-### POST /auth/register
-
-Register a new account.
-
-**No auth required.**
-
-**Request body:**
-```json
-{
-  "email": "priya@iitb.ac.in",
-  "password": "mypassword1",
-  "role": "student",
-  "fullName": "Priya Sharma",
-  "businessName": "Sunrise PG"
-}
-```
-
-| Field | Type | Required | Notes |
-|-------|------|----------|-------|
-| `email` | string | ✅ | Valid email format |
-| `password` | string | ✅ | Min 8 chars, at least one letter and one digit |
-| `role` | string | ✅ | `"student"` or `"pg_owner"` |
-| `fullName` | string | ✅ | Min 2 chars |
-| `businessName` | string | ✅ if `role = "pg_owner"` | Min 2 chars |
-
-**Response:** `201` with token payload (see Section 1).
-
-Students whose email domain matches a registered institution are automatically verified (`isEmailVerified: true`). Others must verify via OTP.
-
-**Errors:** `409` if email already exists.
-
----
-
-### POST /auth/login
-
-**No auth required.**
-
-**Request body:**
-```json
-{
-  "email": "priya@iitb.ac.in",
-  "password": "mypassword1"
-}
-```
-
-**Response:** `200` with token payload.
-
-**Errors:** `401` for wrong credentials or inactive account.
-
----
-
-### POST /auth/logout
-
-Revokes the current session's refresh token.
-
-**Auth required.**
-
-**Request body** (optional for browser — token read from cookie):
-```json
-{
-  "refreshToken": "eyJ..."
-}
-```
-
-**Response:**
-```json
-{ "status": "success", "message": "Logged out" }
-```
-
----
-
-### POST /auth/logout/all
-
-Revokes all sessions for the authenticated user across all devices.
-
-**Auth required.** No request body.
-
-**Response:**
-```json
-{ "status": "success", "message": "Logged out from all sessions" }
-```
-
----
-
-### POST /auth/refresh
-
-Exchanges a refresh token for a new access token. Refresh token is rotated on every call.
-
-**No auth required.**
-
-**Request body** (optional for browser — token read from cookie):
-```json
-{
-  "refreshToken": "eyJ..."
-}
-```
-
-**Response:** `200` with token payload.
-
-**Errors:** `401` if refresh token is invalid, expired, or revoked.
-
----
-
-### GET /auth/sessions
-
-Lists all active sessions for the authenticated user.
-
-**Auth required.**
-
-**Response:**
 ```json
 {
   "status": "success",
-  "data": [
+  "data": {}
+}
+```
+
+Success with message:
+
+```json
+{
+  "status": "success",
+  "message": "Logged out"
+}
+```
+
+Operational error:
+
+```json
+{
+  "status": "error",
+  "message": "Listing not found"
+}
+```
+
+Validation error:
+
+```json
+{
+  "status": "error",
+  "message": "Validation failed",
+  "errors": [
     {
-      "sid": "uuid",
-      "isCurrent": true,
-      "issuedAt": "2025-01-15T10:00:00.000Z",
-      "expiresAt": "2025-01-22T10:00:00.000Z"
+      "field": "body.email",
+      "message": "Must be a valid email address"
     }
   ]
 }
 ```
 
----
+More examples live in [api/conventions.md](./api/conventions.md).
 
-### DELETE /auth/sessions/:sid
+## Roles and Access Model
 
-Revokes a specific session by its ID. If the `sid` matches the current session, auth cookies are also cleared.
+- `student`
+  Can maintain a student profile, create `student_room` listings, send interest requests, save listings, confirm connections, and submit ratings.
+- `pg_owner`
+  Can maintain a PG owner profile, submit verification documents, create properties, create `pg_room` and `hostel_bed` listings, manage incoming interest requests, confirm connections, and receive ratings.
+- `admin`
+  Can review PG owner verification requests and moderate rating reports.
+- Mixed-role users
+  A single user can hold multiple roles. Route-level access checks look at the JWT role array, and service-layer ownership checks still apply.
 
-**Auth required.**
+## Pagination Conventions
 
-**Response:**
+Most feed-style endpoints use keyset pagination.
+
+Common query params:
+
+- `limit`
+- `cursorTime`
+- `cursorId`
+
+Typical response shape:
+
 ```json
-{ "status": "success", "message": "Session revoked" }
+{
+  "status": "success",
+  "data": {
+    "items": [],
+    "nextCursor": {
+      "cursorTime": "2026-04-11T07:15:00.000Z",
+      "cursorId": "33333333-3333-4333-8333-333333333333"
+    }
+  }
+}
 ```
 
-**Errors:** `404` if session not found.
+If there is no next page, `nextCursor` is `null`.
 
----
+## How To Read The Feature Docs
 
-### POST /auth/otp/send
+Each feature doc includes:
 
-Sends a 6-digit OTP to the authenticated user's email. Only works if email is not already verified.
+- request contract details
+- concrete JSON request bodies
+- concrete success bodies
+- validation, auth, conflict, not-found, and business-rule error examples
+- scenario tables explaining why different responses happen
 
-**Auth required.** Rate limited: 5 per 15 min per IP.
+## Feature Docs
 
-**Response:**
-```json
-{ "status": "success", "message": "OTP sent to your email" }
-```
-
-**Errors:** `409` if already verified.
-
----
-
-### POST /auth/otp/verify
-
-Verifies the OTP. Sets `isEmailVerified = true` on success.
-
-**Auth required.**
-
-**Request body:**
-```json
-{ "otp": "123456" }
-```
-
-**Errors:** `400` for wrong OTP (remaining attempts shown in message). `429` after 5 failed attempts (must request a new OTP).
-
----
-
-### GET /auth/me
-
-Returns the authenticated user's identity from the token.
-
-**Auth required.**
+- [Shared Conventions](./api/conventions.md)
+- [Auth](./api/auth.md)
+- [Profiles and Contact Reveal](./api/profiles-and-contact.md)
+- [Properties](./api/properties.md)
+- [Listings](./api/listings.md)
+- [Interests](./api/interests.md)
+- [Connections](./api/connections.md)
+- [Notifications](./api/notifications.md)
+- [Ratings and Reports](./api/ratings-and-reports.md)
+- [Admin](./api/admin.md)
+- [Health](./api/health.md)
 
 **Response:**
 ```json

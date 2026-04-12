@@ -17,6 +17,12 @@
 | Target cloud | Microsoft Azure |
 | Local dev | PostgreSQL 16 + Redis installed directly on host — no Docker |
 
+## Documentation Layout
+
+- `docs/API.md` is the API entrypoint and shared transport/response overview.
+- Detailed request, response, and scenario documentation is split by feature under `docs/api/`.
+- When route behavior changes, update the corresponding feature doc instead of expanding `docs/API.md` back into a single monolithic reference.
+
 ---
 
 ## Branch Status
