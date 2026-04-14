@@ -544,7 +544,7 @@
                 ],
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"otp\": \"797479\"\n}",
+                  "raw": "{\n  \"otp\": \"933987\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
@@ -1082,25 +1082,6 @@
                 }
               },
               "response": []
-            },
-            {
-              "name": "[2.5] Set Preferences — Student 1",
-              "request": {
-                "method": "GET",
-                "header": [],
-                "url": {
-                  "raw": "{{baseUrl}}/listings/{{listing1Id}}/preferences",
-                  "host": [
-                    "{{baseUrl}}"
-                  ],
-                  "path": [
-                    "listings",
-                    "{{listing1Id}}",
-                    "preferences"
-                  ]
-                }
-              },
-              "response": []
             }
           ]
         },
@@ -1261,6 +1242,49 @@
         {
           "name": "Error Cases",
           "item": []
+        }
+      ]
+    },
+    {
+      "name": "DEV UTILS",
+      "item": [
+        {
+          "name": "[DEV] Reset Rate Limits",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// Pre-request script on [1.6] Login Student 1, for example",
+                  "pm.sendRequest({",
+                  "    url: pm.environment.get(\"baseUrl\") + \"/test-utils/reset-rate-limits\",",
+                  "    method: \"POST\"",
+                  "}, (err, res) => {",
+                  "    if (err) console.log(\"Could not reset rate limits:\", err);",
+                  "    else console.log(\"Rate limits cleared:\", res.json().deletedCount, \"keys deleted\");",
+                  "});"
+                ],
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/test-utils/reset-rate-limits",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "test-utils",
+                "reset-rate-limits"
+              ]
+            }
+          },
+          "response": []
         }
       ]
     }

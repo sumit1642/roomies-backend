@@ -2726,19 +2726,460 @@ pm.test("Status 401 — invalid token", () => {
 
 ---
 
-## Before you send anything — run them in order
+## Folder 02 - Student Profiles
 
-Send requests **1.1 through 1.5 first** (the five registrations), then check your environment variables:
-
-1. Click the **eye icon** next to `Roomies Local` in the top-right
-2. You should see all five IDs and tokens now populated with real values
-
-If any of those are still blank after sending, it means either the request got a non-201 response or the script did not
-run. Check the **Console** at the bottom — it will show the exact error.
+Right-click the **Happy Path** subfolder inside **02 - Student Profiles** → **Add request** for each.
 
 ---
 
-Go ahead and run 1.1 through 1.11 now and tell me what you see — pass/fail counts per request, and any errors in the
-Console. Once auth is clean we move straight into folder 02.
+### [2.1] Get Student 1 Profile (self view)
 
-Answer -> Everything worked as expected.
+- **Name:** `[2.1] Get Student 1 Profile (self)`
+- **Method:** GET
+- **URL:** `{{baseUrl}}/students/{{student1Id}}/profile`
+- **Headers:** `Authorization: Bearer {{student1AccessToken}}`
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 200", () => pm.response.to.have.status(200));
+pm.test("Returns correct user", () => {
+	pm.expect(pm.response.json().data.full_name).to.eql("Arjun Sharma");
+});
+pm.test("Self view includes email", () => {
+	pm.expect(pm.response.json().data.email).to.be.a("string");
+	pm.expect(pm.response.json().data.email).to.include("@");
+});
+```
+
+---
+
+### [2.2] Get Student 1 Profile (viewed by Student 2)
+
+- **Name:** `[2.2] Get Student 1 Profile (other user — email hidden)`
+- **Method:** GET
+- **URL:** `{{baseUrl}}/students/{{student1Id}}/profile`
+- **Headers:** `Authorization: Bearer {{student2AccessToken}}`
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 200", () => pm.response.to.have.status(200));
+pm.test("Full name still visible", () => {
+	pm.expect(pm.response.json().data.full_name).to.eql("Arjun Sharma");
+});
+pm.test("Email hidden for non-owner", () => {
+	pm.expect(pm.response.json().data.email).to.be.null;
+});
+```
+
+---
+
+### [2.3] Update Student 1 Profile
+
+- **Name:** `[2.3] Update Student 1 Profile`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/students/{{student1Id}}/profile`
+- **Headers:** `Authorization: Bearer {{student1AccessToken}}`
+- **Body:**
+
+```json
+{
+	"bio": "Final year CSE student at IIT Bombay. Looking for a clean and quiet room near campus.",
+	"course": "B.Tech Computer Science",
+	"yearOfStudy": 4,
+	"gender": "male"
+}
+```
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 200", () => pm.response.to.have.status(200));
+pm.test("Bio updated correctly", () => {
+	pm.expect(pm.response.json().data.bio).to.include("IIT Bombay");
+});
+pm.test("Course updated", () => {
+	pm.expect(pm.response.json().data.course).to.eql("B.Tech Computer Science");
+});
+pm.test("Year of study updated", () => {
+	pm.expect(pm.response.json().data.year_of_study).to.eql(4);
+});
+pm.test("Gender updated", () => {
+	pm.expect(pm.response.json().data.gender).to.eql("male");
+});
+```
+
+---
+
+### [2.4] Update Student 2 Profile
+
+- **Name:** `[2.4] Update Student 2 Profile`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/students/{{student2Id}}/profile`
+- **Headers:** `Authorization: Bearer {{student2AccessToken}}`
+- **Body:**
+
+```json
+{
+	"bio": "Second year ECE at BITS Pilani. Non-smoker, vegetarian, looking for female-only PG.",
+	"course": "B.E. Electronics",
+	"yearOfStudy": 2,
+	"gender": "female"
+}
+```
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 200", () => pm.response.to.have.status(200));
+pm.test("Bio updated", () => {
+	pm.expect(pm.response.json().data.bio).to.include("BITS Pilani");
+});
+pm.test("Gender updated", () => {
+	pm.expect(pm.response.json().data.gender).to.eql("female");
+});
+```
+
+---
+
+### [2.5] Set User Preferences — Student 1
+
+> This powers the compatibility score shown on search results. Student 1 is a non-smoker vegetarian early bird — these
+> will match against listing preferences later.
+
+- **Name:** `[2.5] Set Preferences — Student 1`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/listings/{{listing1Id}}/preferences`
+
+> Wait — user preferences are on the user, not the listing. Your API stores them at the user level via
+> `user_preferences` table but there is no standalone `/users/:id/preferences` endpoint exposed in your routes.
+> Preferences are set per-listing via `PUT /listings/:id/preferences`. The user side is populated indirectly. Skip this
+> for now — the compatibility score test will still work once listings have preferences set. Move on.
+
+---
+
+Now the **Error Cases** subfolder:
+
+---
+
+### [2.E1] Update Another Student's Profile
+
+- **Name:** `[2.E1] Update Another Student's Profile (forbidden)`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/students/{{student2Id}}/profile`
+- **Headers:** `Authorization: Bearer {{student1AccessToken}}`
+- **Body:**
+
+```json
+{
+	"bio": "This should not be allowed"
+}
+```
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 403 — cannot edit another user's profile", () => {
+	pm.response.to.have.status(403);
+});
+```
+
+---
+
+### [2.E2] Get Non-existent Student Profile
+
+- **Name:** `[2.E2] Non-existent Profile`
+- **Method:** GET
+- **URL:** `{{baseUrl}}/students/00000000-0000-0000-0000-000000000000/profile`
+- **Headers:** `Authorization: Bearer {{student1AccessToken}}`
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 404 — profile not found", () => {
+	pm.response.to.have.status(404);
+});
+```
+
+---
+
+### [2.E3] Get Profile With Invalid UUID
+
+- **Name:** `[2.E3] Invalid UUID in path`
+- **Method:** GET
+- **URL:** `{{baseUrl}}/students/not-a-valid-uuid/profile`
+- **Headers:** `Authorization: Bearer {{student1AccessToken}}`
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 400 — invalid UUID rejected by validator", () => {
+	pm.response.to.have.status(400);
+});
+```
+
+---
+
+### [2.E4] Update Profile Without Token
+
+- **Name:** `[2.E4] Update Profile Without Token`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/students/{{student1Id}}/profile`
+- **No Authorization header**
+- **Body:**
+
+```json
+{
+	"bio": "No token attempt"
+}
+```
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 401 — authentication required", () => {
+	pm.response.to.have.status(401);
+});
+```
+
+---
+
+## Folder 03 - PG Owner Profiles
+
+Right-click **Happy Path** inside **03 - PG Owner Profiles** → **Add request**:
+
+---
+
+### [3.1] Get PG Owner 1 Profile (self view)
+
+- **Name:** `[3.1] Get PG Owner 1 Profile (self)`
+- **Method:** GET
+- **URL:** `{{baseUrl}}/pg-owners/{{pgOwner1Id}}/profile`
+- **Headers:** `Authorization: Bearer {{pgOwner1AccessToken}}`
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 200", () => pm.response.to.have.status(200));
+pm.test("Business name correct", () => {
+	pm.expect(pm.response.json().data.business_name).to.eql("Mehta PG House");
+});
+pm.test("Verification status is unverified", () => {
+	pm.expect(pm.response.json().data.verification_status).to.eql("unverified");
+});
+pm.test("Self view includes email", () => {
+	pm.expect(pm.response.json().data.email).to.be.a("string");
+});
+pm.test("Self view includes business phone", () => {
+	// phone is null until updated — field should exist
+	pm.expect(pm.response.json().data).to.have.property("business_phone");
+});
+```
+
+---
+
+### [3.2] Update PG Owner 1 Profile
+
+- **Name:** `[3.2] Update PG Owner 1 Profile`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/pg-owners/{{pgOwner1Id}}/profile`
+- **Headers:** `Authorization: Bearer {{pgOwner1AccessToken}}`
+- **Body:**
+
+```json
+{
+	"businessDescription": "Clean, well-maintained PG in Koramangala with 24hr water and WiFi.",
+	"businessPhone": "9876543210",
+	"operatingSince": 2019
+}
+```
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 200", () => pm.response.to.have.status(200));
+pm.test("Business phone updated", () => {
+	pm.expect(pm.response.json().data.business_phone).to.eql("9876543210");
+});
+pm.test("Operating since updated", () => {
+	pm.expect(pm.response.json().data.operating_since).to.eql(2019);
+});
+```
+
+---
+
+### [3.3] Update PG Owner 2 Profile
+
+- **Name:** `[3.3] Update PG Owner 2 Profile`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/pg-owners/{{pgOwner2Id}}/profile`
+- **Headers:** `Authorization: Bearer {{pgOwner2AccessToken}}`
+- **Body:**
+
+```json
+{
+	"businessDescription": "Ladies-only hostel in Indiranagar with strict curfew and home food.",
+	"businessPhone": "9123456780",
+	"operatingSince": 2021
+}
+```
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 200", () => pm.response.to.have.status(200));
+pm.test("Description updated", () => {
+	pm.expect(pm.response.json().data.business_description).to.include("Ladies-only");
+});
+```
+
+---
+
+### [3.4] Update PG Owner 3 Profile
+
+- **Name:** `[3.4] Update PG Owner 3 Profile`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/pg-owners/{{pgOwner3Id}}/profile`
+- **Headers:** `Authorization: Bearer {{pgOwner3AccessToken}}`
+- **Body:**
+
+```json
+{
+	"businessDescription": "Affordable PG near HSR Layout. Single and double rooms available.",
+	"businessPhone": "9988776655",
+	"operatingSince": 2020
+}
+```
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 200", () => pm.response.to.have.status(200));
+```
+
+---
+
+### [3.5] Get PG Owner 1 Profile (viewed by Student 1)
+
+- **Name:** `[3.5] Get PG Owner 1 Profile (other user — sensitive fields hidden)`
+- **Method:** GET
+- **URL:** `{{baseUrl}}/pg-owners/{{pgOwner1Id}}/profile`
+- **Headers:** `Authorization: Bearer {{student1AccessToken}}`
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 200", () => pm.response.to.have.status(200));
+pm.test("Business name visible", () => {
+	pm.expect(pm.response.json().data.business_name).to.eql("Mehta PG House");
+});
+pm.test("Email hidden for non-owner", () => {
+	pm.expect(pm.response.json().data.email).to.be.null;
+});
+pm.test("Business phone hidden for non-owner", () => {
+	pm.expect(pm.response.json().data.business_phone).to.be.null;
+});
+```
+
+---
+
+Now **Error Cases** inside **03 - PG Owner Profiles**:
+
+---
+
+### [3.E1] Update Another Owner's Profile
+
+- **Name:** `[3.E1] Update Another Owner's Profile (forbidden)`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/pg-owners/{{pgOwner2Id}}/profile`
+- **Headers:** `Authorization: Bearer {{pgOwner1AccessToken}}`
+- **Body:**
+
+```json
+{
+	"businessName": "Hacked Business Name"
+}
+```
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 403 — cannot edit another owner's profile", () => {
+	pm.response.to.have.status(403);
+});
+```
+
+---
+
+### [3.E2] Student Tries to Update a PG Owner Profile
+
+- **Name:** `[3.E2] Student Updates PG Owner Profile (wrong role)`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/pg-owners/{{pgOwner1Id}}/profile`
+- **Headers:** `Authorization: Bearer {{student1AccessToken}}`
+- **Body:**
+
+```json
+{
+	"businessName": "Student Hacked This"
+}
+```
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 403 — wrong role", () => {
+	pm.response.to.have.status(403);
+});
+```
+
+---
+
+### [3.E3] Update With No Valid Fields
+
+- **Name:** `[3.E3] Update With No Valid Fields`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/pg-owners/{{pgOwner1Id}}/profile`
+- **Headers:** `Authorization: Bearer {{pgOwner1AccessToken}}`
+- **Body:**
+
+```json
+{}
+```
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 400 — no fields to update", () => {
+	pm.response.to.have.status(400);
+});
+```
+
+---
+
+### [3.E4] Operating Since in the Future
+
+- **Name:** `[3.E4] Operating Since in the Future`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/pg-owners/{{pgOwner1Id}}/profile`
+- **Headers:** `Authorization: Bearer {{pgOwner1AccessToken}}`
+- **Body:**
+
+```json
+{
+	"operatingSince": 2099
+}
+```
+
+- **Scripts → Post-response:**
+
+```javascript
+pm.test("Status 400 — future year rejected by validator", () => {
+	pm.response.to.have.status(400);
+});
+```
+
+---
+
+Everything worked as expected.
