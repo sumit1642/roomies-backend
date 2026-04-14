@@ -2842,116 +2842,175 @@ pm.test("Gender updated", () => {
 ```
 
 ---
+Looking at your updated codebase, I can see that `[2.5] Set User Preferences — Student 1` was originally noted in the master plan as a skip (because preferences are set per-listing, not via a standalone user endpoint). But from your updated repo, I can see you now have a full student preferences system:
 
-### [2.5] Set User Preferences — Student 1
+- `GET /students/:userId/preferences` and `PUT /students/:userId/preferences` endpoints exist in `src/routes/student.js`
+- `getStudentPreferences` and `updateStudentPreferences` services are live in `student.service.js`
+- Validators `getStudentPreferencesSchema` and `updateStudentPreferencesSchema` are in `student.validators.js`
+- The `PREFERENCE_DEFINITIONS` catalog is defined in `src/config/preferences.js` with 7 keys: `smoking`, `food_habit`, `sleep_schedule`, `alcohol`, `cleanliness_level`, `noise_tolerance`, `guest_policy`
 
-> This powers the compatibility score shown on search results. Student 1 is a non-smoker vegetarian early bird — these
-> will match against listing preferences later.
+So `[2.5]` is now fully implementable. Let me also plan `[2.6]` for Student 2's preferences, since the compatibility score system needs both students to have preferences set for meaningful testing later.
+
+Here is the updated plan for the remaining items in **Folder 02 - Student Profiles**:
+
+---
+
+### [2.5] Set Preferences — Student 1
+
+Right-click the **Happy Path** subfolder inside **02 - Student Profiles** → **Add request**.
 
 - **Name:** `[2.5] Set Preferences — Student 1`
 - **Method:** PUT
-- **URL:** `{{baseUrl}}/listings/{{listing1Id}}/preferences`
-
-> Wait — user preferences are on the user, not the listing. Your API stores them at the user level via
-> `user_preferences` table but there is no standalone `/users/:id/preferences` endpoint exposed in your routes.
-> Preferences are set per-listing via `PUT /listings/:id/preferences`. The user side is populated indirectly. Skip this
-> for now — the compatibility score test will still work once listings have preferences set. Move on.
-
----
-
-Now the **Error Cases** subfolder:
-
----
-
-### [2.E1] Update Another Student's Profile
-
-- **Name:** `[2.E1] Update Another Student's Profile (forbidden)`
-- **Method:** PUT
-- **URL:** `{{baseUrl}}/students/{{student2Id}}/profile`
+- **URL:** `{{baseUrl}}/students/{{student1Id}}/preferences`
 - **Headers:** `Authorization: Bearer {{student1AccessToken}}`
+- **Body:** raw → JSON:
+
+```json
+{
+    "preferences": [
+        { "preferenceKey": "smoking", "preferenceValue": "non_smoker" },
+        { "preferenceKey": "food_habit", "preferenceValue": "vegetarian" },
+        { "preferenceKey": "sleep_schedule", "preferenceValue": "early_bird" }
+    ]
+}
+```
+
+- **Scripts tab → Post-response:**
+
+```javascript
+pm.test("Status 200", () => pm.response.to.have.status(200));
+pm.test("Returns array of preferences", () => {
+    pm.expect(pm.response.json().data).to.be.an("array");
+});
+pm.test("Correct number of preferences saved", () => {
+    pm.expect(pm.response.json().data.length).to.eql(3);
+});
+pm.test("Smoking preference saved", () => {
+    const prefs = pm.response.json().data;
+    const smoking = prefs.find(p => p.preferenceKey === "smoking");
+    pm.expect(smoking).to.exist;
+    pm.expect(smoking.preferenceValue).to.eql("non_smoker");
+});
+console.log("Student 1 preferences set — will power compatibility scoring in listing search");
+```
+
+Click **Send**. Expected: `200 OK` with an array of 3 preference objects.
+
+---
+
+### [2.6] Set Preferences — Student 2
+
+- **Name:** `[2.6] Set Preferences — Student 2`
+- **Method:** PUT
+- **URL:** `{{baseUrl}}/students/{{student2Id}}/preferences`
+- **Headers:** `Authorization: Bearer {{student2AccessToken}}`
 - **Body:**
 
 ```json
 {
-	"bio": "This should not be allowed"
+    "preferences": [
+        { "preferenceKey": "food_habit", "preferenceValue": "vegetarian" },
+        { "preferenceKey": "alcohol", "preferenceValue": "not_okay" },
+        { "preferenceKey": "sleep_schedule", "preferenceValue": "early_bird" }
+    ]
 }
 ```
 
 - **Scripts → Post-response:**
 
 ```javascript
-pm.test("Status 403 — cannot edit another user's profile", () => {
-	pm.response.to.have.status(403);
+pm.test("Status 200", () => pm.response.to.have.status(200));
+pm.test("Returns array of preferences", () => {
+    pm.expect(pm.response.json().data).to.be.an("array");
 });
+pm.test("Correct number of preferences saved", () => {
+    pm.expect(pm.response.json().data.length).to.eql(3);
+});
+console.log("Student 2 preferences set");
 ```
 
 ---
 
-### [2.E2] Get Non-existent Student Profile
+### [2.7] Get Preferences — Student 1 (verify read-back)
 
-- **Name:** `[2.E2] Non-existent Profile`
+This verifies the GET endpoint works and that ownership is enforced.
+
+- **Name:** `[2.7] Get Preferences — Student 1`
 - **Method:** GET
-- **URL:** `{{baseUrl}}/students/00000000-0000-0000-0000-000000000000/profile`
+- **URL:** `{{baseUrl}}/students/{{student1Id}}/preferences`
 - **Headers:** `Authorization: Bearer {{student1AccessToken}}`
 
 - **Scripts → Post-response:**
 
 ```javascript
-pm.test("Status 404 — profile not found", () => {
-	pm.response.to.have.status(404);
+pm.test("Status 200", () => pm.response.to.have.status(200));
+pm.test("Returns same preferences we set", () => {
+    const data = pm.response.json().data;
+    pm.expect(data).to.be.an("array");
+    pm.expect(data.length).to.eql(3);
 });
 ```
 
 ---
 
-### [2.E3] Get Profile With Invalid UUID
+Now for the **Error Cases** subfolder in Folder 02, add these two new cases alongside the ones you already have:
 
-- **Name:** `[2.E3] Invalid UUID in path`
+---
+
+### [2.E3] Student 1 Tries to Read Student 2's Preferences
+
+The `getStudentPreferences` service throws 403 if `requestingUserId !== targetUserId` — preferences are private, not publicly readable like profiles.
+
+- **Name:** `[2.E3] Read Another Student's Preferences (forbidden)`
 - **Method:** GET
-- **URL:** `{{baseUrl}}/students/not-a-valid-uuid/profile`
+- **URL:** `{{baseUrl}}/students/{{student2Id}}/preferences`
 - **Headers:** `Authorization: Bearer {{student1AccessToken}}`
 
 - **Scripts → Post-response:**
 
 ```javascript
-pm.test("Status 400 — invalid UUID rejected by validator", () => {
-	pm.response.to.have.status(400);
+pm.test("Status 403 — cannot read another student's preferences", () => {
+    pm.response.to.have.status(403);
 });
 ```
 
 ---
 
-### [2.E4] Update Profile Without Token
+### [2.E4] Student 1 Tries to Update Student 2's Preferences
 
-- **Name:** `[2.E4] Update Profile Without Token`
+- **Name:** `[2.E4] Update Another Student's Preferences (forbidden)`
 - **Method:** PUT
-- **URL:** `{{baseUrl}}/students/{{student1Id}}/profile`
-- **No Authorization header**
+- **URL:** `{{baseUrl}}/students/{{student2Id}}/preferences`
+- **Headers:** `Authorization: Bearer {{student1AccessToken}}`
 - **Body:**
 
 ```json
 {
-	"bio": "No token attempt"
+    "preferences": [
+        { "preferenceKey": "smoking", "preferenceValue": "smoker" }
+    ]
 }
 ```
 
 - **Scripts → Post-response:**
 
 ```javascript
-pm.test("Status 401 — authentication required", () => {
-	pm.response.to.have.status(401);
+pm.test("Status 403 — cannot update another student's preferences", () => {
+    pm.response.to.have.status(403);
 });
 ```
 
 ---
 
-## Folder 03 - PG Owner Profiles
-
-Right-click **Happy Path** inside **03 - PG Owner Profiles** → **Add request**:
+Now for **Folder 03 - PG Owner Profiles**, here is the updated plan reflecting your actual repo. Looking at `pgOwner.service.js` and `pgOwner.validators.js`, the profile system is symmetric with student profiles. The contact reveal for PG owners uses `POST` (not `GET`) — that is already handled correctly in `pgOwner.js` route. Here is the complete folder 03 plan:
 
 ---
 
-### [3.1] Get PG Owner 1 Profile (self view)
+## Folder 03 - PG Owner Profiles → Happy Path
+
+---
+
+### [3.1] Get PG Owner 1 Profile (self)
 
 - **Name:** `[3.1] Get PG Owner 1 Profile (self)`
 - **Method:** GET
@@ -2963,17 +3022,17 @@ Right-click **Happy Path** inside **03 - PG Owner Profiles** → **Add request**
 ```javascript
 pm.test("Status 200", () => pm.response.to.have.status(200));
 pm.test("Business name correct", () => {
-	pm.expect(pm.response.json().data.business_name).to.eql("Mehta PG House");
+    pm.expect(pm.response.json().data.business_name).to.eql("Mehta PG House");
 });
 pm.test("Verification status is unverified", () => {
-	pm.expect(pm.response.json().data.verification_status).to.eql("unverified");
+    pm.expect(pm.response.json().data.verification_status).to.eql("unverified");
 });
 pm.test("Self view includes email", () => {
-	pm.expect(pm.response.json().data.email).to.be.a("string");
+    pm.expect(pm.response.json().data.email).to.be.a("string");
+    pm.expect(pm.response.json().data.email).to.include("@");
 });
-pm.test("Self view includes business phone", () => {
-	// phone is null until updated — field should exist
-	pm.expect(pm.response.json().data).to.have.property("business_phone");
+pm.test("Self view includes business phone field", () => {
+    pm.expect(pm.response.json().data).to.have.property("business_phone");
 });
 ```
 
@@ -2989,9 +3048,9 @@ pm.test("Self view includes business phone", () => {
 
 ```json
 {
-	"businessDescription": "Clean, well-maintained PG in Koramangala with 24hr water and WiFi.",
-	"businessPhone": "9876543210",
-	"operatingSince": 2019
+    "businessDescription": "Clean, well-maintained PG in Koramangala with 24hr water and WiFi.",
+    "businessPhone": "9876543210",
+    "operatingSince": 2019
 }
 ```
 
@@ -3000,10 +3059,10 @@ pm.test("Self view includes business phone", () => {
 ```javascript
 pm.test("Status 200", () => pm.response.to.have.status(200));
 pm.test("Business phone updated", () => {
-	pm.expect(pm.response.json().data.business_phone).to.eql("9876543210");
+    pm.expect(pm.response.json().data.business_phone).to.eql("9876543210");
 });
 pm.test("Operating since updated", () => {
-	pm.expect(pm.response.json().data.operating_since).to.eql(2019);
+    pm.expect(pm.response.json().data.operating_since).to.eql(2019);
 });
 ```
 
@@ -3019,9 +3078,9 @@ pm.test("Operating since updated", () => {
 
 ```json
 {
-	"businessDescription": "Ladies-only hostel in Indiranagar with strict curfew and home food.",
-	"businessPhone": "9123456780",
-	"operatingSince": 2021
+    "businessDescription": "Ladies-only hostel in Indiranagar with strict curfew and home food.",
+    "businessPhone": "9123456780",
+    "operatingSince": 2021
 }
 ```
 
@@ -3030,7 +3089,7 @@ pm.test("Operating since updated", () => {
 ```javascript
 pm.test("Status 200", () => pm.response.to.have.status(200));
 pm.test("Description updated", () => {
-	pm.expect(pm.response.json().data.business_description).to.include("Ladies-only");
+    pm.expect(pm.response.json().data.business_description).to.include("Ladies-only");
 });
 ```
 
@@ -3046,9 +3105,9 @@ pm.test("Description updated", () => {
 
 ```json
 {
-	"businessDescription": "Affordable PG near HSR Layout. Single and double rooms available.",
-	"businessPhone": "9988776655",
-	"operatingSince": 2020
+    "businessDescription": "Affordable PG near HSR Layout. Single and double rooms available.",
+    "businessPhone": "9988776655",
+    "operatingSince": 2020
 }
 ```
 
@@ -3060,9 +3119,9 @@ pm.test("Status 200", () => pm.response.to.have.status(200));
 
 ---
 
-### [3.5] Get PG Owner 1 Profile (viewed by Student 1)
+### [3.5] Get PG Owner 1 Profile (viewed by Student 1 — sensitive fields hidden)
 
-- **Name:** `[3.5] Get PG Owner 1 Profile (other user — sensitive fields hidden)`
+- **Name:** `[3.5] Get PG Owner 1 Profile (other user)`
 - **Method:** GET
 - **URL:** `{{baseUrl}}/pg-owners/{{pgOwner1Id}}/profile`
 - **Headers:** `Authorization: Bearer {{student1AccessToken}}`
@@ -3072,25 +3131,25 @@ pm.test("Status 200", () => pm.response.to.have.status(200));
 ```javascript
 pm.test("Status 200", () => pm.response.to.have.status(200));
 pm.test("Business name visible", () => {
-	pm.expect(pm.response.json().data.business_name).to.eql("Mehta PG House");
+    pm.expect(pm.response.json().data.business_name).to.eql("Mehta PG House");
 });
 pm.test("Email hidden for non-owner", () => {
-	pm.expect(pm.response.json().data.email).to.be.null;
+    pm.expect(pm.response.json().data.email).to.be.null;
 });
 pm.test("Business phone hidden for non-owner", () => {
-	pm.expect(pm.response.json().data.business_phone).to.be.null;
+    pm.expect(pm.response.json().data.business_phone).to.be.null;
 });
 ```
 
 ---
 
-Now **Error Cases** inside **03 - PG Owner Profiles**:
+## Folder 03 - PG Owner Profiles → Error Cases
 
 ---
 
-### [3.E1] Update Another Owner's Profile
+### [3.E1] Update Another Owner's Profile (forbidden)
 
-- **Name:** `[3.E1] Update Another Owner's Profile (forbidden)`
+- **Name:** `[3.E1] Update Another Owner's Profile`
 - **Method:** PUT
 - **URL:** `{{baseUrl}}/pg-owners/{{pgOwner2Id}}/profile`
 - **Headers:** `Authorization: Bearer {{pgOwner1AccessToken}}`
@@ -3098,7 +3157,7 @@ Now **Error Cases** inside **03 - PG Owner Profiles**:
 
 ```json
 {
-	"businessName": "Hacked Business Name"
+    "businessName": "Hacked Business Name"
 }
 ```
 
@@ -3106,13 +3165,15 @@ Now **Error Cases** inside **03 - PG Owner Profiles**:
 
 ```javascript
 pm.test("Status 403 — cannot edit another owner's profile", () => {
-	pm.response.to.have.status(403);
+    pm.response.to.have.status(403);
 });
 ```
 
 ---
 
 ### [3.E2] Student Tries to Update a PG Owner Profile
+
+The route has `authorize("pg_owner")` so a student JWT is blocked at the middleware layer before the service even runs.
 
 - **Name:** `[3.E2] Student Updates PG Owner Profile (wrong role)`
 - **Method:** PUT
@@ -3122,7 +3183,7 @@ pm.test("Status 403 — cannot edit another owner's profile", () => {
 
 ```json
 {
-	"businessName": "Student Hacked This"
+    "businessDescription": "This should be forbidden"
 }
 ```
 
@@ -3130,13 +3191,15 @@ pm.test("Status 403 — cannot edit another owner's profile", () => {
 
 ```javascript
 pm.test("Status 403 — wrong role", () => {
-	pm.response.to.have.status(403);
+    pm.response.to.have.status(403);
 });
 ```
 
 ---
 
 ### [3.E3] Update With No Valid Fields
+
+The `updatePgOwnerProfile` service throws 400 when `setClauses` is empty — meaning the body contained no keys that match the `columnMap`.
 
 - **Name:** `[3.E3] Update With No Valid Fields`
 - **Method:** PUT
@@ -3152,13 +3215,15 @@ pm.test("Status 403 — wrong role", () => {
 
 ```javascript
 pm.test("Status 400 — no fields to update", () => {
-	pm.response.to.have.status(400);
+    pm.response.to.have.status(400);
 });
 ```
 
 ---
 
 ### [3.E4] Operating Since in the Future
+
+The `operatingSince` validator uses `.refine((val) => val <= new Date().getFullYear())` so a future year should return 400.
 
 - **Name:** `[3.E4] Operating Since in the Future`
 - **Method:** PUT
@@ -3168,7 +3233,7 @@ pm.test("Status 400 — no fields to update", () => {
 
 ```json
 {
-	"operatingSince": 2099
+    "operatingSince": 2099
 }
 ```
 
@@ -3176,10 +3241,11 @@ pm.test("Status 400 — no fields to update", () => {
 
 ```javascript
 pm.test("Status 400 — future year rejected by validator", () => {
-	pm.response.to.have.status(400);
+    pm.response.to.have.status(400);
 });
 ```
 
 ---
 
+One important note before you proceed: when you run `[2.5]` and `[2.6]`, the preferences you set here for both students will directly power the `compatibilityScore` field that appears on every listing in the search results later in Folder 06. Student 1's `vegetarian + non_smoker + early_bird` preferences will match against listing preferences you define in `[6.1]` through `[6.4]`, giving you non-zero compatibility scores to verify in the search tests. This is why setting them now, before creating any listings, is the right sequence.
 Everything worked as expected.
