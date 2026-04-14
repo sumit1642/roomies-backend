@@ -3,7 +3,8 @@
 // ─── ROUTE REGISTRATION ORDER NOTE ───────────────────────────────────────────
 // Static path segments must be registered BEFORE parameterised segments that
 // share the same prefix, or the parameterised route will shadow them.
-// /me/saved and / (search) are registered first; /:listingId comes after.
+// /search/ranked, /me/saved, and / (search) are registered first; /:listingId
+// comes after.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Router } from "express";
@@ -20,7 +21,9 @@ import {
 	saveListingSchema,
 	savedListingsSchema,
 } from "../validators/listing.validators.js";
+import { rankedSearchSchema } from "../validators/rankedSearch.validators.js";
 import * as listingController from "../controllers/listing.controller.js";
+import { getRankedListings } from "../controllers/rankedSearch.controller.js";
 import { upload } from "../middleware/upload.js";
 import {
 	uploadPhotoSchema,
@@ -34,6 +37,19 @@ import { UPLOAD_FIELD_NAME } from "../config/constants.js";
 export const listingRouter = Router();
 
 // ─── Static routes first — must precede /:listingId ──────────────────────────
+
+// GET /api/v1/listings/search/ranked
+//
+// Ranked search returns listings ordered by a weighted composite score computed
+// entirely in SQL, enabling correct keyset pagination across ranked results.
+//
+// Differences from GET /api/v1/listings:
+//   - Includes rankScore and scoreBreakdown per item.
+//   - Cursor is { cursorRankScore, cursorId } not { cursorTime, cursorId }.
+//   - Accepts optional preferenceOverrides[] query param (JSON-encoded array).
+//   - Accepts optional persistPreferences=true to upsert overrides to the DB.
+//   - Responds with searchMeta { isColdStart, weights, effectivePrefCount }.
+listingRouter.get("/search/ranked", authenticate, validate(rankedSearchSchema), getRankedListings);
 
 listingRouter.get(
 	"/me/saved",
