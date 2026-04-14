@@ -12,6 +12,9 @@ import { rankedSearch, persistPreferenceOverrides } from "../services/rankedSear
 export const getRankedListings = async (req, res, next) => {
 	try {
 		const { preferenceOverrides, persistPreferences, ...searchFilters } = req.query;
+		const shouldPersistPreferences = persistPreferences === true || persistPreferences === "true";
+		const hasPreferenceOverrides =
+			Array.isArray(preferenceOverrides) && preferenceOverrides.length > 0;
 
 		const result = await rankedSearch(req.user.userId, {
 			...searchFilters,
@@ -21,7 +24,7 @@ export const getRankedListings = async (req, res, next) => {
 		// Persist overrides if the caller opted in — runs after the response is
 		// assembled so it never delays the search. Any failure is logged by the
 		// service and does not affect the search result.
-		if (persistPreferences && (preferenceOverrides ?? []).length > 0) {
+		if (shouldPersistPreferences && hasPreferenceOverrides) {
 			persistPreferenceOverrides(req.user.userId, preferenceOverrides).catch(() => {
 				// Already logged inside the service; swallow here to avoid crashing
 			});

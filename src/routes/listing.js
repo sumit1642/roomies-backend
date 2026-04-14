@@ -47,7 +47,8 @@ export const listingRouter = Router();
 //   - Includes rankScore and scoreBreakdown per item.
 //   - Cursor is { cursorRankScore, cursorId } not { cursorTime, cursorId }.
 //   - Accepts optional preferenceOverrides[] query param (JSON-encoded array).
-//   - Accepts optional persistPreferences=true to upsert overrides to the DB.
+//   - Accepts optional persistPreferences=true to upsert overrides to the DB
+//     (intentional non-safe GET side effect; idempotent per user+preference key).
 //   - Responds with searchMeta { isColdStart, weights, effectivePrefCount }.
 listingRouter.get("/search/ranked", authenticate, validate(rankedSearchSchema), getRankedListings);
 

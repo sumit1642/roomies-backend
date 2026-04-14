@@ -24,8 +24,10 @@ const preferenceOverridesArraySchema = z
 //     Sent as a query param so the endpoint stays GET-able. The array is
 //     JSON-encoded by the client: ?preferenceOverrides=[{"preferenceKey":"smoking",...}]
 //
-//   persistPreferences — if "true", the overrides are written to user_preferences
-//     after the search. Defaults to false (search-only, no side effects).
+//   persistPreferences — if "true", the GET performs a write side-effect by
+//     upserting overrides into user_preferences after the search. This is
+//     intentionally non-safe, but idempotent (same keys/values => same DB state).
+//     Defaults to false (search-only, no side effects).
 //
 // Cursor: { cursorRankScore, cursorId } (both required together or both absent).
 //   cursorRankScore is a float, coerced from the string query param.

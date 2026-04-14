@@ -460,7 +460,7 @@ export const rankedSearch = async (userId, filters) => {
 
 // ─── Persist preference overrides ────────────────────────────────────────────
 //
-// Called when persistPreferences=true in the request body. Upserts the provided
+// Called when persistPreferences=true in the ranked search query. Upserts the provided
 // preferences into user_preferences, replacing any existing value for the same
 // key (UNIQUE constraint on (user_id, preference_key)).
 //
@@ -468,7 +468,7 @@ export const rankedSearch = async (userId, filters) => {
 // opt-in and auditable. A search call with persistPreferences=false (default)
 // leaves the DB unchanged.
 
-export const persistPreferenceOverrides = async (userId, overrides) => {
+export const upsertUserPreferenceOverrides = async (userId, overrides) => {
 	if (!overrides.length) return;
 
 	const placeholders = overrides.map((_, i) => `($1, $${i * 2 + 2}, $${i * 2 + 3})`).join(", ");
@@ -484,3 +484,6 @@ export const persistPreferenceOverrides = async (userId, overrides) => {
 
 	logger.info({ userId, count: overrides.length }, "User preferences upserted from search override");
 };
+
+// Backward-compatible alias.
+export const persistPreferenceOverrides = upsertUserPreferenceOverrides;
