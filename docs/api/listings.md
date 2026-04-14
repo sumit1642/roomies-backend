@@ -147,16 +147,20 @@ This endpoint is the ranked alternative to `GET /listings`. Use it when the clie
 rather than recency. The compatibility component automatically adapts to the user's preference state — users with no
 stored preferences see a cold-start result set ranked by distance, rating, and freshness.
 
+When `persistPreferences=true` is supplied, this GET intentionally performs a write side-effect (upsert into
+`user_preferences`). The write path is idempotent by `(user_id, preference_key)`, so repeating the same request yields
+the same stored preference state.
+
 ### How scoring works
 
 Each listing receives a `rankScore` in [0, 1] calculated from four normalised components:
 
-| Component   | Formula                                 | Notes                                                          |
-| ----------- | --------------------------------------- | -------------------------------------------------------------- |
-| `compat`    | `matched_prefs / total_effective_prefs` | 0 when no effective prefs exist                                |
-| `rating`    | `avg_rating / 5.0`                      | 0 when listing has no ratings                                  |
-| `freshness` | `exp(-age_days / 14)`                   | ~0.37 at 14 days, ~0.05 at 42 days                             |
-| `distance`  | `1 - min(dist_m / radius_m, 1)`         | 1.0 at the origin, 0 at the radius edge; 0.5 when no geo given |
+| Component   | Formula                                 | Notes                                                                                                                                                                                     |
+| ----------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `compat`    | `matched_prefs / total_effective_prefs` | 0 when no effective prefs exist                                                                                                                                                           |
+| `rating`    | `avg_rating / 5.0`                      | 0 when listing has no ratings                                                                                                                                                             |
+| `freshness` | `exp(-age_days / 14)`                   | ~0.37 at 14 days, ~0.05 at 42 days                                                                                                                                                        |
+| `distance`  | `1 - min(dist_m / radius_m, 1)`         | 1.0 at the origin, 0 at the radius edge; when `hasGeo=false`, component value is set to `0.5` (neutral baseline). If `weights.distance=0.0`, this component is excluded from `rankScore`. |
 
 Component weights depend on whether the user has preferences and whether geo coordinates are provided:
 
@@ -179,23 +183,23 @@ Effective preferences resolve in this order (higher layers override lower):
 
 All query params are optional. Standard filter params are identical to `GET /listings`.
 
-| Param                 | Type    | Notes                                                                            |
-| --------------------- | ------- | -------------------------------------------------------------------------------- |
-| `city`                | string  | Case-insensitive prefix match                                                    |
-| `minRent` / `maxRent` | number  | Rupees                                                                           |
-| `roomType`            | string  | `single`, `double`, `triple`, `entire_flat`                                      |
-| `bedType`             | string  | `single_bed`, `double_bed`, `bunk_bed`                                           |
-| `preferredGender`     | string  | `male`, `female`, `other`, `prefer_not_to_say`                                   |
-| `listingType`         | string  | `student_room`, `pg_room`, `hostel_bed`                                          |
-| `availableFrom`       | string  | `YYYY-MM-DD`                                                                     |
-| `lat`, `lng`          | number  | Both required together                                                           |
-| `radius`              | number  | Metres, default 5000, max 50000                                                  |
-| `amenityIds`          | string  | Comma-separated UUIDs                                                            |
-| `preferenceOverrides` | string  | **JSON-encoded** array of `{ preferenceKey, preferenceValue }`. Max 20 entries.  |
-| `persistPreferences`  | boolean | `true` to upsert `preferenceOverrides` into `user_preferences`. Default `false`. |
-| `cursorRankScore`     | number  | Float in [0, 1]. Required with `cursorId`.                                       |
-| `cursorId`            | UUID    | Required with `cursorRankScore`.                                                 |
-| `limit`               | integer | 1–100, default 20                                                                |
+| Param                 | Type    | Notes                                                                                                                                 |
+| --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `city`                | string  | Case-insensitive prefix match                                                                                                         |
+| `minRent` / `maxRent` | number  | Rupees                                                                                                                                |
+| `roomType`            | string  | `single`, `double`, `triple`, `entire_flat`                                                                                           |
+| `bedType`             | string  | `single_bed`, `double_bed`, `bunk_bed`                                                                                                |
+| `preferredGender`     | string  | `male`, `female`, `other`, `prefer_not_to_say`                                                                                        |
+| `listingType`         | string  | `student_room`, `pg_room`, `hostel_bed`                                                                                               |
+| `availableFrom`       | string  | `YYYY-MM-DD`                                                                                                                          |
+| `lat`, `lng`          | number  | Both required together                                                                                                                |
+| `radius`              | number  | Metres, default 5000, max 50000                                                                                                       |
+| `amenityIds`          | string  | Comma-separated UUIDs                                                                                                                 |
+| `preferenceOverrides` | string  | **JSON-encoded** array of `{ preferenceKey, preferenceValue }`. Max 20 entries.                                                       |
+| `persistPreferences`  | boolean | `true` to upsert `preferenceOverrides` into `user_preferences`. **Non-safe GET side-effect**, but idempotent upsert. Default `false`. |
+| `cursorRankScore`     | number  | Float in [0, 1]. Required with `cursorId`.                                                                                            |
+| `cursorId`            | UUID    | Required with `cursorRankScore`.                                                                                                      |
+| `limit`               | integer | 1–100, default 20                                                                                                                     |
 
 ### Scenario: first page, user has stored preferences
 
@@ -252,6 +256,10 @@ Status: `200`
 	}
 }
 ```
+
+In this example, `hasGeo` is `false`, so `scoreBreakdown.distance` is reported as `0.5` (neutral baseline). Because
+`weights.distance` is `0.0`, the distance term contributes `0.5 × 0.0 = 0` and is effectively excluded from the final
+`rankScore`.
 
 ### Scenario: cold-start user with geo, temporary overrides
 
@@ -310,12 +318,14 @@ Status: `400`
   schemes.
 - `persistPreferences=true` is fire-and-forget on the server after the response is sent. The client does not receive
   confirmation of persistence in the search response itself.
+- `persistPreferences=true` makes this endpoint non-safe in HTTP semantics. The persistence operation is an upsert on
+  `(user_id, preference_key)`, so repeated identical requests converge to the same DB state.
 - Cold-start users will see good results immediately via rating + freshness + distance signals. As they interact with
   listings and preferences accumulate, the compat weight will increase automatically on subsequent calls without any
   client-side changes.
-- The `scoreBreakdown.distance` field is `0.5` (neutral) for requests without `lat`/`lng`, not `0.0`. This prevents a
-  distance component of zero from pulling down the rank score for listings near the user in cases where geo wasn't
-  provided.
+- When `hasGeo=false`, `scoreBreakdown.distance` is `0.5` (neutral baseline). In the no-geo weight sets,
+  `weights.distance=0.0`, so distance is excluded from the final `rankScore` even though the distance component value is
+  still returned.
 
 ### `GET /listings/:listingId`
 
