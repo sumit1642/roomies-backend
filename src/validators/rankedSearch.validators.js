@@ -10,6 +10,10 @@ const preferenceOverrideSchema = z.object({
 	preferenceValue: z.string().min(1, { error: "preferenceValue cannot be empty" }).max(100),
 });
 
+const preferenceOverridesArraySchema = z
+	.array(preferenceOverrideSchema)
+	.max(20, { error: "At most 20 preference overrides allowed" });
+
 // ─── GET /listings/search/ranked ─────────────────────────────────────────────
 //
 // All standard filter params are optional and identical to GET /listings
@@ -54,24 +58,37 @@ export const rankedSearchSchema = z.object({
 			),
 
 			// Ranked-specific: preference overrides as JSON string
-			preferenceOverrides: z.preprocess(
-				(val) => {
+			preferenceOverrides: z
+				.any()
+				.optional()
+				.superRefine((val, ctx) => {
+					if (val === undefined || val === null || val === "") return;
+
+					if (typeof val === "string") {
+						try {
+							JSON.parse(val);
+						} catch {
+							ctx.addIssue({
+								code: "custom",
+								message: "preferenceOverrides: invalid JSON",
+							});
+						}
+					}
+				})
+				.transform((val) => {
 					if (val === undefined || val === null || val === "") return [];
 					if (typeof val === "string") {
 						try {
-							const parsed = JSON.parse(val);
-							return Array.isArray(parsed) ? parsed : [];
+							return JSON.parse(val);
 						} catch {
-							return [];
+							// Keep malformed values non-array so downstream array validation fails.
+							return val;
 						}
 					}
-					return Array.isArray(val) ? val : [];
-				},
-				z
-					.array(preferenceOverrideSchema)
-					.max(20, { error: "At most 20 preference overrides allowed" })
-					.default([]),
-			),
+					return val;
+				})
+				.pipe(preferenceOverridesArraySchema)
+				.default([]),
 
 			// Whether to persist overrides into user_preferences
 			persistPreferences: z.preprocess((val) => {
