@@ -2,19 +2,11 @@
 
 import { z } from "zod";
 import { buildKeysetPaginationQuerySchema, keysetPaginationQuerySchema } from "./pagination.validators.js";
+import { preferencesSchema, requiredPreferencesSchema } from "./preferences.validators.js";
 
 // ─── Shared sub-schemas ───────────────────────────────────────────────────────
 
 const amenityIdsSchema = z.array(z.uuid({ error: "Each amenity ID must be a valid UUID" })).default([]);
-
-const preferencesSchema = z
-	.array(
-		z.object({
-			preferenceKey: z.string().min(1, { error: "Preference key cannot be empty" }).max(100),
-			preferenceValue: z.string().min(1, { error: "Preference value cannot be empty" }).max(100),
-		}),
-	)
-	.default([]);
 
 const withCoordinateRefinement = (schema) =>
 	schema
@@ -243,7 +235,7 @@ export const updatePreferencesSchema = z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
 	}),
 	body: z.object({
-		preferences: preferencesSchema,
+		preferences: requiredPreferencesSchema,
 	}),
 });
 

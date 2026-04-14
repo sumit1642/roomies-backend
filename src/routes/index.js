@@ -12,6 +12,7 @@ import { interestRouter } from "./interest.js";
 import { connectionRouter } from "./connection.js";
 import { notificationRouter } from "./notification.js";
 import { ratingRouter } from "./rating.js";
+import { preferencesRouter } from "./preferences.js";
 import { testUtilsRouter } from "./testUtils.js";
 import { config } from "../config/env.js";
 
@@ -31,6 +32,7 @@ rootRouter.use("/interests", interestRouter);
 rootRouter.use("/connections", connectionRouter);
 rootRouter.use("/notifications", notificationRouter);
 rootRouter.use("/ratings", ratingRouter);
+rootRouter.use("/preferences", preferencesRouter);
 if (config.NODE_ENV !== "production") {
 	rootRouter.use("/test-utils", testUtilsRouter);
 	// Log at startup so it's always visible in the terminal that this is active

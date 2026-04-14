@@ -5,7 +5,12 @@ import { authenticate } from "../middleware/authenticate.js";
 import { optionalAuthenticate } from "../middleware/optionalAuthenticate.js";
 import { contactRevealGate } from "../middleware/contactRevealGate.js";
 import { validate } from "../middleware/validate.js";
-import { getStudentParamsSchema, updateStudentSchema } from "../validators/student.validators.js";
+import {
+	getStudentParamsSchema,
+	updateStudentSchema,
+	getStudentPreferencesSchema,
+	updateStudentPreferencesSchema,
+} from "../validators/student.validators.js";
 import * as studentController from "../controllers/student.controller.js";
 
 export const studentRouter = Router();
@@ -23,4 +28,18 @@ studentRouter.get(
 	validate(getStudentParamsSchema),
 	contactRevealGate,
 	studentController.revealContact,
+);
+
+studentRouter.get(
+	"/:userId/preferences",
+	authenticate,
+	validate(getStudentPreferencesSchema),
+	studentController.getPreferences,
+);
+
+studentRouter.put(
+	"/:userId/preferences",
+	authenticate,
+	validate(updateStudentPreferencesSchema),
+	studentController.updatePreferences,
 );

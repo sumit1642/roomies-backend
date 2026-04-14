@@ -21,6 +21,28 @@ export const updateProfile = async (req, res, next) => {
 	}
 };
 
+export const getPreferences = async (req, res, next) => {
+	try {
+		const preferences = await studentService.getStudentPreferences(req.user.userId, req.params.userId);
+		res.json({ status: "success", data: preferences });
+	} catch (err) {
+		next(err);
+	}
+};
+
+export const updatePreferences = async (req, res, next) => {
+	try {
+		const preferences = await studentService.updateStudentPreferences(
+			req.user.userId,
+			req.params.userId,
+			req.body.preferences,
+		);
+		res.json({ status: "success", data: preferences });
+	} catch (err) {
+		next(err);
+	}
+};
+
 export const revealContact = async (req, res, next) => {
 	try {
 		// contactRevealGate must always run before this controller. If it is absent

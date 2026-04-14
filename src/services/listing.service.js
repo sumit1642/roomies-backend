@@ -17,6 +17,7 @@ import { assertPgOwnerVerified } from "../db/utils/pgOwner.js";
 import { scoreListingsForUser } from "../db/utils/compatibility.js";
 import { expirePendingRequestsForListing } from "./interest.service.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
+import { dedupePreferencesByKey } from "../config/preferences.js";
 
 // ─── Location fields that belong to the parent property for pg/hostel listings ─
 // These are forbidden on updateListing for pg_room and hostel_bed because the
@@ -55,10 +56,13 @@ const bulkInsertListingAmenities = async (client, listingId, amenityIds) => {
 
 const bulkInsertListingPreferences = async (client, listingId, preferences) => {
 	if (!preferences.length) return;
-	const placeholders = preferences.map((_, i) => `($1, $${i * 2 + 2}, $${i * 2 + 3})`).join(", ");
+	const canonicalPreferences = dedupePreferencesByKey(preferences);
+	if (!canonicalPreferences.length) return;
+
+	const placeholders = canonicalPreferences.map((_, i) => `($1, $${i * 2 + 2}, $${i * 2 + 3})`).join(", ");
 	const values = [
 		listingId,
-		...preferences.flatMap(({ preferenceKey, preferenceValue }) => [preferenceKey, preferenceValue]),
+		...canonicalPreferences.flatMap(({ preferenceKey, preferenceValue }) => [preferenceKey, preferenceValue]),
 	];
 	await client.query(
 		`INSERT INTO listing_preferences (listing_id, preference_key, preference_value)
@@ -491,6 +495,29 @@ export const searchListings = async (userId, filters) => {
 	const listingIds = items.map((r) => r.listing_id);
 	const scoreMap = await scoreListingsForUser(userId, listingIds);
 
+	const { rows: preferenceRows } = await pool.query(
+		`SELECT EXISTS (
+      SELECT 1 FROM user_preferences WHERE user_id = $1
+    ) AS has_preferences`,
+		[userId],
+	);
+	const userHasPreferences = preferenceRows[0]?.has_preferences === true;
+
+	let listingPreferenceCounts = new Map();
+	if (listingIds.length) {
+		const { rows: listingPreferenceRows } = await pool.query(
+			`SELECT listing_id, COUNT(*)::int AS preference_count
+       FROM listing_preferences
+       WHERE listing_id = ANY($1::uuid[])
+       GROUP BY listing_id`,
+			[listingIds],
+		);
+
+		listingPreferenceCounts = new Map(
+			listingPreferenceRows.map((row) => [row.listing_id, Number(row.preference_count)]),
+		);
+	}
+
 	const enrichedItems = items.map((row) => ({
 		...row,
 		rentPerMonth: row.rent_per_month / 100,
@@ -498,6 +525,7 @@ export const searchListings = async (userId, filters) => {
 		rent_per_month: undefined,
 		deposit_amount: undefined,
 		compatibilityScore: scoreMap[row.listing_id] ?? 0,
+		compatibilityAvailable: userHasPreferences && (listingPreferenceCounts.get(row.listing_id) ?? 0) > 0,
 	}));
 
 	const nextCursor =

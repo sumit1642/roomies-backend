@@ -19,21 +19,21 @@ Searches active, non-expired listings visible to the authenticated caller.
 
 - Auth required: Yes
 - Supported query filters:
-  - `city`
-  - `minRent`
-  - `maxRent`
-  - `roomType`
-  - `bedType`
-  - `preferredGender`
-  - `listingType`
-  - `availableFrom`
-  - `lat`
-  - `lng`
-  - `radius`
-  - `amenityIds`
-  - `limit`
-  - `cursorTime`
-  - `cursorId`
+    - `city`
+    - `minRent`
+    - `maxRent`
+    - `roomType`
+    - `bedType`
+    - `preferredGender`
+    - `listingType`
+    - `availableFrom`
+    - `lat`
+    - `lng`
+    - `radius`
+    - `amenityIds`
+    - `limit`
+    - `cursorTime`
+    - `cursorId`
 
 #### Scenario: search with city, rent, and amenity filters
 
@@ -47,25 +47,27 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "items": [
-      {
-        "listingId": "55555555-5555-4555-8555-555555555555",
-        "listingType": "pg_room",
-        "title": "Single room near Viman Nagar",
-        "city": "Pune",
-        "locality": "Viman Nagar",
-        "rentPerMonth": 9500,
-        "depositAmount": 5000,
-        "roomType": "single",
-        "preferredGender": "female",
-        "availableFrom": "2026-05-01T00:00:00.000Z",
-        "status": "active"
-      }
-    ],
-    "nextCursor": null
-  }
+	"status": "success",
+	"data": {
+		"items": [
+			{
+				"listingId": "55555555-5555-4555-8555-555555555555",
+				"listingType": "pg_room",
+				"title": "Single room near Viman Nagar",
+				"city": "Pune",
+				"locality": "Viman Nagar",
+				"rentPerMonth": 9500,
+				"depositAmount": 5000,
+				"compatibilityScore": 2,
+				"compatibilityAvailable": true,
+				"roomType": "single",
+				"preferredGender": "female",
+				"availableFrom": "2026-05-01T00:00:00.000Z",
+				"status": "active"
+			}
+		],
+		"nextCursor": null
+	}
 }
 ```
 
@@ -81,22 +83,24 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "items": [
-      {
-        "listingId": "55555555-5555-4555-8555-555555555555",
-        "listingType": "pg_room",
-        "title": "Single room near Viman Nagar",
-        "city": "Pune",
-        "rentPerMonth": 9500
-      }
-    ],
-    "nextCursor": {
-      "cursorTime": "2026-04-11T10:20:00.000Z",
-      "cursorId": "55555555-5555-4555-8555-555555555555"
-    }
-  }
+	"status": "success",
+	"data": {
+		"items": [
+			{
+				"listingId": "55555555-5555-4555-8555-555555555555",
+				"listingType": "pg_room",
+				"title": "Single room near Viman Nagar",
+				"city": "Pune",
+				"rentPerMonth": 9500,
+				"compatibilityScore": 0,
+				"compatibilityAvailable": false
+			}
+		],
+		"nextCursor": {
+			"cursorTime": "2026-04-11T10:20:00.000Z",
+			"cursorId": "55555555-5555-4555-8555-555555555555"
+		}
+	}
 }
 ```
 
@@ -106,14 +110,14 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Validation failed",
-  "errors": [
-    {
-      "field": "query.minRent",
-      "message": "minRent cannot be greater than maxRent"
-    }
-  ]
+	"status": "error",
+	"message": "Validation failed",
+	"errors": [
+		{
+			"field": "query.minRent",
+			"message": "minRent cannot be greater than maxRent"
+		}
+	]
 }
 ```
 
@@ -123,14 +127,14 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Validation failed",
-  "errors": [
-    {
-      "field": "query.cursorTime",
-      "message": "cursorTime and cursorId must be provided together"
-    }
-  ]
+	"status": "error",
+	"message": "Validation failed",
+	"errors": [
+		{
+			"field": "query.cursorTime",
+			"message": "cursorTime and cursorId must be provided together"
+		}
+	]
 }
 ```
 
@@ -144,53 +148,53 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "listingId": "55555555-5555-4555-8555-555555555555",
-    "postedBy": "22222222-2222-4222-8222-222222222222",
-    "propertyId": "44444444-4444-4444-8444-444444444444",
-    "listingType": "pg_room",
-    "title": "Single room near Viman Nagar",
-    "description": "Ideal for students and interns.",
-    "rentPerMonth": 9500,
-    "depositAmount": 5000,
-    "roomType": "single",
-    "bedType": "single_bed",
-    "totalCapacity": 1,
-    "currentOccupants": 0,
-    "preferredGender": "female",
-    "availableFrom": "2026-05-01T00:00:00.000Z",
-    "availableUntil": null,
-    "addressLine": null,
-    "city": "Pune",
-    "locality": null,
-    "landmark": null,
-    "pincode": null,
-    "latitude": null,
-    "longitude": null,
-    "status": "active",
-    "viewsCount": 12,
-    "expiresAt": "2026-06-10T10:00:00.000Z",
-    "poster_rating": 4.5,
-    "poster_rating_count": 12,
-    "poster_name": "Rohan Mehta",
-    "amenities": [],
-    "preferences": [],
-    "photos": [],
-    "property": {
-      "propertyId": "44444444-4444-4444-8444-444444444444",
-      "propertyName": "Sunrise PG Viman Nagar",
-      "propertyType": "pg",
-      "addressLine": "Lane 5, Viman Nagar",
-      "city": "Pune",
-      "locality": "Viman Nagar",
-      "latitude": 18.5679,
-      "longitude": 73.9143,
-      "houseRules": "No smoking inside rooms.",
-      "averageRating": 4.5,
-      "ratingCount": 12
-    }
-  }
+	"status": "success",
+	"data": {
+		"listingId": "55555555-5555-4555-8555-555555555555",
+		"postedBy": "22222222-2222-4222-8222-222222222222",
+		"propertyId": "44444444-4444-4444-8444-444444444444",
+		"listingType": "pg_room",
+		"title": "Single room near Viman Nagar",
+		"description": "Ideal for students and interns.",
+		"rentPerMonth": 9500,
+		"depositAmount": 5000,
+		"roomType": "single",
+		"bedType": "single_bed",
+		"totalCapacity": 1,
+		"currentOccupants": 0,
+		"preferredGender": "female",
+		"availableFrom": "2026-05-01T00:00:00.000Z",
+		"availableUntil": null,
+		"addressLine": null,
+		"city": "Pune",
+		"locality": null,
+		"landmark": null,
+		"pincode": null,
+		"latitude": null,
+		"longitude": null,
+		"status": "active",
+		"viewsCount": 12,
+		"expiresAt": "2026-06-10T10:00:00.000Z",
+		"poster_rating": 4.5,
+		"poster_rating_count": 12,
+		"poster_name": "Rohan Mehta",
+		"amenities": [],
+		"preferences": [],
+		"photos": [],
+		"property": {
+			"propertyId": "44444444-4444-4444-8444-444444444444",
+			"propertyName": "Sunrise PG Viman Nagar",
+			"propertyType": "pg",
+			"addressLine": "Lane 5, Viman Nagar",
+			"city": "Pune",
+			"locality": "Viman Nagar",
+			"latitude": 18.5679,
+			"longitude": 73.9143,
+			"houseRules": "No smoking inside rooms.",
+			"averageRating": 4.5,
+			"ratingCount": 12
+		}
+	}
 }
 ```
 
@@ -200,8 +204,8 @@ Status: `404`
 
 ```json
 {
-  "status": "error",
-  "message": "Listing not found"
+	"status": "error",
+	"message": "Listing not found"
 }
 ```
 
@@ -215,32 +219,32 @@ Creates a listing owned by the authenticated user.
 
 ```json
 {
-  "listingType": "student_room",
-  "title": "Looking for a roommate near IIT Bombay",
-  "description": "Two-bedroom flat, one room available.",
-  "rentPerMonth": 12000,
-  "depositAmount": 15000,
-  "rentIncludesUtilities": false,
-  "isNegotiable": true,
-  "roomType": "single",
-  "bedType": "single_bed",
-  "totalCapacity": 1,
-  "preferredGender": "female",
-  "availableFrom": "2026-05-01",
-  "addressLine": "Flat 8B, Powai Residency",
-  "city": "Mumbai",
-  "locality": "Powai",
-  "landmark": "Near IIT Main Gate",
-  "pincode": "400076",
-  "latitude": 19.1334,
-  "longitude": 72.9133,
-  "amenityIds": [],
-  "preferences": [
-    {
-      "preferenceKey": "sleep_schedule",
-      "preferenceValue": "early"
-    }
-  ]
+	"listingType": "student_room",
+	"title": "Looking for a roommate near IIT Bombay",
+	"description": "Two-bedroom flat, one room available.",
+	"rentPerMonth": 12000,
+	"depositAmount": 15000,
+	"rentIncludesUtilities": false,
+	"isNegotiable": true,
+	"roomType": "single",
+	"bedType": "single_bed",
+	"totalCapacity": 1,
+	"preferredGender": "female",
+	"availableFrom": "2026-05-01",
+	"addressLine": "Flat 8B, Powai Residency",
+	"city": "Mumbai",
+	"locality": "Powai",
+	"landmark": "Near IIT Main Gate",
+	"pincode": "400076",
+	"latitude": 19.1334,
+	"longitude": 72.9133,
+	"amenityIds": [],
+	"preferences": [
+		{
+			"preferenceKey": "sleep_schedule",
+			"preferenceValue": "early"
+		}
+	]
 }
 ```
 
@@ -248,21 +252,21 @@ Creates a listing owned by the authenticated user.
 
 ```json
 {
-  "listingType": "pg_room",
-  "propertyId": "44444444-4444-4444-8444-444444444444",
-  "title": "Single room in verified PG",
-  "description": "Meals and Wi-Fi included.",
-  "rentPerMonth": 9500,
-  "depositAmount": 5000,
-  "rentIncludesUtilities": true,
-  "isNegotiable": false,
-  "roomType": "single",
-  "bedType": "single_bed",
-  "totalCapacity": 1,
-  "preferredGender": "female",
-  "availableFrom": "2026-05-01",
-  "amenityIds": [],
-  "preferences": []
+	"listingType": "pg_room",
+	"propertyId": "44444444-4444-4444-8444-444444444444",
+	"title": "Single room in verified PG",
+	"description": "Meals and Wi-Fi included.",
+	"rentPerMonth": 9500,
+	"depositAmount": 5000,
+	"rentIncludesUtilities": true,
+	"isNegotiable": false,
+	"roomType": "single",
+	"bedType": "single_bed",
+	"totalCapacity": 1,
+	"preferredGender": "female",
+	"availableFrom": "2026-05-01",
+	"amenityIds": [],
+	"preferences": []
 }
 ```
 
@@ -272,13 +276,13 @@ Status: `201`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "listingId": "55555555-5555-4555-8555-555555555555",
-    "listingType": "student_room",
-    "title": "Looking for a roommate near IIT Bombay",
-    "rentPerMonth": 12000
-  }
+	"status": "success",
+	"data": {
+		"listingId": "55555555-5555-4555-8555-555555555555",
+		"listingType": "student_room",
+		"title": "Looking for a roommate near IIT Bombay",
+		"rentPerMonth": 12000
+	}
 }
 ```
 
@@ -288,14 +292,14 @@ Status: `201`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "listingId": "55555555-5555-4555-8555-555555555555",
-    "listingType": "pg_room",
-    "propertyId": "44444444-4444-4444-8444-444444444444",
-    "title": "Single room in verified PG",
-    "rentPerMonth": 9500
-  }
+	"status": "success",
+	"data": {
+		"listingId": "55555555-5555-4555-8555-555555555555",
+		"listingType": "pg_room",
+		"propertyId": "44444444-4444-4444-8444-444444444444",
+		"title": "Single room in verified PG",
+		"rentPerMonth": 9500
+	}
 }
 ```
 
@@ -305,14 +309,14 @@ Status: `201`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "listingId": "55555555-5555-4555-8555-555555555555",
-    "listingType": "hostel_bed",
-    "propertyId": "44444444-4444-4444-8444-444444444444",
-    "title": "Hostel bed near college",
-    "rentPerMonth": 6500
-  }
+	"status": "success",
+	"data": {
+		"listingId": "55555555-5555-4555-8555-555555555555",
+		"listingType": "hostel_bed",
+		"propertyId": "44444444-4444-4444-8444-444444444444",
+		"title": "Hostel bed near college",
+		"rentPerMonth": 6500
+	}
 }
 ```
 
@@ -322,8 +326,8 @@ Status: `403`
 
 ```json
 {
-  "status": "error",
-  "message": "Only verified PG owners can create pg_room or hostel_bed listings"
+	"status": "error",
+	"message": "Only verified PG owners can create pg_room or hostel_bed listings"
 }
 ```
 
@@ -333,8 +337,8 @@ Status: `403`
 
 ```json
 {
-  "status": "error",
-  "message": "Only students can create student_room listings"
+	"status": "error",
+	"message": "Only students can create student_room listings"
 }
 ```
 
@@ -344,8 +348,8 @@ Status: `403`
 
 ```json
 {
-  "status": "error",
-  "message": "Your account must be verified before you can manage properties or listings"
+	"status": "error",
+	"message": "Your account must be verified before you can manage properties or listings"
 }
 ```
 
@@ -355,8 +359,8 @@ Status: `404`
 
 ```json
 {
-  "status": "error",
-  "message": "Property not found or does not belong to you"
+	"status": "error",
+	"message": "Property not found or does not belong to you"
 }
 ```
 
@@ -366,14 +370,14 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Validation failed",
-  "errors": [
-    {
-      "field": "body.addressLine",
-      "message": "addressLine and city are required for student_room listings"
-    }
-  ]
+	"status": "error",
+	"message": "Validation failed",
+	"errors": [
+		{
+			"field": "body.addressLine",
+			"message": "addressLine and city are required for student_room listings"
+		}
+	]
 }
 ```
 
@@ -383,14 +387,14 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Validation failed",
-  "errors": [
-    {
-      "field": "body.latitude",
-      "message": "Coordinates are not accepted for pg_room or hostel_bed listings — location is inherited from the property"
-    }
-  ]
+	"status": "error",
+	"message": "Validation failed",
+	"errors": [
+		{
+			"field": "body.latitude",
+			"message": "Coordinates are not accepted for pg_room or hostel_bed listings — location is inherited from the property"
+		}
+	]
 }
 ```
 
@@ -402,10 +406,10 @@ Updates a listing owned by the authenticated user.
 
 ```json
 {
-  "title": "Updated title",
-  "description": "Now includes cleaning twice a week.",
-  "rentPerMonth": 9800,
-  "isNegotiable": true
+	"title": "Updated title",
+	"description": "Now includes cleaning twice a week.",
+	"rentPerMonth": 9800,
+	"isNegotiable": true
 }
 ```
 
@@ -415,13 +419,13 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "listingId": "55555555-5555-4555-8555-555555555555",
-    "title": "Updated title",
-    "rentPerMonth": 9800,
-    "isNegotiable": true
-  }
+	"status": "success",
+	"data": {
+		"listingId": "55555555-5555-4555-8555-555555555555",
+		"title": "Updated title",
+		"rentPerMonth": 9800,
+		"isNegotiable": true
+	}
 }
 ```
 
@@ -431,8 +435,8 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "No valid fields provided for update"
+	"status": "error",
+	"message": "No valid fields provided for update"
 }
 ```
 
@@ -442,8 +446,8 @@ Status: `422`
 
 ```json
 {
-  "status": "error",
-  "message": "Location fields (city, latitude) cannot be updated on a pg_room listing — they are inherited from the parent property. Update the property's address instead."
+	"status": "error",
+	"message": "Location fields (city, latitude) cannot be updated on a pg_room listing — they are inherited from the parent property. Update the property's address instead."
 }
 ```
 
@@ -453,8 +457,8 @@ Status: `404`
 
 ```json
 {
-  "status": "error",
-  "message": "Listing not found"
+	"status": "error",
+	"message": "Listing not found"
 }
 ```
 
@@ -468,11 +472,11 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "listingId": "55555555-5555-4555-8555-555555555555",
-    "deleted": true
-  }
+	"status": "success",
+	"data": {
+		"listingId": "55555555-5555-4555-8555-555555555555",
+		"deleted": true
+	}
 }
 ```
 
@@ -486,7 +490,7 @@ Supports poster-driven lifecycle transitions among `active`, `filled`, and `deac
 
 ```json
 {
-  "status": "deactivated"
+	"status": "deactivated"
 }
 ```
 
@@ -496,11 +500,11 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "listingId": "55555555-5555-4555-8555-555555555555",
-    "status": "deactivated"
-  }
+	"status": "success",
+	"data": {
+		"listingId": "55555555-5555-4555-8555-555555555555",
+		"status": "deactivated"
+	}
 }
 ```
 
@@ -510,11 +514,11 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "listingId": "55555555-5555-4555-8555-555555555555",
-    "status": "filled"
-  }
+	"status": "success",
+	"data": {
+		"listingId": "55555555-5555-4555-8555-555555555555",
+		"status": "filled"
+	}
 }
 ```
 
@@ -524,8 +528,8 @@ Status: `422`
 
 ```json
 {
-  "status": "error",
-  "message": "Cannot change listing status from 'filled' to 'deactivated'"
+	"status": "error",
+	"message": "Cannot change listing status from 'filled' to 'deactivated'"
 }
 ```
 
@@ -535,8 +539,8 @@ Status: `422`
 
 ```json
 {
-  "status": "error",
-  "message": "Listing has expired and is no longer available"
+	"status": "error",
+	"message": "Listing has expired and is no longer available"
 }
 ```
 
@@ -546,8 +550,8 @@ Status: `409`
 
 ```json
 {
-  "status": "error",
-  "message": "Listing status has already changed — please refresh"
+	"status": "error",
+	"message": "Listing status has already changed — please refresh"
 }
 ```
 
@@ -559,17 +563,17 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": [
-    {
-      "preferenceKey": "sleep_schedule",
-      "preferenceValue": "early"
-    },
-    {
-      "preferenceKey": "cleanliness",
-      "preferenceValue": "high"
-    }
-  ]
+	"status": "success",
+	"data": [
+		{
+			"preferenceKey": "sleep_schedule",
+			"preferenceValue": "early"
+		},
+		{
+			"preferenceKey": "cleanliness",
+			"preferenceValue": "high"
+		}
+	]
 }
 ```
 
@@ -579,12 +583,12 @@ Status: `200`
 
 ```json
 {
-  "preferences": [
-    {
-      "preferenceKey": "sleep_schedule",
-      "preferenceValue": "early"
-    }
-  ]
+	"preferences": [
+		{
+			"preferenceKey": "sleep_schedule",
+			"preferenceValue": "early"
+		}
+	]
 }
 ```
 
@@ -594,13 +598,13 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": [
-    {
-      "preferenceKey": "sleep_schedule",
-      "preferenceValue": "early"
-    }
-  ]
+	"status": "success",
+	"data": [
+		{
+			"preferenceKey": "sleep_schedule",
+			"preferenceValue": "early"
+		}
+	]
 }
 ```
 
@@ -616,11 +620,11 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "listingId": "55555555-5555-4555-8555-555555555555",
-    "saved": true
-  }
+	"status": "success",
+	"data": {
+		"listingId": "55555555-5555-4555-8555-555555555555",
+		"saved": true
+	}
 }
 ```
 
@@ -630,8 +634,8 @@ Status: `403`
 
 ```json
 {
-  "status": "error",
-  "message": "Forbidden"
+	"status": "error",
+	"message": "Forbidden"
 }
 ```
 
@@ -641,8 +645,8 @@ Status: `422`
 
 ```json
 {
-  "status": "error",
-  "message": "Listing has expired and is no longer available"
+	"status": "error",
+	"message": "Listing has expired and is no longer available"
 }
 ```
 
@@ -652,8 +656,8 @@ Status: `422`
 
 ```json
 {
-  "status": "error",
-  "message": "Listing is no longer available"
+	"status": "error",
+	"message": "Listing is no longer available"
 }
 ```
 
@@ -665,11 +669,11 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "listingId": "55555555-5555-4555-8555-555555555555",
-    "saved": false
-  }
+	"status": "success",
+	"data": {
+		"listingId": "55555555-5555-4555-8555-555555555555",
+		"saved": false
+	}
 }
 ```
 
@@ -683,35 +687,36 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "items": [
-      {
-        "listing_id": "55555555-5555-4555-8555-555555555555",
-        "listing_type": "pg_room",
-        "title": "Single room in verified PG",
-        "city": "Pune",
-        "locality": "Viman Nagar",
-        "room_type": "single",
-        "preferred_gender": "female",
-        "available_from": "2026-05-01T00:00:00.000Z",
-        "status": "active",
-        "saved_at": "2026-04-11T10:30:00.000Z",
-        "property_name": "Sunrise PG Viman Nagar",
-        "average_rating": 4.5,
-        "cover_photo_url": null,
-        "rentPerMonth": 9500,
-        "depositAmount": 5000
-      }
-    ],
-    "nextCursor": null
-  }
+	"status": "success",
+	"data": {
+		"items": [
+			{
+				"listing_id": "55555555-5555-4555-8555-555555555555",
+				"listing_type": "pg_room",
+				"title": "Single room in verified PG",
+				"city": "Pune",
+				"locality": "Viman Nagar",
+				"room_type": "single",
+				"preferred_gender": "female",
+				"available_from": "2026-05-01T00:00:00.000Z",
+				"status": "active",
+				"saved_at": "2026-04-11T10:30:00.000Z",
+				"property_name": "Sunrise PG Viman Nagar",
+				"average_rating": 4.5,
+				"cover_photo_url": null,
+				"rentPerMonth": 9500,
+				"depositAmount": 5000
+			}
+		],
+		"nextCursor": null
+	}
 }
 ```
 
 ## Photos
 
-Photo uploads are asynchronous. The HTTP request inserts a provisional row and queues a worker job. Clients should poll `GET /listings/:listingId/photos`.
+Photo uploads are asynchronous. The HTTP request inserts a provisional row and queues a worker job. Clients should poll
+`GET /listings/:listingId/photos`.
 
 ### `GET /listings/:listingId/photos`
 
@@ -723,16 +728,16 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": [
-    {
-      "photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
-      "photoUrl": "https://storage.example.com/listings/555/photo-1.webp",
-      "isCover": true,
-      "displayOrder": 0,
-      "createdAt": "2026-04-11T10:40:00.000Z"
-    }
-  ]
+	"status": "success",
+	"data": [
+		{
+			"photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
+			"photoUrl": "https://storage.example.com/listings/555/photo-1.webp",
+			"isCover": true,
+			"displayOrder": 0,
+			"createdAt": "2026-04-11T10:40:00.000Z"
+		}
+	]
 }
 ```
 
@@ -752,11 +757,11 @@ Status: `202`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
-    "status": "processing"
-  }
+	"status": "success",
+	"data": {
+		"photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
+		"status": "processing"
+	}
 }
 ```
 
@@ -766,8 +771,8 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "No file uploaded — send the image under the field name 'photo'"
+	"status": "error",
+	"message": "No file uploaded — send the image under the field name 'photo'"
 }
 ```
 
@@ -777,8 +782,8 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Unsupported file type: image/gif. Accepted types: JPEG, PNG, WebP"
+	"status": "error",
+	"message": "Unsupported file type: image/gif. Accepted types: JPEG, PNG, WebP"
 }
 ```
 
@@ -788,8 +793,8 @@ Status: `503`
 
 ```json
 {
-  "status": "error",
-  "message": "Photo processing queue is temporarily unavailable. Please retry."
+	"status": "error",
+	"message": "Photo processing queue is temporarily unavailable. Please retry."
 }
 ```
 
@@ -801,11 +806,11 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
-    "deleted": true
-  }
+	"status": "success",
+	"data": {
+		"photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
+		"deleted": true
+	}
 }
 ```
 
@@ -817,11 +822,11 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
-    "isCover": true
-  }
+	"status": "success",
+	"data": {
+		"photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
+		"isCover": true
+	}
 }
 ```
 
@@ -831,8 +836,8 @@ Status: `409`
 
 ```json
 {
-  "status": "error",
-  "message": "Cover photo update conflicted with a concurrent change. Please retry."
+	"status": "error",
+	"message": "Cover photo update conflicted with a concurrent change. Please retry."
 }
 ```
 
@@ -842,16 +847,16 @@ Status: `409`
 
 ```json
 {
-  "photos": [
-    {
-      "photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
-      "displayOrder": 0
-    },
-    {
-      "photoId": "bcf8f73b-b1bd-4e30-9a7e-a82a18252d28",
-      "displayOrder": 1
-    }
-  ]
+	"photos": [
+		{
+			"photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
+			"displayOrder": 0
+		},
+		{
+			"photoId": "bcf8f73b-b1bd-4e30-9a7e-a82a18252d28",
+			"displayOrder": 1
+		}
+	]
 }
 ```
 
@@ -861,16 +866,16 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": [
-    {
-      "photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
-      "photoUrl": "https://storage.example.com/listings/555/photo-1.webp",
-      "isCover": true,
-      "displayOrder": 0,
-      "createdAt": "2026-04-11T10:40:00.000Z"
-    }
-  ]
+	"status": "success",
+	"data": [
+		{
+			"photoId": "6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e",
+			"photoUrl": "https://storage.example.com/listings/555/photo-1.webp",
+			"isCover": true,
+			"displayOrder": 0,
+			"createdAt": "2026-04-11T10:40:00.000Z"
+		}
+	]
 }
 ```
 
@@ -880,8 +885,8 @@ Status: `422`
 
 ```json
 {
-  "status": "error",
-  "message": "Duplicate photo IDs in reorder payload: 6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e"
+	"status": "error",
+	"message": "Duplicate photo IDs in reorder payload: 6fd7cf0b-d6a7-4f31-bd0a-fdbcf5a5ef2e"
 }
 ```
 
@@ -891,8 +896,8 @@ Status: `422`
 
 ```json
 {
-  "status": "error",
-  "message": "Duplicate displayOrder values in reorder payload: 0"
+	"status": "error",
+	"message": "Duplicate displayOrder values in reorder payload: 0"
 }
 ```
 
@@ -902,8 +907,8 @@ Status: `422`
 
 ```json
 {
-  "status": "error",
-  "message": "Invalid photo IDs for this listing: 11111111-aaaa-4aaa-8aaa-111111111111"
+	"status": "error",
+	"message": "Invalid photo IDs for this listing: 11111111-aaaa-4aaa-8aaa-111111111111"
 }
 ```
 
@@ -913,21 +918,21 @@ Status: `422`
 
 ```json
 {
-  "status": "error",
-  "message": "Reorder payload must include all photos. Submitted 1, expected 3."
+	"status": "error",
+	"message": "Reorder payload must include all photos. Submitted 1, expected 3."
 }
 ```
 
 ## Listing Scenario Matrix
 
-| Scenario | Endpoint | Status | Key behavior |
-| --- | --- | --- | --- |
-| Student creates roommate listing | `POST /listings` | `201` | requires address and city |
-| PG owner creates PG listing | `POST /listings` | `201` | requires verified owner and owned property |
-| Expired listing save attempt | `POST /listings/:listingId/save` | `422` | expired listings cannot be saved |
-| Status changed concurrently | `PATCH /listings/:listingId/status` | `409` | caller should refresh |
-| Photo upload request | `POST /listings/:listingId/photos` | `202` | worker-based async processing |
-| Reorder omits some photos | `PUT /listings/:listingId/photos/reorder` | `422` | full active photo set required |
+| Scenario                         | Endpoint                                  | Status | Key behavior                               |
+| -------------------------------- | ----------------------------------------- | ------ | ------------------------------------------ |
+| Student creates roommate listing | `POST /listings`                          | `201`  | requires address and city                  |
+| PG owner creates PG listing      | `POST /listings`                          | `201`  | requires verified owner and owned property |
+| Expired listing save attempt     | `POST /listings/:listingId/save`          | `422`  | expired listings cannot be saved           |
+| Status changed concurrently      | `PATCH /listings/:listingId/status`       | `409`  | caller should refresh                      |
+| Photo upload request             | `POST /listings/:listingId/photos`        | `202`  | worker-based async processing              |
+| Reorder omits some photos        | `PUT /listings/:listingId/photos/reorder` | `422`  | full active photo set required             |
 
 ## Integrator Notes
 
