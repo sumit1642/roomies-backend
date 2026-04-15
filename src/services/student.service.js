@@ -2,6 +2,22 @@
 
 import { pool } from "../db/client.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { logger } from "../logger/index.js";
+import { dedupePreferencesByKey } from "../config/preferences.js";
+
+const assertStudentProfileExists = async (clientOrPool, userId) => {
+	const { rows } = await clientOrPool.query(
+		`SELECT 1
+     FROM student_profiles
+     WHERE user_id = $1
+       AND deleted_at IS NULL`,
+		[userId],
+	);
+
+	if (!rows.length) {
+		throw new AppError("Student profile not found", 404);
+	}
+};
 
 export const getStudentProfile = async (requestingUserId, targetUserId) => {
 	const { rows } = await pool.query(
@@ -127,4 +143,67 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 	}
 
 	return rows[0];
+};
+
+const bulkInsertUserPreferences = async (client, userId, preferences) => {
+	if (!preferences.length) return;
+
+	const placeholders = preferences.map((_, i) => `($1, $${i * 2 + 2}, $${i * 2 + 3})`).join(", ");
+	const values = [
+		userId,
+		...preferences.flatMap(({ preferenceKey, preferenceValue }) => [preferenceKey, preferenceValue]),
+	];
+
+	await client.query(
+		`INSERT INTO user_preferences (user_id, preference_key, preference_value)
+     VALUES ${placeholders}`,
+		values,
+	);
+};
+
+export const getStudentPreferences = async (requestingUserId, targetUserId) => {
+	if (requestingUserId !== targetUserId) {
+		throw new AppError("Forbidden", 403);
+	}
+
+	await assertStudentProfileExists(pool, targetUserId);
+
+	const { rows } = await pool.query(
+		`SELECT preference_key AS "preferenceKey", preference_value AS "preferenceValue"
+     FROM user_preferences
+     WHERE user_id = $1
+     ORDER BY preference_key`,
+		[targetUserId],
+	);
+
+	return rows;
+};
+
+export const updateStudentPreferences = async (requestingUserId, targetUserId, preferences) => {
+	if (requestingUserId !== targetUserId) {
+		throw new AppError("Forbidden", 403);
+	}
+
+	const dedupedPreferences = dedupePreferencesByKey(preferences);
+
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
+		await assertStudentProfileExists(client, targetUserId);
+		await client.query(`DELETE FROM user_preferences WHERE user_id = $1`, [targetUserId]);
+		await bulkInsertUserPreferences(client, targetUserId, dedupedPreferences);
+		await client.query("COMMIT");
+
+		logger.info(
+			{ userId: targetUserId, preferenceCount: dedupedPreferences.length },
+			"Student preferences updated",
+		);
+
+		return dedupedPreferences;
+	} catch (err) {
+		await client.query("ROLLBACK");
+		throw err;
+	} finally {
+		client.release();
+	}
 };
