@@ -20,9 +20,12 @@ export const getListing = async (req, res, next) => {
 	}
 };
 
+// userId is nullable: req.user is undefined for guests (optionalAuthenticate ran).
+// Passing null signals the service to skip compatibility scoring.
 export const searchListings = async (req, res, next) => {
 	try {
-		const result = await listingService.searchListings(req.user.userId, req.query);
+		const userId = req.user?.userId ?? null;
+		const result = await listingService.searchListings(userId, req.query);
 		res.json({ status: "success", data: result });
 	} catch (err) {
 		next(err);
@@ -47,11 +50,6 @@ export const deleteListing = async (req, res, next) => {
 	}
 };
 
-// PATCH /api/v1/listings/:listingId/status
-// Poster-initiated lifecycle transitions: active→filled, active→deactivated,
-// deactivated→active. The service enforces the allowed state machine and
-// runs expirePendingRequestsForListing inside the same transaction when
-// moving away from active.
 export const updateListingStatus = async (req, res, next) => {
 	try {
 		const result = await listingService.updateListingStatus(req.user.userId, req.params.listingId, req.body.status);

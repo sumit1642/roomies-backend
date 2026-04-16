@@ -8,6 +8,14 @@
 // This file is the ONLY place where the conversion happens:
 //   write path:  rupees × 100  before any INSERT or UPDATE
 //   read path:   paise  ÷ 100  after any SELECT, before returning to caller
+//
+// ─── GUEST ACCESS ────────────────────────────────────────────────────────────
+//
+// searchListings and getListing accept a nullable userId (null for guests).
+// When userId is null:
+//   - Compatibility scoring is skipped (no user preferences to compare against)
+//   - compatibilityScore is always 0, compatibilityAvailable is always false
+//   - All other listing data is returned normally
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { pool } from "../db/client.js";
@@ -20,10 +28,6 @@ import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingL
 import { dedupePreferencesByKey } from "../config/preferences.js";
 
 // ─── Location fields that belong to the parent property for pg/hostel listings ─
-// These are forbidden on updateListing for pg_room and hostel_bed because the
-// listing row inherits them from its parent property. Allowing edits here would
-// cause the listing to drift away from the property's true location, breaking
-// proximity search and data integrity.
 const PROPERTY_OWNED_LOCATION_FIELDS = new Set([
 	"addressLine",
 	"city",
@@ -309,6 +313,11 @@ export const createListing = async (posterId, posterRoles, body) => {
 	}
 };
 
+// ─── Get single listing ───────────────────────────────────────────────────────
+//
+// userId may be null for guest callers. The listing detail is returned
+// regardless — guests see all listing data except compatibility scoring,
+// which requires a logged-in user's preferences.
 export const getListing = async (listingId) => {
 	const listing = await fetchListingDetail(listingId);
 	if (!listing) throw new AppError("Listing not found", 404);
@@ -322,6 +331,13 @@ export const getListing = async (listingId) => {
 	return toRupees(listing);
 };
 
+// ─── Search listings ──────────────────────────────────────────────────────────
+//
+// userId may be null when called for a guest (optionalAuthenticate set no user).
+// When null:
+//   - scoreListingsForUser is skipped entirely
+//   - every item gets compatibilityScore: 0 and compatibilityAvailable: false
+//   - all filter/sort/pagination logic is identical to the authenticated path
 export const searchListings = async (userId, filters) => {
 	const {
 		city,
@@ -358,28 +374,6 @@ export const searchListings = async (userId, filters) => {
 	}
 
 	if (city !== undefined) {
-		// ── FIX (Finding 1): Use LOWER(city) LIKE instead of ILIKE ──────────────
-		//
-		// The original query used `l.city ILIKE $n ESCAPE '\'`, which PostgreSQL
-		// cannot serve from any B-Tree or pattern-ops index because ILIKE bypasses
-		// the C locale assumptions those index types rely on. Every city search
-		// was falling back to a sequential scan of all active, non-deleted rows.
-		//
-		// The replacement `LOWER(l.city) LIKE LOWER($n) ESCAPE '\'` is semantically
-		// identical (case-insensitive prefix match) but matches the expression on
-		// the new functional index idx_listings_city_lower, which is defined as:
-		//
-		//   CREATE INDEX idx_listings_city_lower ON listings (LOWER(city))
-		//   WHERE status = 'active' AND deleted_at IS NULL;
-		//
-		// Because the index expression (LOWER(city)) is immutable and the WHERE
-		// clause predicates (status = 'active' AND deleted_at IS NULL) match the
-		// outer query filters exactly, the planner can do a fast B-Tree prefix
-		// scan: O(log N) instead of O(N).
-		//
-		// The LIKE metacharacter escaping (%, _, \) is unchanged from the original
-		// — it must remain to prevent user-supplied wildcards from becoming
-		// unintentional query metacharacters.
 		const escapedCity = city.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 		clauses.push(`LOWER(l.city) LIKE LOWER($${p}) ESCAPE '\\'`);
 		params.push(`${escapedCity}%`);
@@ -492,30 +486,37 @@ export const searchListings = async (userId, filters) => {
 	const hasNextPage = rows.length > limit;
 	const items = hasNextPage ? rows.slice(0, limit) : rows;
 
-	const listingIds = items.map((r) => r.listing_id);
-	const scoreMap = await scoreListingsForUser(userId, listingIds);
-
-	const { rows: preferenceRows } = await pool.query(
-		`SELECT EXISTS (
-      SELECT 1 FROM user_preferences WHERE user_id = $1
-    ) AS has_preferences`,
-		[userId],
-	);
-	const userHasPreferences = preferenceRows[0]?.has_preferences === true;
-
+	// Compatibility scoring requires an authenticated user with saved preferences.
+	// For guests (userId === null), skip both DB queries and return zero scores.
+	let scoreMap = {};
+	let userHasPreferences = false;
 	let listingPreferenceCounts = new Map();
-	if (listingIds.length) {
-		const { rows: listingPreferenceRows } = await pool.query(
-			`SELECT listing_id, COUNT(*)::int AS preference_count
-       FROM listing_preferences
-       WHERE listing_id = ANY($1::uuid[])
-       GROUP BY listing_id`,
-			[listingIds],
-		);
 
-		listingPreferenceCounts = new Map(
-			listingPreferenceRows.map((row) => [row.listing_id, Number(row.preference_count)]),
+	if (userId !== null) {
+		const listingIds = items.map((r) => r.listing_id);
+		scoreMap = await scoreListingsForUser(userId, listingIds);
+
+		const { rows: preferenceRows } = await pool.query(
+			`SELECT EXISTS (
+        SELECT 1 FROM user_preferences WHERE user_id = $1
+      ) AS has_preferences`,
+			[userId],
 		);
+		userHasPreferences = preferenceRows[0]?.has_preferences === true;
+
+		if (listingIds.length) {
+			const { rows: listingPreferenceRows } = await pool.query(
+				`SELECT listing_id, COUNT(*)::int AS preference_count
+         FROM listing_preferences
+         WHERE listing_id = ANY($1::uuid[])
+         GROUP BY listing_id`,
+				[listingIds],
+			);
+
+			listingPreferenceCounts = new Map(
+				listingPreferenceRows.map((row) => [row.listing_id, Number(row.preference_count)]),
+			);
+		}
 	}
 
 	const enrichedItems = items.map((row) => ({
@@ -524,8 +525,9 @@ export const searchListings = async (userId, filters) => {
 		depositAmount: row.deposit_amount / 100,
 		rent_per_month: undefined,
 		deposit_amount: undefined,
-		compatibilityScore: scoreMap[row.listing_id] ?? 0,
-		compatibilityAvailable: userHasPreferences && (listingPreferenceCounts.get(row.listing_id) ?? 0) > 0,
+		compatibilityScore: userId !== null ? (scoreMap[row.listing_id] ?? 0) : 0,
+		compatibilityAvailable:
+			userId !== null && userHasPreferences && (listingPreferenceCounts.get(row.listing_id) ?? 0) > 0,
 	}));
 
 	const nextCursor =

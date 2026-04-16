@@ -1,5 +1,17 @@
 // src/routes/listing.js
 //
+// ─── AUTH POLICY ─────────────────────────────────────────────────────────────
+//
+// READ routes (GET / and GET /:listingId):
+//   optionalAuthenticate → guestListingGate → validate → controller
+//
+//   Guests can browse freely. optionalAuthenticate resolves req.user if a
+//   valid token is present; guestListingGate caps the response size for guests.
+//   The service omits compatibility scoring when req.user is absent.
+//
+// WRITE routes (POST, PUT, PATCH, DELETE) and saved listings:
+//   authenticate (required) — unchanged behaviour.
+//
 // ─── ROUTE REGISTRATION ORDER NOTE ───────────────────────────────────────────
 // Static path segments must be registered BEFORE parameterised segments that
 // share the same prefix, or the parameterised route will shadow them.
@@ -8,6 +20,8 @@
 
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
+import { optionalAuthenticate } from "../middleware/optionalAuthenticate.js";
+import { guestListingGate } from "../middleware/guestListingGate.js";
 import { authorize } from "../middleware/authorize.js";
 import { validate } from "../middleware/validate.js";
 import {
@@ -35,6 +49,7 @@ export const listingRouter = Router();
 
 // ─── Static routes first — must precede /:listingId ──────────────────────────
 
+// Saved listings: auth required (student only)
 listingRouter.get(
 	"/me/saved",
 	authenticate,
@@ -43,23 +58,37 @@ listingRouter.get(
 	listingController.getSavedListings,
 );
 
-listingRouter.get("/", authenticate, validate(searchListingsSchema), listingController.searchListings);
+// Search listings: guests allowed
+// Chain: optionalAuthenticate → validate → guestListingGate → controller
+// validate runs before guestListingGate so that the limit field is already
+// coerced to a number (by Zod) when guestListingGate reads it.
+listingRouter.get(
+	"/",
+	optionalAuthenticate,
+	validate(searchListingsSchema),
+	guestListingGate,
+	listingController.searchListings,
+);
 
+// Create listing: auth required
 listingRouter.post("/", authenticate, validate(createListingSchema), listingController.createListing);
 
 // ─── Parameterised routes — after all static routes ──────────────────────────
 
-listingRouter.get("/:listingId", authenticate, validate(listingParamsSchema), listingController.getListing);
+// Get single listing: guests allowed
+listingRouter.get(
+	"/:listingId",
+	optionalAuthenticate,
+	validate(listingParamsSchema),
+	guestListingGate,
+	listingController.getListing,
+);
 
+// Write routes: auth required
 listingRouter.put("/:listingId", authenticate, validate(updateListingSchema), listingController.updateListing);
 
 listingRouter.delete("/:listingId", authenticate, validate(listingParamsSchema), listingController.deleteListing);
 
-// PATCH /:listingId/status — poster-initiated lifecycle transitions.
-// Both students (their student_room listings) and PG owners (their pg_room /
-// hostel_bed listings) use this endpoint. No role restriction at the route level
-// because both role types can be listing posters. The service enforces ownership
-// via WHERE posted_by = $2 and validates the state machine transition.
 listingRouter.patch(
 	"/:listingId/status",
 	authenticate,
