@@ -1,120 +1,139 @@
 // src/config/env.js
+//
+// ─── ENVIRONMENT LOADING ─────────────────────────────────────────────────────
+//
+// ENV_FILE is set by the npm script before Node starts:
+//   npm run dev             → ENV_FILE=.env.local  (Ethereal mail + local DB/Redis)
+//   npm run dev:azure       → ENV_FILE=.env.azure  (Azure DB/Redis + Brevo mail)
+//   npm run dev:brevo       → ENV_FILE=.env.local  (local DB/Redis + Brevo mail)
+//   npm run start:prod      → no ENV_FILE          (App Service env vars, no .env file)
+//
+// If no ENV_FILE is set (bare `node src/server.js` in production), dotenv
+// simply finds nothing to load — the process inherits env vars from the shell
+// or from Azure App Service Application Settings. That is correct behaviour.
 
 import { z } from "zod";
 import dotenv from "dotenv";
 
-// ENV_FILE is set by the npm script before Node starts.
-// npm run dev:ethereal       → ENV_FILE=.env.local   (local DB + Ethereal mail)
-// npm run dev:brevo          → ENV_FILE=.env.local   (local DB + Brevo SMTP)
-// npm run dev:azure_ethereal → ENV_FILE=.env.azure   (Azure DB + Ethereal mail)
-// npm run dev:azure_brevo    → ENV_FILE=.env.azure   (Azure DB + Brevo SMTP)
-// Kept for backward compat:
-// npm run dev                → ENV_FILE=.env.local
-// npm run dev:azure          → ENV_FILE=.env.azure
-//
-// If run directly without an npm script, falls back to .env.local then .env.
 const envFile = process.env.ENV_FILE;
 if (envFile) {
 	dotenv.config({ path: envFile });
 } else {
+	// Fallback for bare local invocations. Production (App Service) sets env
+	// vars natively so dotenv is a no-op there — both calls just produce empty.
 	dotenv.config({ path: ".env.local" });
 	dotenv.config({ path: ".env" });
 }
+
+// ─── SCHEMA ──────────────────────────────────────────────────────────────────
 
 const envSchema = z.object({
 	NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
 	PORT: z.coerce.number().int().positive().default(3000),
 
+	// ── Database ────────────────────────────────────────────────────────────────
 	DATABASE_URL: z.url({ error: "DATABASE_URL must be a valid PostgreSQL connection URL" }),
+
+	// ── Redis ───────────────────────────────────────────────────────────────────
 	REDIS_URL: z.url({ error: "REDIS_URL must be a valid Redis connection URL" }),
 
-	// JWT
+	// ── JWT ─────────────────────────────────────────────────────────────────────
 	JWT_SECRET: z.string().min(32, { error: "JWT_SECRET must be at least 32 characters" }),
 	JWT_REFRESH_SECRET: z.string().min(32, { error: "JWT_REFRESH_SECRET must be at least 32 characters" }),
 	JWT_EXPIRES_IN: z.string().default("15m"),
 	JWT_REFRESH_EXPIRES_IN: z.string().default("7d"),
 
-	// Google OAuth — optional until phase1/auth implements the OAuth callback
+	// ── Google OAuth ────────────────────────────────────────────────────────────
 	GOOGLE_CLIENT_ID: z.string().optional(),
 	GOOGLE_CLIENT_SECRET: z.string().optional(),
 
-	// ─── Email provider selector ──────────────────────────────────────────────
+	// ── Email provider selector ─────────────────────────────────────────────────
 	//
-	// EMAIL_PROVIDER controls which Nodemailer transport is created at startup.
+	// EMAIL_PROVIDER controls which Nodemailer transport is initialised at startup.
 	//
-	//   "ethereal"  — Ethereal Mail (fake SMTP, dev-only). Every sent email is
-	//                 intercepted by Ethereal's test account and never actually
-	//                 delivered. A preview URL is logged to the console so you
-	//                 can inspect the OTP. Requires the four SMTP_* vars below.
+	//   "ethereal" — Ethereal Mail: a fake SMTP server. Every sent email is
+	//                intercepted by Ethereal's test account and never delivered to
+	//                the real recipient. A preview URL is logged to the console so
+	//                you can read the OTP during local development. Requires the
+	//                four SMTP_* vars below.
 	//
-	//   "brevo"     — Brevo SMTP relay (real email delivery). The host and port
-	//                 are hardcoded to Brevo's documented values so they cannot
-	//                 be accidentally overridden to point at Ethereal in prod.
-	//                 Requires BREVO_SMTP_LOGIN, BREVO_SMTP_KEY, BREVO_SMTP_FROM.
+	//   "brevo"    — Brevo SMTP relay: real email delivery via smtp-relay.brevo.com.
+	//                The host/port are intentionally hardcoded to Brevo's documented
+	//                values (port 587, STARTTLS) so they cannot be accidentally
+	//                overridden in an env file. Requires the three BREVO_SMTP_* vars
+	//                and BREVO_SMTP_FROM below.
 	//
 	// Cross-field guards after the schema parse enforce that the right variables
-	// are present for the chosen provider and exit with a clear error if not.
+	// are present for the chosen provider, and exit with a clear per-variable
+	// error message if anything is missing.
 	EMAIL_PROVIDER: z
 		.enum(["ethereal", "brevo"], {
 			error: 'EMAIL_PROVIDER must be either "ethereal" or "brevo"',
 		})
 		.default("ethereal"),
 
-	// ─── Ethereal SMTP vars (required when EMAIL_PROVIDER=ethereal) ───────────
+	// ── Ethereal SMTP (required when EMAIL_PROVIDER=ethereal) ──────────────────
 	//
-	// Ethereal auto-generates a test account at https://ethereal.email.
-	// All four vars come from that test account — host is always smtp.ethereal.email.
+	// All four values come from your Ethereal test account at https://ethereal.email
+	// The host is always smtp.ethereal.email. Port 587 uses STARTTLS (secure: false).
 	SMTP_HOST: z.string().min(1).optional(),
 	SMTP_PORT: z.coerce.number().int().positive().default(587),
 	SMTP_USER: z.string().min(1).optional(),
 	SMTP_PASS: z.string().min(1).optional(),
 	SMTP_FROM: z.email({ error: "SMTP_FROM must be a valid email address" }).optional(),
 
-	// ─── Brevo SMTP vars (required when EMAIL_PROVIDER=brevo) ────────────────
+	// ── Brevo SMTP (required when EMAIL_PROVIDER=brevo) ────────────────────────
 	//
-	// BREVO_SMTP_LOGIN  — your Brevo SMTP login address (e.g. xxxxx@smtp-brevo.com).
-	//                     Found in Brevo → Settings → SMTP & API → SMTP tab.
-	//                     This is the "Login" field shown under SMTP Settings.
+	// BREVO_SMTP_LOGIN — your Brevo SMTP login (e.g. xxxxx@smtp-brevo.com).
+	//                    Found in Brevo → Settings → SMTP & API → SMTP tab,
+	//                    under the "Login" column.
 	//
-	// BREVO_SMTP_KEY    — your Brevo SMTP key (starts with "xsmtpsib-...").
-	//                     IMPORTANT: this is NOT the API key (which starts with
-	//                     "xkeysib-..."). The SMTP key is a separate credential
-	//                     specifically for the smtp-relay.brevo.com connection.
+	// BREVO_SMTP_KEY   — your Brevo SMTP key (starts with "xsmtpsib-...").
+	//                    This is NOT the API key (which starts with "xkeysib-...").
+	//                    The SMTP key is generated separately in the same SMTP tab.
+	//                    It is used as the SMTP password for authentication.
 	//
-	// BREVO_SMTP_FROM   — the verified sender email address shown to recipients.
-	//                     Must match a sender verified/authenticated in your Brevo
-	//                     account. Can differ from BREVO_SMTP_LOGIN.
+	// BREVO_SMTP_FROM  — the "From" address shown to email recipients. Must be a
+	//                    sender address verified in your Brevo account (Senders &
+	//                    Domains section). This can differ from BREVO_SMTP_LOGIN.
+	//
+	// The SMTP server host and port are NOT taken from env vars. They are hardcoded
+	// in email.service.js as smtp-relay.brevo.com:587 per Brevo's official docs:
+	// https://developers.brevo.com/docs/smtp-integration
 	BREVO_SMTP_LOGIN: z.email({ error: "BREVO_SMTP_LOGIN must be a valid email address" }).optional(),
 	BREVO_SMTP_KEY: z.string().min(1).optional(),
 	BREVO_SMTP_FROM: z.email({ error: "BREVO_SMTP_FROM must be a valid email address" }).optional(),
 
-	// Storage adapter selector.
-	// 'local'  → LocalDiskAdapter  (development — writes to /uploads on disk)
-	// 'azure'  → AzureBlobAdapter  (production — writes to Azure Blob Storage)
+	// ── Storage ─────────────────────────────────────────────────────────────────
+	//
+	// "local"  → LocalDiskAdapter: writes WebP files to /uploads on disk (dev).
+	//            Express serves /uploads statically in development.
+	// "azure"  → AzureBlobAdapter: writes to Azure Blob Storage (prod).
 	STORAGE_ADAPTER: z.enum(["local", "azure"]).default("local"),
-
-	// Azure Blob Storage — required when STORAGE_ADAPTER=azure, optional otherwise.
 	AZURE_STORAGE_CONNECTION_STRING: z.string().optional(),
 	AZURE_STORAGE_CONTAINER: z.string().optional(),
 
-	// Azure Communication Services (Phase 5 email worker) — optional for current phases.
+	// ── Azure Communication Services (Phase 5 email worker) ─────────────────────
 	ACS_CONNECTION_STRING: z.string().optional(),
 	ACS_FROM_EMAIL: z.email({ error: "ACS_FROM_EMAIL must be a valid email address" }).optional(),
 
-	// CORS — comma-separated list of allowed origins in production.
+	// ── CORS ────────────────────────────────────────────────────────────────────
+	// Comma-separated list of allowed origins in production.
+	// In development, origin: true is used (reflects the incoming Origin header).
 	ALLOWED_ORIGINS: z.string().optional(),
 
-	// TRUST_PROXY controls Express's proxy trust setting.
-	// "false" or "0" → false (no proxy trust, local dev default)
-	// "1", "2", etc. → numeric hop count (production behind load balancers)
-	// This value is parsed into a number or boolean false in the config export below.
+	// ── Trust Proxy ─────────────────────────────────────────────────────────────
+	// Controls Express's proxy trust setting. Used by req.ip (for OTP rate limiting).
+	//   "false" / "0"        → false  (no proxy trust, local dev default)
+	//   "1", "2", etc.       → numeric hop count (production behind load balancers)
+	// Parsed into a boolean or number in the config export below.
 	TRUST_PROXY: z.string().optional().default("false"),
 });
 
 const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
-	console.error(`❌  Invalid environment variables in ${envFile ?? ".env.local"} — server cannot start\n`);
+	console.error(`❌  Invalid environment variables in ${envFile ?? ".env.local / .env"} — server cannot start\n`);
 	parsed.error.issues.forEach((issue) => {
 		console.error(`   ${issue.path.join(".")}: ${issue.message}`);
 	});
@@ -122,11 +141,11 @@ if (!parsed.success) {
 	process.exit(1);
 }
 
-// ─── Cross-field guard: Ethereal provider ─────────────────────────────────────
+// ─── CROSS-FIELD GUARD: Ethereal ─────────────────────────────────────────────
 //
-// When EMAIL_PROVIDER=ethereal all four classic SMTP_* vars must be present.
-// Missing any of them means Nodemailer cannot authenticate to Ethereal's server
-// and every sendMail call will fail immediately at runtime.
+// When EMAIL_PROVIDER=ethereal all four SMTP_* vars must be present. Missing
+// any of them means Nodemailer cannot authenticate to Ethereal and every
+// sendMail call will fail immediately at runtime.
 if (parsed.data.EMAIL_PROVIDER === "ethereal") {
 	const missing = [];
 	if (!parsed.data.SMTP_HOST) missing.push("SMTP_HOST");
@@ -137,22 +156,21 @@ if (parsed.data.EMAIL_PROVIDER === "ethereal") {
 		console.error(
 			`❌  EMAIL_PROVIDER is "ethereal" but the following required variables are missing:\n` +
 				missing.map((v) => `   ${v}`).join("\n") +
-				`\n\nAdd them to your env file. You can generate a free Ethereal test account at https://ethereal.email\n`,
+				`\n\nAdd them to your env file. Generate a free Ethereal account at https://ethereal.email\n`,
 		);
 		process.exit(1);
 	}
 }
 
-// ─── Cross-field guard: Brevo provider ───────────────────────────────────────
+// ─── CROSS-FIELD GUARD: Brevo ─────────────────────────────────────────────────
 //
-// When EMAIL_PROVIDER=brevo all three Brevo SMTP vars must be present.
-// The guard checks each individually and names them precisely so the developer
-// knows exactly which credential is missing — "BREVO_SMTP_KEY missing" is
-// far clearer than a generic "email configuration error".
+// When EMAIL_PROVIDER=brevo all three Brevo SMTP vars and the From address must
+// be present. Each is checked individually so the error message names the exact
+// missing variable.
 //
-// A common mistake is supplying the API key (xkeysib-...) instead of the
-// SMTP key (xsmtpsib-...). The prefix check below catches this and prints a
-// specific remediation message so the developer doesn't waste time debugging.
+// A common mistake is supplying the API key (xkeysib-...) instead of the SMTP
+// key (xsmtpsib-...). The prefix check below catches this and prints a specific
+// remediation message so the developer doesn't waste time debugging.
 if (parsed.data.EMAIL_PROVIDER === "brevo") {
 	const missing = [];
 	if (!parsed.data.BREVO_SMTP_LOGIN) missing.push("BREVO_SMTP_LOGIN");
@@ -169,10 +187,11 @@ if (parsed.data.EMAIL_PROVIDER === "brevo") {
 		process.exit(1);
 	}
 
-	// Warn if the developer accidentally supplied the API key instead of the SMTP key.
-	// This is the single most common Brevo integration mistake — the API key begins
-	// with "xkeysib-" while the SMTP key begins with "xsmtpsib-".
-	if (parsed.data.BREVO_SMTP_KEY && parsed.data.BREVO_SMTP_KEY.startsWith("xkeysib-")) {
+	// Guard against the most common Brevo credential mistake: pasting the API
+	// key (xkeysib-...) where the SMTP key (xsmtpsib-...) is expected. Both
+	// look similar but the SMTP key is a separate credential generated in the
+	// SMTP tab of Brevo's settings.
+	if (parsed.data.BREVO_SMTP_KEY?.startsWith("xkeysib-")) {
 		console.error(
 			`❌  BREVO_SMTP_KEY starts with "xkeysib-" which is an API key, not an SMTP key.\n` +
 				`   The correct SMTP key starts with "xsmtpsib-".\n` +
@@ -182,8 +201,7 @@ if (parsed.data.EMAIL_PROVIDER === "brevo") {
 	}
 }
 
-// When STORAGE_ADAPTER is azure, we require the Azure Blob config to be present.
-// This is a cross-field constraint that Zod's superRefine handles after parsing.
+// ─── CROSS-FIELD GUARD: Azure Blob Storage ───────────────────────────────────
 if (parsed.data.STORAGE_ADAPTER === "azure") {
 	const missing = [];
 	if (!parsed.data.AZURE_STORAGE_CONNECTION_STRING) missing.push("AZURE_STORAGE_CONNECTION_STRING");
@@ -198,11 +216,11 @@ if (parsed.data.STORAGE_ADAPTER === "azure") {
 	}
 }
 
-// Parse TRUST_PROXY into the type Express expects: a positive integer for
-// hop count, or boolean false to disable proxy trust entirely.
-// "false" and "0" both map to false. Any other string that parses as a
-// positive integer becomes that number. Anything else defaults to false
-// with a warning so misconfiguration is never silently swallowed.
+// ─── TRUST_PROXY PARSING ──────────────────────────────────────────────────────
+//
+// Express accepts either a positive integer (hop count) or the boolean false.
+// "false" and "0" both map to false. Any positive integer string becomes that
+// number. Anything else defaults to false with a warning.
 const parseTrustProxy = (raw) => {
 	const trimmed = (raw ?? "false").trim().toLowerCase();
 	if (trimmed === "false" || trimmed === "0") return false;
@@ -215,6 +233,10 @@ const parseTrustProxy = (raw) => {
 	return false;
 };
 
+// ─── EXPORT ──────────────────────────────────────────────────────────────────
+//
+// ALLOWED_ORIGINS is split into an array once at startup so every middleware
+// that checks origins gets a pre-parsed array, not a comma-separated string.
 export const config = {
 	...parsed.data,
 	ALLOWED_ORIGINS: parsed.data.ALLOWED_ORIGINS ? parsed.data.ALLOWED_ORIGINS.split(",").map((o) => o.trim()) : [],

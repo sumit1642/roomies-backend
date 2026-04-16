@@ -2,116 +2,143 @@
 //
 // ─── TRANSPORT ARCHITECTURE ───────────────────────────────────────────────────
 //
-// This service supports two email providers, selected by EMAIL_PROVIDER in the
-// environment:
+// This service supports two email providers, selected at startup by EMAIL_PROVIDER
+// in the environment:
 //
-//   "ethereal" — Nodemailer pointed at Ethereal's fake SMTP server. Used for
-//                all local development. Every email is intercepted — never
-//                delivered — and a preview URL is logged so you can read OTPs.
+//   "ethereal" — Nodemailer pointed at Ethereal's fake SMTP server.
+//                Used during local development. Every email is intercepted and
+//                never delivered to the real recipient. A preview URL is logged
+//                to the console so you can read the OTP without a real inbox.
+//                Set EMAIL_PROVIDER=ethereal in .env.local.
 //
 //   "brevo"    — Nodemailer pointed at Brevo's SMTP relay
-//                (smtp-relay.brevo.com:587). Used for production. Emails are
-//                really sent. Brevo provides delivery logs, open tracking, and
-//                spam analytics in its dashboard.
+//                (smtp-relay.brevo.com:587 with STARTTLS).
+//                Used in production / staging. Emails are really delivered.
+//                Brevo's dashboard provides delivery logs and open tracking.
+//                Set EMAIL_PROVIDER=brevo in your production env file.
 //
-// Critically, both providers use EXACTLY the same Nodemailer transport API.
-// The rest of this file (sendOtpEmail, maskEmail, guards) is 100% identical
-// for both providers — the factory just swaps the credentials underneath.
+// Both providers use the same Nodemailer transport API. The rest of this file —
+// sendOtpEmail, maskEmail, and the format guards — is identical for both. The
+// factory function below just swaps the SMTP credentials underneath.
 //
-// ─── WHY NOT THE @getbrevo/brevo SDK? ────────────────────────────────────────
+// ─── WHY NOT THE @getbrevo/brevo REST SDK? ───────────────────────────────────
 //
-// Brevo publishes an official JS SDK (@getbrevo/brevo) that wraps their REST
-// API. For sending a simple OTP email, the SMTP relay via Nodemailer is the
-// right choice for three reasons:
-//
+// Brevo publishes an official JS SDK that wraps their REST API. For sending a
+// simple OTP email, the SMTP relay via Nodemailer is the better choice because:
 //   1. Zero new dependencies — Nodemailer is already installed.
-//   2. Identical code path — swapping providers is just a config change, not a
-//      code change. The SDK API differs from Nodemailer's API significantly.
-//   3. Brevo's own documentation recommends Nodemailer for Node.js SMTP relay
-//      (https://developers.brevo.com/docs/node-smtp-relay-example).
+//   2. Identical code path — switching providers is a config change, not a
+//      code change. The SDK's API differs significantly from Nodemailer's.
+//   3. Brevo's own docs recommend Nodemailer for Node.js SMTP relay:
+//      https://developers.brevo.com/docs/smtp-integration
 //
-// The SDK would be appropriate if we were doing batch sends, contact management,
-// or marketing campaigns — none of which are needed for transactional OTPs.
+// ─── BREVO CONNECTION SETTINGS ───────────────────────────────────────────────
+//
+// Per Brevo's official SMTP relay documentation:
+//   Host:       smtp-relay.brevo.com   (hardcoded — never from env vars)
+//   Port:       587                     (non-encrypted; STARTTLS upgrades it)
+//   secure:     false                   (true is only for port 465 / raw SSL)
+//   Login:      your BREVO_SMTP_LOGIN   (e.g. xxxxx@smtp-brevo.com)
+//   Password:   your BREVO_SMTP_KEY     (starts with "xsmtpsib-...", NOT the API key)
+//
+// The host and port are intentionally NOT read from env vars. Brevo has exactly
+// one SMTP relay endpoint and one recommended port. Making them configurable
+// would only create opportunities for them to be set incorrectly in production.
 //
 // ─── BREVO SMTP KEY vs API KEY ────────────────────────────────────────────────
 //
-// Brevo has two different credentials that are easy to confuse:
-//   SMTP key  — starts with "xsmtpsib-..." — used as the SMTP password here
-//   API key   — starts with "xkeysib-..."  — used by the REST SDK / HTTP API
+// Brevo has two different credential types that look similar but serve different
+// purposes:
+//   SMTP key — starts with "xsmtpsib-..." — used as the SMTP password here.
+//   API key  — starts with "xkeysib-..."  — used by the REST SDK / HTTP API.
 //
-// The cross-field guard in env.js detects the API key being used where the
-// SMTP key is expected and exits with a clear error message at startup.
+// The cross-field guard in env.js detects the API key being used where the SMTP
+// key is expected and exits with a clear error message at startup.
+//
+// ─── BREVO FROM ADDRESS ──────────────────────────────────────────────────────
+//
+// BREVO_SMTP_FROM must be an email address that is verified as a sender in your
+// Brevo account (Senders & Domains section). Using an unverified address causes
+// Brevo to reject the message with a 550 error. This address is what recipients
+// see as the "From" field — it can differ from BREVO_SMTP_LOGIN.
 
 import nodemailer from "nodemailer";
 import { config } from "../config/env.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 
-// ─── Mask email for safe logging ──────────────────────────────────────────────
+const activeEmailProvider = config.EMAIL_PROVIDER === "brevo" ? "brevo" : "ethereal";
+
+// ─── Mask email for safe logging ─────────────────────────────────────────────
 //
 // "priya@iitb.ac.in" → "p****@iitb.ac.in"
-// Keeps the first character and full domain so log correlation is still
-// possible without exposing the full address in log aggregators or audit trails.
+//
+// Keeps the first character and the full domain so log correlation remains
+// possible (you can identify the user) without exposing the full address in
+// log aggregators or audit trails. This is especially important because OTP
+// send events are high-frequency and will appear in every logging pipeline.
 const maskEmail = (email) => {
 	const [local, domain] = email.split("@");
 	if (!domain) return "****";
-	const prefix = local && local.length > 0 ? local[0] : "*";
+	const prefix = local?.length > 0 ? local[0] : "*";
 	return `${prefix}****@${domain}`;
 };
 
 // ─── Transport factory ────────────────────────────────────────────────────────
 //
-// Creates and returns a Nodemailer transporter based on EMAIL_PROVIDER.
-// Called once at module load time (see `transport` below) so the connection
-// setup cost is paid at startup, not on the first send call.
-//
-// All Nodemailer transporter options:
-//   host     — the SMTP server hostname
-//   port     — 587 for STARTTLS (most providers including Ethereal and Brevo)
-//   secure   — false for port 587 (STARTTLS upgrade happens after connect)
-//              true for port 465 (SSL from the first byte)
-//   auth     — { user, pass } object with the SMTP credentials
-//
-// Brevo-specific notes:
-//   - host is hardcoded to "smtp-relay.brevo.com" — not taken from config —
-//     so there is no risk of an env var override pointing production at the
-//     wrong server.
-//   - port 587 with secure:false is what Brevo's documentation recommends.
-//     Port 465 (secure:true) is also supported by Brevo but 587 is preferred.
-//   - auth.user is your SMTP Login (e.g. xxxxx@smtp-brevo.com from the
-//     dashboard SMTP tab, stored in BREVO_SMTP_LOGIN).
-//   - auth.pass is your SMTP Key (the xsmtpsib-... value, stored in
-//     BREVO_SMTP_KEY). This is NOT your Brevo account password.
+// Creates and returns a Nodemailer transporter based on EMAIL_PROVIDER. Called
+// once at module load time (see the `transport` singleton below) so the TCP
+// connection setup cost is paid at startup, not on the first send call.
+// Nodemailer reuses the underlying SMTP connection for subsequent calls when
+// the server keeps it alive, which both Brevo and Ethereal do.
 const createEmailTransport = () => {
 	if (config.EMAIL_PROVIDER === "brevo") {
 		logger.info(
-			{ provider: "brevo", host: "smtp-relay.brevo.com", port: 587, login: maskEmail(config.BREVO_SMTP_LOGIN) },
+			{
+				provider: "brevo",
+				host: "smtp-relay.brevo.com",
+				port: 587,
+				login: maskEmail(config.BREVO_SMTP_LOGIN),
+				from: maskEmail(config.BREVO_SMTP_FROM),
+			},
 			"Email transport: Brevo SMTP relay initialised",
 		);
 
 		return nodemailer.createTransport({
-			host: "smtp-relay.brevo.com", // Brevo's documented SMTP relay host — hardcoded intentionally
-			port: 587, // Non-encrypted port; Nodemailer upgrades to STARTTLS automatically
-			secure: false, // Must be false for port 587 (true is only for port 465/SSL)
+			// Brevo's documented SMTP relay host — hardcoded intentionally.
+			// See: https://developers.brevo.com/docs/smtp-integration
+			host: "smtp-relay.brevo.com",
+			// Port 587 uses STARTTLS: the connection starts unencrypted and
+			// Nodemailer upgrades it automatically. secure must be false here.
+			// (Port 465 with secure: true is the alternative SSL-from-the-start path.)
+			port: 587,
+			secure: false,
 			auth: {
-				user: config.BREVO_SMTP_LOGIN, // Your Brevo SMTP Login (e.g. xxxxx@smtp-brevo.com)
-				pass: config.BREVO_SMTP_KEY, // Your Brevo SMTP Key (xsmtpsib-...), NOT the API key
+				// BREVO_SMTP_LOGIN: your Brevo SMTP login (e.g. xxxxx@smtp-brevo.com)
+				user: config.BREVO_SMTP_LOGIN,
+				// BREVO_SMTP_KEY: your Brevo SMTP key (xsmtpsib-...), NOT the API key
+				pass: config.BREVO_SMTP_KEY,
 			},
 		});
 	}
 
-	// Default: Ethereal fake SMTP for development.
+	// Default: Ethereal fake SMTP for local development.
 	// config.SMTP_HOST / SMTP_USER / SMTP_PASS come from .env.local.
-	// secure is derived from port: port 465 → true (SSL), all others → false.
+	// secure is derived from port: port 465 → true (raw SSL), all others → false.
 	logger.info(
-		{ provider: "ethereal", host: config.SMTP_HOST, port: config.SMTP_PORT },
+		{
+			provider: "ethereal",
+			host: config.SMTP_HOST,
+			port: config.SMTP_PORT,
+		},
 		"Email transport: Ethereal fake SMTP initialised (no real emails will be sent)",
 	);
 
 	return nodemailer.createTransport({
 		host: config.SMTP_HOST,
 		port: config.SMTP_PORT,
-		secure: config.SMTP_PORT === 465, // true only for SSL port; Ethereal uses 587 with STARTTLS
+		// Ethereal uses port 587 with STARTTLS, so secure is false.
+		// Only set true if you explicitly use port 465 for raw SSL.
+		secure: config.SMTP_PORT === 465,
 		auth: {
 			user: config.SMTP_USER,
 			pass: config.SMTP_PASS,
@@ -121,30 +148,37 @@ const createEmailTransport = () => {
 
 // ─── Singleton transport ──────────────────────────────────────────────────────
 //
-// The transport is created once when this module is first imported. Creating it
-// per-call would re-open a TCP connection on every OTP send, which is wasteful
-// and slow. Nodemailer reuses the underlying SMTP connection for subsequent calls
-// when the server keeps it alive (which Brevo and Ethereal both do).
+// Created once when this module is first imported. Re-creating it per call
+// would open a new TCP connection on every OTP send, which is wasteful and slow.
 const transport = createEmailTransport();
+
+logger.info({ provider: activeEmailProvider }, `Email provider selected at startup: ${activeEmailProvider}`);
 
 // ─── Sender address resolver ──────────────────────────────────────────────────
 //
-// Returns the "From" address appropriate for the active provider.
-// For Brevo this must be BREVO_SMTP_FROM — a sender address that has been
-// verified / authenticated in your Brevo account. Using an unverified address
-// causes Brevo to reject the message with a 550 error.
-// For Ethereal, SMTP_FROM (the classic dev var) is used.
+// Returns the correct "From" address for the active provider. The Nodemailer
+// `from` field accepts RFC 5322 format: "Display Name <address@example.com>".
+// Using a display name makes the email look professional in the recipient's inbox
+// ("Roomies" instead of a raw SMTP address).
 const getSenderAddress = () => {
 	if (config.EMAIL_PROVIDER === "brevo") {
-		return config.BREVO_SMTP_FROM;
+		// BREVO_SMTP_FROM must be verified in your Brevo account's Senders section.
+		// Brevo rejects messages from unverified sender addresses with a 550 error.
+		return `"Roomies" <${config.BREVO_SMTP_FROM}>`;
 	}
-	return config.SMTP_FROM;
+	// Ethereal: SMTP_FROM is any address — Ethereal intercepts everything.
+	return `"Roomies" <${config.SMTP_FROM}>`;
 };
 
 // ─── Send OTP email ───────────────────────────────────────────────────────────
+//
+// Sends a 6-digit OTP to the given email address. The email is formatted as a
+// professional transactional message with both plain-text and HTML versions.
+// Nodemailer uses the HTML version for capable clients and falls back to plain
+// text for clients that cannot render HTML.
 export const sendOtpEmail = async (to, otp) => {
-	// Input validation — the service layer already validates before calling this,
-	// but guard here so this function is safe to call from any future context.
+	// Input validation — the auth service validates before calling this, but
+	// guard here so this function is safe to call from any future context.
 	if (!to || typeof to !== "string" || !to.includes("@")) {
 		throw new AppError("Invalid recipient email address", 400);
 	}
@@ -152,52 +186,94 @@ export const sendOtpEmail = async (to, otp) => {
 		throw new AppError("OTP is required", 400);
 	}
 	if (!/^[0-9]{6}$/.test(otp)) {
-		throw new AppError("Invalid OTP format", 400);
+		throw new AppError("Invalid OTP format — expected exactly 6 digits", 400);
 	}
 
 	const maskedTo = maskEmail(to);
 	const fromAddress = getSenderAddress();
 
+	logger.info({ to: maskedTo, provider: activeEmailProvider }, "Preparing OTP email with configured provider");
+
 	try {
 		const info = await transport.sendMail({
-			from: `"Roomies" <${fromAddress}>`, // Display name + address in RFC 5322 format
+			from: fromAddress,
 			to,
 			subject: "Your Roomies verification code",
-			text: `Your OTP is: ${otp}\n\nThis code expires in 10 minutes. Do not share it with anyone.`,
+			// Plain-text version: used by email clients that cannot render HTML and
+			// by screen readers. Always include this — it also improves spam scoring.
+			text: `Your Roomies verification code is: ${otp}\n\nThis code expires in 10 minutes. Do not share it with anyone.\n\nIf you did not request this code, you can safely ignore this email.`,
+			// HTML version: rendered by virtually all modern email clients.
+			// Uses inline styles for maximum compatibility — many email clients
+			// (including Gmail) strip <style> tags but preserve inline styles.
 			html: `
-				<div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto;">
-					<h2 style="color: #333;">Your Roomies verification code</h2>
-					<p style="color: #555;">Enter the code below to verify your email address.</p>
-					<div style="
-						background: #f5f5f5;
-						border-radius: 8px;
-						padding: 24px;
-						text-align: center;
-						margin: 24px 0;
-					">
-						<span style="
-							font-size: 36px;
-							font-weight: bold;
-							letter-spacing: 8px;
-							color: #222;
-							font-family: monospace;
-						">${otp}</span>
-					</div>
-					<p style="color: #555;">
-						This code expires in <strong>10 minutes</strong>.
-						Do not share it with anyone.
-					</p>
-					<p style="color: #999; font-size: 12px;">
-						If you did not request this code, you can safely ignore this email.
-					</p>
-				</div>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Your Roomies verification code</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f4f4f5; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background-color:#f4f4f5; padding:40px 16px;">
+    <tr>
+      <td align="center">
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:480px; background-color:#ffffff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.08); overflow:hidden;">
+
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#18181b; padding:28px 40px 24px;">
+              <p style="margin:0; font-size:22px; font-weight:700; color:#ffffff; letter-spacing:-0.3px;">Roomies</p>
+              <p style="margin:6px 0 0; font-size:13px; color:#a1a1aa;">Find your perfect PG or roommate</p>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:36px 40px 32px;">
+              <p style="margin:0 0 8px; font-size:16px; font-weight:600; color:#18181b;">Verify your email address</p>
+              <p style="margin:0 0 28px; font-size:14px; line-height:1.6; color:#52525b;">
+                Use the code below to complete your verification. It expires in <strong>10 minutes</strong>.
+              </p>
+
+              <!-- OTP box -->
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+                <tr>
+                  <td align="center" style="background-color:#f4f4f5; border-radius:10px; padding:28px 16px;">
+                    <p style="margin:0 0 6px; font-size:11px; font-weight:600; letter-spacing:1.5px; text-transform:uppercase; color:#71717a;">Your verification code</p>
+                    <p style="margin:0; font-size:40px; font-weight:700; letter-spacing:12px; color:#18181b; font-family:'Courier New', Courier, monospace;">${otp}</p>
+                  </td>
+                </tr>
+              </table>
+
+              <p style="margin:24px 0 0; font-size:13px; line-height:1.6; color:#71717a;">
+                Never share this code with anyone — Roomies will never ask for it.
+                If you did not request this code, you can safely ignore this email.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color:#fafafa; border-top:1px solid #f0f0f0; padding:20px 40px;">
+              <p style="margin:0; font-size:12px; color:#a1a1aa; line-height:1.5;">
+                This is an automated message from Roomies. Please do not reply to this email.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
 			`,
 		});
 
-		// Ethereal Mail returns a preview URL — log it so developers can
-		// read the OTP during local development without checking a real inbox.
-		// nodemailer.getTestMessageUrl() returns null for real SMTP providers
-		// like Brevo, so this log line is silently skipped in production.
+		// Ethereal Mail returns a preview URL that lets you read the email in a
+		// browser without a real inbox. nodemailer.getTestMessageUrl() returns
+		// null for real SMTP providers like Brevo, so this log line is silently
+		// skipped in production.
 		const previewUrl = nodemailer.getTestMessageUrl(info);
 		if (previewUrl) {
 			logger.info(
@@ -205,8 +281,8 @@ export const sendOtpEmail = async (to, otp) => {
 				"OTP email sent — open preview URL to read the code",
 			);
 		} else {
-			// Real delivery (Brevo or any live SMTP). Log the Brevo message ID
-			// which appears in their transactional logs for debugging delivery issues.
+			// Real delivery (Brevo). Log the message ID, which appears in Brevo's
+			// transactional email logs and is useful for debugging delivery issues.
 			logger.info({ to: maskedTo, messageId: info.messageId, provider: config.EMAIL_PROVIDER }, "OTP email sent");
 		}
 
@@ -218,8 +294,10 @@ export const sendOtpEmail = async (to, otp) => {
 			{
 				to: maskedTo,
 				provider: config.EMAIL_PROVIDER,
-				errCode: err.code, // e.g. "ECONNREFUSED", "EAUTH"
-				errMessage: err.message, // e.g. "Invalid login", "Connection timeout"
+				// err.code gives you a machine-readable signal (e.g. "ECONNREFUSED",
+				// "EAUTH") without exposing the full SMTP session details.
+				errCode: err.code,
+				errMessage: err.message,
 			},
 			"Failed to send OTP email",
 		);
