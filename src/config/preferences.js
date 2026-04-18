@@ -63,6 +63,8 @@ export const PREFERENCE_DEFINITIONS = [
 	},
 ];
 
+// Internal map — never exported directly. All external access goes through
+// getAllowedPreferenceValues which returns a defensive copy.
 const allowedValuesByKey = new Map(
 	PREFERENCE_DEFINITIONS.map((definition) => [
 		definition.preferenceKey,
@@ -70,7 +72,21 @@ const allowedValuesByKey = new Map(
 	]),
 );
 
-export const getAllowedPreferenceValues = (preferenceKey) => allowedValuesByKey.get(preferenceKey) ?? new Set();
+// Returns the set of allowed values for a given preference key.
+//
+// IMPORTANT: returns a DEFENSIVE COPY of the internal Set, not the Set itself.
+// Returning the internal Set directly would allow callers to mutate the shared
+// catalog via set.add() or set.clear(), silently corrupting every subsequent
+// lookup for the life of the process. A defensive copy means callers can freely
+// iterate, spread, or pass the result without risk of shared-state corruption.
+//
+// The allocation cost (one new Set per call) is negligible — this is called
+// only during request validation, not in hot inner loops.
+export const getAllowedPreferenceValues = (preferenceKey) => {
+	const values = allowedValuesByKey.get(preferenceKey);
+	// Return a copy so callers cannot mutate the shared internal catalog.
+	return values ? new Set(values) : new Set();
+};
 
 // Database uniqueness is on (user_id/listing_id, preference_key), so
 // duplicate keys are collapsed with last-write-wins semantics before inserts.
