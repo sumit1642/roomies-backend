@@ -45,20 +45,22 @@ export const updatePreferences = async (req, res, next) => {
 
 export const revealContact = async (req, res, next) => {
 	try {
-		// contactRevealGate must always run before this controller. If it is absent
-		// (programming error — gate removed from the route definition), fail closed
-		// with a 500 rather than accidentally disclosing the full contact bundle.
-		// The previous default of false would silently broaden access for guests;
-		// a loud 500 forces the developer to notice and fix the route configuration.
+		// contactRevealGate MUST run before this controller. If it is absent
+		// (a programming error — gate removed from the route definition), fail
+		// closed with a 500 rather than accidentally disclosing the full contact
+		// bundle. Defaulting to emailOnly=true here would silently broaden access
+		// for guests on a misconfigured route; a loud 500 forces the developer to
+		// notice and fix the route configuration.
 		if (!req.contactReveal) {
 			return next(new AppError("Contact reveal gate context is missing — internal configuration error", 500));
 		}
-		const emailOnly = req.contactReveal.emailOnly;
-		const contact = await studentService.getStudentContactReveal(
-			req.params.userId,
-			emailOnly,
-			req.user?.userId ?? null,
-		);
+
+		// The gate's emailOnly decision is the single source of truth. The service
+		// no longer re-derives tier eligibility — it trusts this value entirely.
+		// This is the correct architecture: middleware decides WHO can see WHAT,
+		// and the service only fetches and shapes the data accordingly.
+		const contact = await studentService.getStudentContactReveal(req.params.userId, req.contactReveal.emailOnly);
+
 		res.json({ status: "success", data: contact });
 	} catch (err) {
 		next(err);
