@@ -23,7 +23,8 @@ Feature-level API documentation lives in `docs/api/`.
 - `api/connections.md` — connection dashboard, detail, and two-sided confirmation
 - `api/notifications.md` — notification feed, unread count, and mark-read modes
 - `api/ratings-and-reports.md` — ratings, public reputation views, and rating report submission
-- `api/admin.md` — verification queue and report moderation endpoints
+- `api/admin.md` — verification queue, report moderation, user lifecycle actions, rating visibility controls, and
+  platform analytics
 - `api/health.md` — dependency health probe behavior
 
 ## Maintenance Rules
