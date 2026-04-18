@@ -23,58 +23,47 @@
 //   interest_requests → listings (FK: listing_id) and users (FK: sender_id)
 //   connections → interest_requests (FK), listings (FK), users (FK)
 //   saved_listings → listings (FK) and users (FK)
-//   listing_photos, listing_preferences, listing_amenities → listings (CASCADE, handled automatically)
+//   listing_photos, listing_preferences, listing_amenities → listings (CASCADE)
 //   listings → properties (FK) and users (FK)
 //   verification_requests → users (FK)
 //   pg_owner_profiles, student_profiles → users (FK)
 //
+// ─── THE FK-VIOLATION PROBLEM AND ITS FIX ────────────────────────────────────
+//
+// A naive "delete children before parents" approach has a critical gap:
+// the WHERE clause `deleted_at < cutoff` creates a temporal window where a
+// soft-deleted child that hasn't yet aged past the retention window will NOT be
+// deleted in the children step, but will still block its parent's hard-delete
+// via ON DELETE RESTRICT FK constraint.
+//
+// Concrete scenario:
+//   - user soft-deleted 100 days ago → eligible for hard-delete (past 90-day cutoff)
+//   - connection soft-deleted 30 days ago → NOT eligible (hasn't reached cutoff)
+//   - Step 4 skips the connection (deleted_at < cutoff = false)
+//   - Step 14 tries to DELETE FROM users → PostgreSQL raises 23503 (FK violation)
+//     because the connection still references the user → entire transaction rolls back
+//
+// The fix: each parent-table DELETE includes NOT EXISTS guards that check whether
+// any soft-deleted (but not yet aged) child row still references the parent.
+// If so, the parent is skipped — it will be cleaned up in a future run once all
+// its children have also aged past the retention cutoff.
+//
+// This means the invariant is:
+//   "A parent row can be hard-deleted only when ALL referencing child rows have
+//    either been hard-deleted already (don't exist in the table) OR have also
+//    been soft-deleted long enough to be eligible for hard-deletion themselves."
+//
+// The NOT EXISTS guards use the same cutoffExpr so they are evaluated
+// consistently with the main WHERE clause within the same transaction.
+//
 // We run all deletes in one transaction so either all aged rows are cleaned or
 // none are — no half-committed state that leaves orphaned child rows.
 //
-// Idempotency: the WHERE predicate (deleted_at < cutoff) is stable. Re-running
-// within the same window is a safe no-op.
-//
-// Safety note: we deliberately do NOT hard-delete users, properties, or listings
-// in this job without first ensuring all their dependents are removed. The
-// ordering below handles this correctly.
-//
 // ─── RETENTION VALIDATION ────────────────────────────────────────────────────
 //
-// SOFT_DELETE_RETENTION_DAYS is validated at module load time (fail-fast pattern)
-// rather than lazily at the first cron tick. The reasons:
-//
-//   1. An invalid value (e.g. the string "abc") would produce SQL like
-//      `NOW() - ('NaN' * INTERVAL '1 day')` which is a runtime Postgres error on
-//      every single cron tick, filling logs with noise and never cleaning anything.
-//
-//   2. A negative value (e.g. "-1") would make the cutoff move into the future
-//      (NOW() - (-1 day) = tomorrow), causing the WHERE clause to match recently
-//      soft-deleted rows and hard-deleting them far too soon.
-//
-//   3. A zero value would hard-delete rows immediately upon soft-deletion, which
-//      is never the intended behaviour.
-//
-// The valid range is 1..3650 (one day to ten years). Values outside this range
-// fall back to the safe default of 90 days with a warning log rather than
-// crashing the server — hard-delete cleanup is a maintenance task, not a
-// critical path, and the fallback is always safe.
-//
-// ─── STRICT INTEGER PARSING ──────────────────────────────────────────────────
-//
-// We deliberately avoid parseInt() for parsing SOFT_DELETE_RETENTION_DAYS.
-// parseInt() uses a "leading numeric portion" strategy: parseInt("90days", 10)
-// silently returns 90, parseInt("1e2", 10) returns 1 (stops at the non-digit
-// 'e'). Both would pass the range check and result in a silently wrong retention
-// period — exactly the kind of misconfiguration that is hard to notice in prod.
-//
-// Instead we require the trimmed env string to match /^[0-9]+$/ — a contiguous
-// run of decimal digits with nothing else — before converting. Any deviation
-// triggers the warning + fallback path. Only trimming leading/trailing whitespace
-// is allowed as a leniency (common copy-paste artifact with no semantic intent).
-//
-// The validated retention is then passed as a query *parameter* (not interpolated
-// into SQL text), preventing any possibility of SQL injection from a misconfigured
-// environment variable and keeping the query planner's plan stable across runs.
+// SOFT_DELETE_RETENTION_DAYS is validated at module load time (fail-fast pattern).
+// The strict parse (/^[0-9]+$/ before numeric conversion) intentionally rejects
+// values like "90days", "-30", "1e2" that parseInt() would silently accept.
 
 import cron from "node-cron";
 import { pool } from "../db/client.js";
@@ -86,21 +75,6 @@ const MIN_RETENTION_DAYS = 1;
 const MAX_RETENTION_DAYS = 3650; // ~10 years
 
 // ─── Strict retention parsing (runs at module load, not per tick) ─────────────
-//
-// We validate once here rather than inside the job runner because:
-//   a) It surfaces misconfiguration at startup, where it is most visible.
-//   b) It guarantees RETENTION_DAYS is a safe integer for the life of the process
-//      without re-parsing the env var on every run.
-//
-// Parsing strategy:
-//   1. Read the raw string and trim surrounding whitespace (the only leniency).
-//   2. Treat undefined or empty string as "not set" → use default at debug level.
-//   3. For non-empty values, gate on /^[0-9]+$/ before any numeric conversion.
-//      This rejects "90days", "1e2", "-30", "0x5A", " 30 " (post-trim "30" is
-//      fine, but pre-trim with internal spaces like "9 0" is not).
-//   4. Convert with Number() — safe here since the regex already guarantees a
-//      pure decimal digit string, making parseInt() and Number() equivalent.
-//   5. Range-check 1..3650 and warn + fallback on violation.
 const _envRetention = process.env.SOFT_DELETE_RETENTION_DAYS;
 const _trimmed = typeof _envRetention === "string" ? _envRetention.trim() : undefined;
 const STRICT_DECIMAL_INTEGER_RE = /^[0-9]+$/;
@@ -108,17 +82,12 @@ const STRICT_DECIMAL_INTEGER_RE = /^[0-9]+$/;
 let RETENTION_DAYS;
 
 if (_trimmed === undefined || _trimmed === "") {
-	// Not configured — this is the normal case for most deployments. Use default
-	// at debug level; no operator action needed.
 	logger.debug(
 		{ fallback: DEFAULT_RETENTION_DAYS },
 		`cron:hardDeleteCleanup — SOFT_DELETE_RETENTION_DAYS not set; using default of ${DEFAULT_RETENTION_DAYS} days`,
 	);
 	RETENTION_DAYS = DEFAULT_RETENTION_DAYS;
 } else if (!STRICT_DECIMAL_INTEGER_RE.test(_trimmed)) {
-	// Non-empty but contains non-digit characters. parseInt() would silently
-	// accept the leading numeric portion (e.g. "90days" → 90); we reject it
-	// entirely and fall back so the misconfiguration is not silently swallowed.
 	logger.warn(
 		{
 			provided: _envRetention,
@@ -132,11 +101,9 @@ if (_trimmed === undefined || _trimmed === "") {
 	);
 	RETENTION_DAYS = DEFAULT_RETENTION_DAYS;
 } else {
-	// Regex guarantees a pure decimal digit string — Number() conversion is safe.
 	const _parsed = Number(_trimmed);
 
 	if (!Number.isFinite(_parsed) || _parsed < MIN_RETENTION_DAYS || _parsed > MAX_RETENTION_DAYS) {
-		// Valid integer format but outside the allowed range (e.g. "0" or "99999").
 		logger.warn(
 			{
 				provided: _envRetention,
@@ -164,123 +131,247 @@ const runHardDeleteCleanup = async () => {
 		client = await pool.connect();
 		await client.query("BEGIN");
 
-		// The cutoff timestamp is computed entirely inside Postgres using a
-		// parameterized interval so RETENTION_DAYS is never interpolated into SQL
-		// text. This has two benefits:
-		//
-		//   1. Safety: even though RETENTION_DAYS is already validated above, using
-		//      a parameter closes off any theoretical injection path.
-		//
-		//   2. Stability: Postgres receives the same query text on every run and can
-		//      reuse a cached query plan rather than re-planning a freshly-generated
-		//      SQL string.
-		//
-		// `($1::int * INTERVAL '1 day')` multiplies the integer retention count by
-		// a typed interval literal. This is the standard Postgres idiom for building
-		// a dynamic interval from a numeric parameter.
+		// The cutoff expression: rows older than this timestamp are eligible.
+		// Passed as a parameter so the query plan is stable across runs and
+		// there is no possibility of SQL injection from env vars.
 		const cutoffExpr = `NOW() - ($1::int * INTERVAL '1 day')`;
-		// All DELETE queries receive RETENTION_DAYS as their first (and only) parameter.
 		const p = [RETENTION_DAYS];
 
-		// Deletion order: deepest dependents first, then work up toward root entities.
-
-		// 1. rating_reports (depends on ratings)
+		// ── Step 1: rating_reports (depends on ratings) ───────────────────────
+		// No children reference rating_reports directly, so no guard needed.
 		const { rowCount: rr } = await client.query(
-			`DELETE FROM rating_reports WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM rating_reports
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}`,
 			p,
 		);
 		results.rating_reports = rr;
 
-		// 2. ratings (depends on connections and users)
+		// ── Step 2: ratings (depends on connections and users) ────────────────
+		// rating_reports rows that reference this rating were deleted in step 1.
+		// No other ON DELETE RESTRICT child references ratings directly.
 		const { rowCount: ra } = await client.query(
-			`DELETE FROM ratings WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM ratings
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}`,
 			p,
 		);
 		results.ratings = ra;
 
-		// 3. notifications (depends on users)
+		// ── Step 3: notifications (depends on users) ──────────────────────────
+		// No children reference notifications.
 		const { rowCount: no } = await client.query(
-			`DELETE FROM notifications WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM notifications
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}`,
 			p,
 		);
 		results.notifications = no;
 
-		// 4. connections (depends on interest_requests, listings, users)
+		// ── Step 4: connections (depends on interest_requests, listings, users) ─
+		// ratings that reference this connection were deleted in step 2.
 		const { rowCount: co } = await client.query(
-			`DELETE FROM connections WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM connections
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}`,
 			p,
 		);
 		results.connections = co;
 
-		// 5. interest_requests (depends on listings and users)
+		// ── Step 5: interest_requests (depends on listings and users) ─────────
+		// connections that reference this interest_request were deleted in step 4.
 		const { rowCount: ir } = await client.query(
-			`DELETE FROM interest_requests WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM interest_requests
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}`,
 			p,
 		);
 		results.interest_requests = ir;
 
-		// 6. saved_listings (depends on listings and users)
+		// ── Step 6: saved_listings (depends on listings and users) ────────────
 		const { rowCount: sl } = await client.query(
-			`DELETE FROM saved_listings WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM saved_listings
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}`,
 			p,
 		);
 		results.saved_listings = sl;
 
-		// 7. listing_photos (ON DELETE CASCADE from listings, but we also clean
-		//    explicitly-soft-deleted photos that outlived their parent listing)
+		// ── Step 7: listing_photos (soft-deleted photos outliving their listing) ─
 		const { rowCount: lp } = await client.query(
-			`DELETE FROM listing_photos WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM listing_photos
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}`,
 			p,
 		);
 		results.listing_photos = lp;
 
-		// 8. listings (depends on properties and users; cascade handles listing_preferences
-		//    and listing_amenities automatically via ON DELETE CASCADE)
+		// ── Step 8: listings ──────────────────────────────────────────────────
+		// Cascade handles listing_preferences and listing_amenities automatically.
+		//
+		// GUARD: Only delete a listing when no soft-deleted-but-not-yet-aged child
+		// rows still reference it via ON DELETE RESTRICT.
+		//
+		// Children that use ON DELETE RESTRICT on listings:
+		//   - interest_requests (listing_id) — deleted in step 5 if aged, otherwise block
+		//   - connections (listing_id) — deleted in step 4 if aged, otherwise block
+		//   - saved_listings (listing_id) — deleted in step 6 if aged, otherwise block
+		//
+		// The NOT EXISTS guards check for soft-deleted children that have NOT yet
+		// reached the cutoff — those will block a FK delete and must skip this parent.
 		const { rowCount: li } = await client.query(
-			`DELETE FROM listings WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM listings
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}
+         AND NOT EXISTS (
+           SELECT 1 FROM interest_requests ir
+           WHERE ir.listing_id  = listings.listing_id
+             AND ir.deleted_at  IS NOT NULL
+             AND ir.deleted_at  >= ${cutoffExpr}
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM connections co
+           WHERE co.listing_id  = listings.listing_id
+             AND co.deleted_at  IS NOT NULL
+             AND co.deleted_at  >= ${cutoffExpr}
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM saved_listings sl
+           WHERE sl.listing_id  = listings.listing_id
+             AND sl.deleted_at  IS NOT NULL
+             AND sl.deleted_at  >= ${cutoffExpr}
+         )`,
+			// We need the cutoff twice in the same query (for the outer WHERE and for
+			// each NOT EXISTS). PostgreSQL allows referencing $1 multiple times in the
+			// same parameterized query — each occurrence refers to the same value.
 			p,
 		);
 		results.listings = li;
 
-		// 9. verification_requests (depends on users)
+		// ── Step 9: verification_requests (depends on users) ──────────────────
 		const { rowCount: vr } = await client.query(
-			`DELETE FROM verification_requests WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM verification_requests
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}`,
 			p,
 		);
 		results.verification_requests = vr;
 
-		// 10. pg_owner_profiles and student_profiles (depend on users)
+		// ── Step 10: pg_owner_profiles and student_profiles ───────────────────
+		// These depend on users. No other ON DELETE RESTRICT children reference them.
 		const { rowCount: pop } = await client.query(
-			`DELETE FROM pg_owner_profiles WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM pg_owner_profiles
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}`,
 			p,
 		);
 		results.pg_owner_profiles = pop;
 
 		const { rowCount: sp } = await client.query(
-			`DELETE FROM student_profiles WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM student_profiles
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}`,
 			p,
 		);
 		results.student_profiles = sp;
 
-		// 11. user_preferences (depends on users, no deleted_at — skip)
-
-		// 12. properties (depends on users)
+		// ── Step 11: properties ───────────────────────────────────────────────
+		//
+		// GUARD: Only delete a property when no soft-deleted-but-not-yet-aged
+		// listing still references it (listings.property_id ON DELETE RESTRICT).
+		//
+		// Note: ratings with reviewee_type = 'property' are polymorphic — they
+		// reference property_id in the ratings.reviewee_id column, but this is NOT
+		// a FK constraint in the schema (polymorphic references cannot use standard
+		// FKs). So ratings do not block property deletion at the DB level.
 		const { rowCount: pr } = await client.query(
-			`DELETE FROM properties WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM properties
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}
+         AND NOT EXISTS (
+           SELECT 1 FROM listings li
+           WHERE li.property_id = properties.property_id
+             AND li.deleted_at  IS NOT NULL
+             AND li.deleted_at  >= ${cutoffExpr}
+         )`,
 			p,
 		);
 		results.properties = pr;
 
-		// 13. institutions (no hard dependencies from other tables after above)
+		// ── Step 12: institutions ─────────────────────────────────────────────
+		// student_profiles references institutions via ON DELETE SET NULL, so
+		// institutions have no RESTRICT children after the profiles are cleaned.
 		const { rowCount: ins } = await client.query(
-			`DELETE FROM institutions WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM institutions
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}`,
 			p,
 		);
 		results.institutions = ins;
 
-		// 14. users — last, after all dependents are cleared
+		// ── Step 13: users — last, after all dependents are cleared ───────────
+		//
+		// GUARD: Only delete a user when no soft-deleted-but-not-yet-aged child
+		// rows still reference it via ON DELETE RESTRICT.
+		//
+		// Children that use ON DELETE RESTRICT on users (after all cascades):
+		//   - connections (initiator_id, counterpart_id)
+		//   - interest_requests (sender_id)
+		//   - ratings (reviewer_id)
+		//   - notifications (recipient_id, actor_id) — actor_id is SET NULL, so
+		//     only recipient_id is RESTRICT
+		//   - verification_requests (user_id)
+		//   - student_profiles (user_id)
+		//   - pg_owner_profiles (user_id)
+		//
+		// Steps 1–10 cleared the aged children. The NOT EXISTS guards here protect
+		// against recently soft-deleted children that haven't aged past the cutoff.
 		const { rowCount: us } = await client.query(
-			`DELETE FROM users WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoffExpr}`,
+			`DELETE FROM users
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}
+         AND NOT EXISTS (
+           SELECT 1 FROM connections co
+           WHERE (co.initiator_id = users.user_id OR co.counterpart_id = users.user_id)
+             AND co.deleted_at  IS NOT NULL
+             AND co.deleted_at  >= ${cutoffExpr}
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM interest_requests ir
+           WHERE ir.sender_id   = users.user_id
+             AND ir.deleted_at  IS NOT NULL
+             AND ir.deleted_at  >= ${cutoffExpr}
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM ratings ra
+           WHERE ra.reviewer_id = users.user_id
+             AND ra.deleted_at  IS NOT NULL
+             AND ra.deleted_at  >= ${cutoffExpr}
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM notifications no
+           WHERE no.recipient_id = users.user_id
+             AND no.deleted_at   IS NOT NULL
+             AND no.deleted_at   >= ${cutoffExpr}
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM verification_requests vr
+           WHERE vr.user_id    = users.user_id
+             AND vr.deleted_at IS NOT NULL
+             AND vr.deleted_at >= ${cutoffExpr}
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM student_profiles sp
+           WHERE sp.user_id    = users.user_id
+             AND sp.deleted_at IS NOT NULL
+             AND sp.deleted_at >= ${cutoffExpr}
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM pg_owner_profiles pop
+           WHERE pop.user_id   = users.user_id
+             AND pop.deleted_at IS NOT NULL
+             AND pop.deleted_at >= ${cutoffExpr}
+         )`,
 			p,
 		);
 		results.users = us;
