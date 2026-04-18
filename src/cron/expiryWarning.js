@@ -13,11 +13,23 @@
 //
 // Concurrent-runner guard: even with the NOT EXISTS check, two concurrent cron
 // runners can both read the candidate set before either commits a notification —
-// the classic TOCTOU race. We prevent this with a session-level advisory lock
-// (`pg_try_advisory_lock`). Because the lock is session-scoped, it is released
-// automatically when the pooled connection is returned, so there is no risk of
-// a lock leak if the job crashes mid-run. If a second runner cannot acquire the
-// lock it simply exits early — the first runner is already doing the work.
+// the classic TOCTOU race. We prevent this with a TRANSACTION-SCOPED advisory
+// lock (`pg_try_advisory_xact_lock`).
+//
+// WHY TRANSACTION-SCOPED AND NOT SESSION-SCOPED:
+// pg_try_advisory_lock is session-scoped — it is tied to the PostgreSQL backend
+// connection, NOT the transaction. node-postgres pools connections: when
+// client.release() is called, the backend process keeps running and keeps
+// holding any session-level advisory lock it acquired. On the very next cron
+// tick, pg may check out the same pooled backend, pg_try_advisory_lock returns
+// true again (same session already holds it), but OTHER backends still see the
+// lock as held — giving false mutual exclusion across pool clients.
+//
+// pg_try_advisory_xact_lock is transaction-scoped: it is released automatically
+// at COMMIT or ROLLBACK, regardless of how the transaction ends. There is no
+// risk of the lock persisting across pool reuse, no need for explicit unlock,
+// and cleanup is guaranteed even if the process crashes mid-transaction
+// (PostgreSQL releases it when the backend reconnects or the session drops).
 //
 // The advisory lock key (7001) is an arbitrary stable integer chosen to avoid
 // collision with any other advisory lock used in this codebase. Document it
@@ -40,15 +52,21 @@ const runExpiryWarning = async () => {
 
 	const client = await pool.connect();
 	try {
-		// Attempt to acquire a session-level advisory lock. If another instance of
-		// this cron is already running, pg_try_advisory_lock returns false and we
-		// exit immediately — the other runner handles this tick. The lock is
-		// automatically released when the client is returned to the pool.
-		const { rows: lockRows } = await client.query("SELECT pg_try_advisory_lock($1) AS acquired", [
+		// Begin the transaction BEFORE acquiring the lock.
+		// pg_try_advisory_xact_lock REQUIRES an active transaction — it is bound
+		// to the transaction lifecycle and released automatically on COMMIT or
+		// ROLLBACK. This is the correct alternative to the session-scoped
+		// pg_try_advisory_lock which persists across pool reuse.
+		await client.query("BEGIN");
+
+		const { rows: lockRows } = await client.query("SELECT pg_try_advisory_xact_lock($1) AS acquired", [
 			ADVISORY_LOCK_KEY,
 		]);
 
 		if (!lockRows[0].acquired) {
+			// Another runner holds the lock. ROLLBACK ends the transaction cleanly;
+			// the (unacquired) lock is automatically released.
+			await client.query("ROLLBACK");
 			logger.info(
 				{ durationMs: Date.now() - startedAt },
 				"cron:expiryWarning — advisory lock not acquired (another runner is active); skipping this tick",
@@ -58,13 +76,22 @@ const runExpiryWarning = async () => {
 
 		// Find all active listings expiring within the warning window that have NOT
 		// already received a listing_expiring notification in the last 24 hours.
+		//
+		// WARNING_WINDOW_DAYS is passed as a parameter via make_interval() rather
+		// than interpolated into SQL text. This is the correct approach because:
+		//   1. Safety: even though WARNING_WINDOW_DAYS is a hardcoded integer today,
+		//      using a parameter is the right habit if it ever becomes env-derived.
+		//   2. Plan stability: PostgreSQL receives the same query text on every run
+		//      and can reuse a cached query plan.
+		//   3. Correctness: make_interval(days => $1) is more explicit than
+		//      ($1 || ' days')::interval and avoids any ambiguity with the cast.
 		const { rows } = await client.query(
 			`SELECT l.listing_id, l.posted_by, l.expires_at
        FROM listings l
        WHERE l.status     = 'active'
          AND l.deleted_at IS NULL
          AND l.expires_at  > NOW()
-         AND l.expires_at  <= NOW() + INTERVAL '${WARNING_WINDOW_DAYS} days'
+         AND l.expires_at  <= NOW() + make_interval(days => $1)
          AND NOT EXISTS (
            SELECT 1 FROM notifications n
            WHERE n.entity_id         = l.listing_id
@@ -73,7 +100,13 @@ const runExpiryWarning = async () => {
              AND n.created_at        > NOW() - INTERVAL '24 hours'
              AND n.deleted_at        IS NULL
          )`,
+			[WARNING_WINDOW_DAYS],
 		);
+
+		// COMMIT releases the transaction-scoped advisory lock automatically.
+		// Notification enqueueing happens AFTER commit so a Redis failure cannot
+		// cause a rollback of what is already committed DB state.
+		await client.query("COMMIT");
 
 		if (rows.length > 0) {
 			for (const row of rows) {
@@ -96,10 +129,18 @@ const runExpiryWarning = async () => {
 			logger.debug({ durationMs: Date.now() - startedAt }, "cron:expiryWarning — no listings approaching expiry");
 		}
 	} catch (err) {
+		// ROLLBACK releases the transaction-scoped advisory lock if it was acquired.
+		// If the lock was never acquired, ROLLBACK is still safe to call — it is
+		// idempotent and will not error on an already-rolled-back transaction.
+		try {
+			await client.query("ROLLBACK");
+		} catch (rollbackErr) {
+			logger.error({ rollbackErr }, "cron:expiryWarning — rollback failed");
+		}
 		logger.error({ err, durationMs: Date.now() - startedAt }, "cron:expiryWarning — run failed");
 	} finally {
-		// Releasing the client back to the pool implicitly releases the
-		// session-level advisory lock — no explicit unlock needed.
+		// No pg_advisory_unlock call needed — the transaction ending handles
+		// the lock release automatically. Simply return the client to the pool.
 		client.release();
 	}
 };
