@@ -17,6 +17,7 @@ import { closeRateLimitRedisClient } from "./middleware/rateLimiter.js";
 import { registerListingExpiryCron } from "./cron/listingExpiry.js";
 import { registerExpiryWarningCron } from "./cron/expiryWarning.js";
 import { registerHardDeleteCleanupCron } from "./cron/hardDeleteCleanup.js";
+import { startEmailWorker } from "./workers/emailWorker.js";
 
 const start = async () => {
 	try {
@@ -31,6 +32,7 @@ const start = async () => {
 		// before Redis disconnects.
 		const mediaWorker = startMediaWorker();
 		const notificationWorker = startNotificationWorker();
+		const emailWorker = startEmailWorker();
 
 		// ── Cron jobs ─────────────────────────────────────────────────────────────
 		// Cron jobs are registered after Redis and the DB are confirmed healthy.
@@ -115,6 +117,13 @@ const start = async () => {
 				logger.info("Notification worker closed");
 			} catch (workerErr) {
 				logger.error({ err: workerErr }, "Error closing notification worker");
+			}
+
+			try {
+				await emailWorker.close();
+				logger.info("Email worker closed");
+			} catch (workerErr) {
+				logger.error({ err: workerErr }, "Error closing email worker");
 			}
 
 			// Step 5: Close BullMQ queues (Redis connections used by the queue registry).
