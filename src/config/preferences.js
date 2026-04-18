@@ -1,6 +1,40 @@
 // src/config/preferences.js
+//
+// ─── IMMUTABILITY GUARANTEE ───────────────────────────────────────────────────
+//
+// PREFERENCE_DEFINITIONS and preferenceMetadata are module-level catalogs that
+// are also exported for use by validators and controllers. If an importer were
+// to mutate either (e.g. push a new entry into PREFERENCE_DEFINITIONS.values or
+// reassign a preferenceKey), allowedValuesByKey — which is built once at module
+// load — would silently become stale, causing validation to accept or reject
+// values based on the old snapshot while the exported array reflects the new one.
+//
+// The fix is to deep-freeze everything before building allowedValuesByKey.
+// Object.freeze is shallow, so we apply it recursively via deepFreeze. The Map
+// itself is then built from the frozen objects, after which no caller can alter
+// the underlying source material. The Map is an internal object and never
+// exported directly, so it does not need freezing, but the defensive-copy
+// contract in getAllowedPreferenceValues still protects against external mutation
+// of any returned Set.
 
-export const PREFERENCE_DEFINITIONS = [
+/**
+ * Recursively freezes an object and all its enumerable property values that are
+ * themselves objects or arrays. Primitive values pass through unchanged.
+ *
+ * @template T
+ * @param {T} obj
+ * @returns {T} - the same reference, now deeply frozen
+ */
+const deepFreeze = (obj) => {
+	if (obj === null || typeof obj !== "object") return obj;
+	// Freeze nested values first (post-order traversal) before freezing the
+	// container, so the freeze of the container does not block property access.
+	Object.keys(obj).forEach((key) => deepFreeze(obj[key]));
+	Object.freeze(obj);
+	return obj;
+};
+
+export const PREFERENCE_DEFINITIONS = deepFreeze([
 	{
 		preferenceKey: "smoking",
 		label: "Smoking",
@@ -61,10 +95,11 @@ export const PREFERENCE_DEFINITIONS = [
 			{ value: "frequently", label: "Frequently" },
 		],
 	},
-];
+]);
 
-// Internal map — never exported directly. All external access goes through
-// getAllowedPreferenceValues which returns a defensive copy.
+// Internal map — never exported directly. Built after deepFreeze so the source
+// material is immutable by the time the Map is constructed. All external access
+// goes through getAllowedPreferenceValues which returns a defensive copy.
 const allowedValuesByKey = new Map(
 	PREFERENCE_DEFINITIONS.map((definition) => [
 		definition.preferenceKey,
@@ -101,6 +136,9 @@ export const dedupePreferencesByKey = (preferences) => {
 		.map(([preferenceKey, preferenceValue]) => ({ preferenceKey, preferenceValue }));
 };
 
-export const preferenceMetadata = {
+// preferenceMetadata is also deep-frozen so that the exported catalog object
+// and the nested PREFERENCE_DEFINITIONS reference it holds are both immutable.
+// This keeps the metadata and the allowedValuesByKey map permanently in sync.
+export const preferenceMetadata = deepFreeze({
 	preferences: PREFERENCE_DEFINITIONS,
-};
+});
