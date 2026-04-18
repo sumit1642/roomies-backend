@@ -99,7 +99,8 @@ export const listRatings = async (filters) => {
 
 			-- Reviewer identity (may be student or pg_owner)
 			COALESCE(sp_rev.full_name, pop_rev.owner_full_name) AS reviewer_name,
-			sp_rev.profile_photo_url                            AS reviewer_photo_url,
+			COALESCE(sp_rev.profile_photo_url, pop_rev.profile_photo_url)
+			                                                     AS reviewer_photo_url,
 
 			-- Reviewee identity: user branch uses name lookup; property branch
 			-- uses property_name. Both are nullable for soft-deleted entities.
