@@ -150,6 +150,15 @@ Status: `409`
 
 Returns open rating reports oldest-first with full rating and reporter context.
 
+Request contract:
+
+- Auth required: Yes
+- Role required: `admin`
+- Query params:
+  - `limit`
+  - `cursorTime`
+  - `cursorId`
+
 ### Scenario: admin fetches report queue
 
 Status: `200`
@@ -197,6 +206,12 @@ Status: `200`
   }
 }
 ```
+
+### Scenario: queue item remains visible after related profile soft-delete
+
+Status: `200`
+
+Behavior: report rows are still returned even if reporter/reviewer/reviewee profile rows are soft-deleted; identity sub-objects may contain fallback nulls while moderation metadata remains available.
 
 ### `PATCH /admin/reports/:reportId/resolve`
 
@@ -283,3 +298,4 @@ Status: `409`
 - Verification queue and report queue both use oldest-first ordering to avoid starvation.
 - `resolved_removed` hides the rating and lets the database recalculate aggregates automatically.
 - Admin routes are fully protected at the router level with `authenticate` and `authorize("admin")`.
+- Report queue joins are intentionally resilient so moderators can still resolve historical reports even when related accounts are no longer active.

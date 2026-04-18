@@ -163,6 +163,16 @@ This pattern is used for:
 - some interest lookups
 - some rating/report lookups
 
+## Gate Middleware Conventions
+
+Some routes are guarded by middleware that can short-circuit before the controller runs.
+
+- Contact reveal gate may return quota errors (`429`) with product-specific code fields.
+- Admin role gate returns `403` with `"Forbidden"` for authenticated non-admin users.
+- Route-level header middleware may still apply on short-circuit responses (for example `Cache-Control: no-store` on contact reveal routes).
+
+When integrating a gated endpoint, handle gate responses exactly like normal endpoint responses.
+
 ## Rate Limit and Anti-Abuse Responses
 
 Auth route rate limiter example:

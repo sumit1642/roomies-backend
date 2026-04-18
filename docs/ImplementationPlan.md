@@ -24,6 +24,10 @@ is stable and every endpoint is manually verified with real HTTP requests.**
 - Detailed request, response, and scenario documentation is split by feature under `docs/api/`.
 - When route behavior changes, update the corresponding feature doc instead of expanding `docs/API.md` back into a
   single monolithic reference.
+- Changes in `student`, `report`, gate middleware, or cron jobs must be reflected in docs during the same delivery cycle:
+  - student/report endpoint contract changes → update feature docs in `docs/api/`
+  - gate short-circuit behavior or shared error envelopes → update `docs/api/conventions.md`
+  - cron behavior that impacts user-visible API states → update `docs/API.md` and operational docs
 
 ---
 

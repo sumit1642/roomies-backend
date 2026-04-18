@@ -73,6 +73,16 @@ Typical auth success body in bearer mode:
 - Expired bearer tokens do not silently refresh. They return `401`.
 - Users may have multiple roles. The `roles` array in the auth payload is authoritative.
 
+## Gate-Driven Route Behavior
+
+Some routes apply dedicated gate middleware before controller/service logic runs.
+
+- Contact reveal routes apply quota and eligibility gates.
+- Admin routes apply an `admin` role gate at router level.
+- Some ownership/party checks intentionally return privacy-preserving `404` responses instead of `403`.
+
+When documenting or integrating a route with a gate, treat the gate response as a first-class endpoint outcome.
+
 ## Common Response Envelopes
 
 Success with data:
@@ -155,6 +165,16 @@ Typical response shape:
 ```
 
 If there is no next page, `nextCursor` is `null`.
+
+## Background Jobs That Affect API Behavior
+
+The API process also runs cron jobs. These are not called directly by frontend clients, but they can change what API endpoints return.
+
+- Listing expiry cron marks aged listings unavailable/expired.
+- Expiry-warning cron enqueues warning notifications before listing expiry.
+- Hard-delete cleanup cron permanently removes aged soft-deleted rows.
+
+Frontend clients should expect list/detail endpoints to reflect these lifecycle updates between two reads, even when no user action occurred.
 
 ## How To Read The Feature Docs
 

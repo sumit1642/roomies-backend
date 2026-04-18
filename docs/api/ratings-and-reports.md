@@ -310,6 +310,16 @@ Status: `404`
 
 Lets a party to the underlying connection report a rating.
 
+### Request Contract
+
+- Auth required: Yes
+- Party-membership gate: Yes (must belong to the connection behind the rating)
+- Path param:
+  - `ratingId` must be a UUID
+- Body:
+  - `reason` enum: `fake | abusive | conflict_of_interest | other`
+  - `explanation` optional free-text context
+
 ### Request Examples
 
 ```json
@@ -369,6 +379,8 @@ Status: `404`
 }
 ```
 
+Explanation: this route intentionally returns a privacy-preserving `404` so outsiders cannot probe whether a rating exists.
+
 ### Scenario: duplicate open report
 
 Status: `409`
@@ -388,6 +400,17 @@ The code allows only one open report per reporter per rating at a time.
 
 - open report already exists: conflict
 - previous report resolved: a new report may be submitted later
+
+## Admin Moderation Linkage
+
+After submission, open reports flow into the admin queue:
+
+- `GET /admin/report-queue` returns open reports oldest-first.
+- `PATCH /admin/reports/:reportId/resolve` closes a report as:
+  - `resolved_kept` (rating remains visible), or
+  - `resolved_removed` (rating is hidden).
+
+When `resolved_removed` is used, rating visibility is turned off and aggregate recomputation is handled downstream by database trigger logic.
 
 ## Ratings and Reports Scenario Matrix
 

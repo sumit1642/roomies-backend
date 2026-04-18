@@ -155,8 +155,12 @@ Reveals student contact information using the guest/unverified/verified contact 
 ### Request Contract
 
 - Auth required: Optional
+- Auth transport accepted:
+  - Cookie mode (`accessToken` cookie)
+  - Bearer mode (`Authorization: Bearer <access-token>`)
 - Quota-gated for guests and unverified users
 - Student route uses `GET`
+- Response header: `Cache-Control: no-store`
 
 ### Scenario: guest reveal gets email-only bundle
 
@@ -198,12 +202,13 @@ Status: `200`
   "data": {
     "user_id": "11111111-1111-4111-8111-111111111111",
     "full_name": "Priya Sharma",
-    "email": "priya@iitb.ac.in"
+    "email": "priya@iitb.ac.in",
+    "whatsapp_phone": "+919876543210"
   }
 }
 ```
 
-Important note: the student contact reveal service only returns full contact when the requester is the same user. The reveal gate can mark the request as eligible for full contact, but the service still narrows it to email-only unless `requestingUserId === targetUserId`.
+Important note: the reveal gate is the single source of truth for full-contact eligibility. Verified users receive full contact; guests and unverified users receive email-only.
 
 ### Scenario: guest hits free reveal limit
 
@@ -340,6 +345,9 @@ Reveals PG owner contact information. This endpoint is intentionally `POST`, not
 ### Request Contract
 
 - Auth required: Optional
+- Auth transport accepted:
+  - Cookie mode (`accessToken` cookie)
+  - Bearer mode (`Authorization: Bearer <access-token>`)
 - Route method: `POST`
 - Response header: `Cache-Control: no-store`
 
@@ -386,6 +394,106 @@ Status: `429`
   "message": "Free contact reveal limit reached. Please log in or sign up to continue.",
   "code": "CONTACT_REVEAL_LIMIT_REACHED",
   "loginRedirect": "/login/signup"
+}
+```
+
+## `GET /students/:userId/preferences`
+
+Returns the student's preference profile used for compatibility-aware discovery.
+
+### Request Contract
+
+- Auth required: Yes
+- Ownership required: caller must match `:userId`
+- Path param:
+  - `userId` must be a UUID
+
+### Scenario: fetch preferences
+
+Status: `200`
+
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "preferenceKey": "food_habit",
+      "preferenceValue": "vegetarian"
+    },
+    {
+      "preferenceKey": "smoking",
+      "preferenceValue": "no"
+    }
+  ]
+}
+```
+
+### Scenario: caller requests another student's preferences
+
+Status: `403`
+
+```json
+{
+  "status": "error",
+  "message": "Forbidden"
+}
+```
+
+## `PUT /students/:userId/preferences`
+
+Updates the student's preference profile.
+
+### Request Example
+
+```json
+{
+  "preferences": [
+    {
+      "preferenceKey": "food_habit",
+      "preferenceValue": "eggetarian"
+    },
+    {
+      "preferenceKey": "sleep_schedule",
+      "preferenceValue": "late_night"
+    }
+  ]
+}
+```
+
+### Scenario: update succeeds
+
+Status: `200`
+
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "preferenceKey": "food_habit",
+      "preferenceValue": "eggetarian"
+    },
+    {
+      "preferenceKey": "sleep_schedule",
+      "preferenceValue": "late_night"
+    }
+  ]
+}
+```
+
+### Scenario: validation failure (missing `preferences`)
+
+Status: `400`
+
+```json
+{
+  "status": "error",
+  "message": "Validation failed",
+  "errors": [
+    {
+      "field": "body.preferences",
+      "message": "Invalid input: expected array, received undefined"
+    }
+  ]
 }
 ```
 
@@ -461,6 +569,8 @@ Status: `409`
 | PG owner profile viewed by other user | `GET /pg-owners/:userId/profile` | `200` | business phone hidden |
 | Student contact reveal by guest | `GET /students/:userId/contact/reveal` | `200` | email only |
 | PG owner contact reveal by verified user | `POST /pg-owners/:userId/contact/reveal` | `200` | email + WhatsApp phone |
+| Student reads own preferences | `GET /students/:userId/preferences` | `200` | compatibility preference profile returned |
+| Student updates preferences | `PUT /students/:userId/preferences` | `200` | preference profile updated for future matching |
 | Guest quota exhausted | contact reveal routes | `429` | redirect hint included |
 | Document submitted twice while pending | `POST /pg-owners/:userId/documents` | `409` | duplicate pending request blocked |
 
@@ -468,4 +578,4 @@ Status: `409`
 
 - The student contact reveal route is `GET`, but the PG owner route is `POST` to avoid accidental caching or browser prefetch leaks.
 - The PG owner contact reveal response can expose a WhatsApp phone number to verified users.
-- The student contact reveal service currently narrows most requests to email-only unless the requester is the same user.
+- The student contact reveal response is gate-controlled: verified users receive full contact, guests/unverified callers receive email-only.
