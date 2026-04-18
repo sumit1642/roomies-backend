@@ -37,11 +37,24 @@ export const getReportQueue = async (req, res, next) => {
 		const parsedCursorId =
 			typeof cursorId === "string" && UUID_V1_TO_V5_REGEX.test(cursorId) ? cursorId : undefined;
 
-		const parsedLimit = limit !== undefined ? Number(limit) : undefined;
+		// Fix: Number("") === 0, which would cause the service to return no rows.
+		// Treat empty strings, whitespace-only strings, and any value that doesn't
+		// produce a finite positive integer as "not provided" (undefined), which
+		// causes the service to use its own default limit instead.
+		//
+		// Guard order:
+		//   1. Is limit even provided as a non-empty string?
+		//   2. Is the result a finite number? (rejects NaN from non-numeric strings)
+		//   3. Is it a positive integer? (rejects 0 and negative values)
+		const parsedLimit = typeof limit === "string" && limit.trim() !== "" ? Number(limit) : undefined;
+
+		const safeParsedLimit =
+			Number.isFinite(parsedLimit) && Number.isInteger(parsedLimit) && parsedLimit > 0 ? parsedLimit : undefined;
+
 		const result = await reportService.getReportQueue({
 			cursorTime: parsedCursorTime,
 			cursorId: parsedCursorId,
-			limit: Number.isNaN(parsedLimit) ? undefined : parsedLimit,
+			limit: safeParsedLimit,
 		});
 		res.json({ status: "success", data: result });
 	} catch (err) {
