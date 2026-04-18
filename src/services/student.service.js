@@ -50,23 +50,25 @@ export const getStudentProfile = async (requestingUserId, targetUserId) => {
 	return rows[0];
 };
 
-// Returns contact details for a student. Requires an active student_profiles row
-// (INNER JOIN, not LEFT JOIN) so only users who actually have a student profile
-// can be returned — preventing PG owners or admin accounts from being exposed
-// through this endpoint even if their user_id is known.
+// Returns contact details for a student.
 //
-// emailOnly: false — only honoured when requester is authorised; otherwise
-// forced to email-only.
-// emailOnly: true  — guests/unverified callers; returns email only.
-// The whatsapp_phone field is stripped at this boundary so it never reaches
-// the response serialiser for restricted callers.
-export const getStudentContactReveal = async (targetUserId, emailOnly = false, requestingUserId = null) => {
-	// Mirror the ownership-style sensitivity rule used in getStudentProfile:
-	// only the profile owner is authorised to see additional private contact
-	// data from this service boundary.
-	const isRequesterAuthorisedForFullContact = requestingUserId === targetUserId;
-	const effectiveEmailOnly = emailOnly || !isRequesterAuthorisedForFullContact;
-
+// Access control and tier determination are handled ENTIRELY upstream by
+// optionalAuthenticate and contactRevealGate before this service is ever
+// reached. The gate sets req.contactReveal.emailOnly based on whether the
+// caller is a verified user (false = full contact) or a guest/unverified
+// user (true = email only). This service TRUSTS that decision — it does not
+// re-derive or override it.
+//
+// Previous implementation re-evaluated ownership (requestingUserId === targetUserId)
+// and forced emailOnly=true for any cross-user access, which silently broke the
+// product requirement that verified users receive full contact for any profile
+// they look up. That logic has been removed.
+//
+// emailOnly: false  — verified callers; returns full bundle: email + whatsapp_phone
+// emailOnly: true   — guests and unverified callers; returns email only.
+//                     The whatsapp_phone field is stripped at this boundary so
+//                     it never exists on any object that leaves this function.
+export const getStudentContactReveal = async (targetUserId, emailOnly = false) => {
 	const { rows } = await pool.query(
 		`SELECT
 			u.user_id,
@@ -86,7 +88,9 @@ export const getStudentContactReveal = async (targetUserId, emailOnly = false, r
 
 	const row = rows[0];
 
-	if (effectiveEmailOnly) {
+	if (emailOnly) {
+		// Strip whatsapp_phone at this boundary — it must never appear in the
+		// response object for guests or unverified callers, not even as null.
 		return {
 			user_id: row.user_id,
 			full_name: row.full_name,
