@@ -8,34 +8,60 @@
 // Warning window: we notify posters when their listing will expire within 7
 // days. This gives them enough lead time to renew.
 //
-// Idempotency: the NOT EXISTS subquery checks for a listing_expiring notification
-// in the last 24 hours, preventing duplicate messages per listing per day.
+// ─── IDEMPOTENCY — DURABLE INSERT BEFORE COMMIT ──────────────────────────────
 //
-// Concurrent-runner guard: even with the NOT EXISTS check, two concurrent cron
-// runners can both read the candidate set before either commits a notification —
-// the classic TOCTOU race. We prevent this with a TRANSACTION-SCOPED advisory
-// lock (`pg_try_advisory_xact_lock`).
+// Previous design: SELECT candidate listings inside the transaction, COMMIT,
+// then call enqueueNotification for each row. This created a TOCTOU window:
+// two concurrent runners could both pass the NOT EXISTS check before either
+// committed, then both enqueue jobs, resulting in duplicate notifications even
+// though the BullMQ worker's idempotency_key ON CONFLICT prevents duplicate DB
+// rows. Double-enqueuing is harmless for final correctness but wastes Redis
+// resources and creates noisy log entries.
 //
-// WHY TRANSACTION-SCOPED AND NOT SESSION-SCOPED:
-// pg_try_advisory_lock is session-scoped — it is tied to the PostgreSQL backend
-// connection, NOT the transaction. node-postgres pools connections: when
-// client.release() is called, the backend process keeps running and keeps
-// holding any session-level advisory lock it acquired. On the very next cron
-// tick, pg may check out the same pooled backend, pg_try_advisory_lock returns
-// true again (same session already holds it), but OTHER backends still see the
-// lock as held — giving false mutual exclusion across pool clients.
+// Current design: for each candidate listing we INSERT a notifications row
+// directly inside the transaction, using ON CONFLICT (idempotency_key) DO
+// NOTHING with a deterministic key derived from the listing_id and the UTC
+// calendar date. Only the rows actually inserted (rowCount contribution from
+// the INSERT) are enqueued post-commit. Because the INSERT and the COMMIT are
+// atomic, a concurrent runner that tries the same INSERT will hit the UNIQUE
+// constraint and insert zero rows — it will enqueue nothing, which is correct.
 //
-// pg_try_advisory_xact_lock is transaction-scoped: it is released automatically
-// at COMMIT or ROLLBACK, regardless of how the transaction ends. There is no
-// risk of the lock persisting across pool reuse, no need for explicit unlock,
-// and cleanup is guaranteed even if the process crashes mid-transaction
-// (PostgreSQL releases it when the backend reconnects or the session drops).
+// The idempotency_key format is:
+//   expiry_warning:{listing_id}:{YYYY-MM-DD}
+// where the date is the UTC calendar day at the time the cron runs. This means:
+//   1. Exactly one notification per listing per calendar day — the 24-hour
+//      NOT EXISTS window of the old design is now enforced at the unique-index
+//      level rather than through a soft SELECT check.
+//   2. Re-running the cron multiple times on the same day (e.g. after a crash)
+//      safely produces no duplicates.
+//   3. The next UTC calendar day produces a new key, so a listing expiring in
+//      a future window can still be warned on a subsequent day if needed.
 //
-// The advisory lock key (7001) is an arbitrary stable integer chosen to avoid
-// collision with any other advisory lock used in this codebase. Document it
-// here: 7001 = expiryWarning cron.
+// ─── CONCURRENT-RUNNER GUARD ─────────────────────────────────────────────────
 //
-// Observability: logs the number of warnings sent on each run.
+// We continue to hold a transaction-scoped advisory lock
+// (pg_try_advisory_xact_lock) to prevent two runners from even attempting the
+// SELECT + INSERT simultaneously. The advisory lock is the first line of
+// defence; the UNIQUE constraint on idempotency_key is the second.
+//
+// WHY TRANSACTION-SCOPED AND NOT SESSION-SCOPED: see the original design notes
+// above the ADVISORY_LOCK_KEY constant. Summary: transaction-scoped locks
+// are released automatically on COMMIT/ROLLBACK, preventing stale lock
+// retention across connection-pool reuse.
+//
+// ─── NOTIFICATION WORKER MESSAGE ─────────────────────────────────────────────
+//
+// The notifications row inserted here carries message = null. The notification
+// worker's NOTIFICATION_MESSAGES map (notificationWorker.js) provides the
+// human-readable text when the job is processed. Storing null here and letting
+// the worker fill in the message is consistent with how all other notification
+// inserts work — the message is applied at INSERT time in the worker, not here.
+//
+// ─── OBSERVABILITY ───────────────────────────────────────────────────────────
+//
+// Logs the number of warnings enqueued (rows returned by the INSERT, not just
+// rows selected) so the number reflects actual new notifications, not
+// re-selections of already-warned listings.
 
 import cron from "node-cron";
 import { pool } from "../db/client.js";
@@ -46,17 +72,24 @@ const SCHEDULE = process.env.CRON_EXPIRY_WARNING ?? "0 1 * * *";
 const WARNING_WINDOW_DAYS = 7;
 const ADVISORY_LOCK_KEY = 7001; // stable key: 7001 = expiryWarning cron
 
+// Build a deterministic idempotency key for a given listing on the current UTC
+// calendar day. The key is stable for the entire day regardless of what time
+// the cron fires, which prevents duplicates on re-runs within the same day.
+const buildIdempotencyKey = (listingId, utcDateStr) => `expiry_warning:${listingId}:${utcDateStr}`;
+
 const runExpiryWarning = async () => {
 	const startedAt = Date.now();
 	logger.info("cron:expiryWarning — starting run");
+
+	// UTC calendar date as YYYY-MM-DD, used for idempotency key construction.
+	const today = new Date().toISOString().slice(0, 10);
 
 	const client = await pool.connect();
 	try {
 		// Begin the transaction BEFORE acquiring the lock.
 		// pg_try_advisory_xact_lock REQUIRES an active transaction — it is bound
 		// to the transaction lifecycle and released automatically on COMMIT or
-		// ROLLBACK. This is the correct alternative to the session-scoped
-		// pg_try_advisory_lock which persists across pool reuse.
+		// ROLLBACK.
 		await client.query("BEGIN");
 
 		const { rows: lockRows } = await client.query("SELECT pg_try_advisory_xact_lock($1) AS acquired", [
@@ -64,8 +97,6 @@ const runExpiryWarning = async () => {
 		]);
 
 		if (!lockRows[0].acquired) {
-			// Another runner holds the lock. ROLLBACK ends the transaction cleanly;
-			// the (unacquired) lock is automatically released.
 			await client.query("ROLLBACK");
 			logger.info(
 				{ durationMs: Date.now() - startedAt },
@@ -74,18 +105,12 @@ const runExpiryWarning = async () => {
 			return;
 		}
 
-		// Find all active listings expiring within the warning window that have NOT
-		// already received a listing_expiring notification in the last 24 hours.
-		//
-		// WARNING_WINDOW_DAYS is passed as a parameter via make_interval() rather
-		// than interpolated into SQL text. This is the correct approach because:
-		//   1. Safety: even though WARNING_WINDOW_DAYS is a hardcoded integer today,
-		//      using a parameter is the right habit if it ever becomes env-derived.
-		//   2. Plan stability: PostgreSQL receives the same query text on every run
-		//      and can reuse a cached query plan.
-		//   3. Correctness: make_interval(days => $1) is more explicit than
-		//      ($1 || ' days')::interval and avoids any ambiguity with the cast.
-		const { rows } = await client.query(
+		// Find all active listings expiring within the warning window that do not
+		// already have a listing_expiring notification for today's idempotency key.
+		// We filter using a direct idempotency_key match rather than a 24-hour
+		// window timestamp check, so the uniqueness semantics are exact and
+		// consistent with the INSERT below.
+		const { rows: candidates } = await client.query(
 			`SELECT l.listing_id, l.posted_by, l.expires_at
        FROM listings l
        WHERE l.status     = 'active'
@@ -94,22 +119,53 @@ const runExpiryWarning = async () => {
          AND l.expires_at  <= NOW() + make_interval(days => $1)
          AND NOT EXISTS (
            SELECT 1 FROM notifications n
-           WHERE n.entity_id         = l.listing_id
-             AND n.entity_type       = 'listing'
-             AND n.notification_type = 'listing_expiring'
-             AND n.created_at        > NOW() - INTERVAL '24 hours'
-             AND n.deleted_at        IS NULL
+           WHERE n.idempotency_key = $2 || l.listing_id::text || $3
+             AND n.deleted_at      IS NULL
          )`,
-			[WARNING_WINDOW_DAYS],
+			[WARNING_WINDOW_DAYS, `expiry_warning:`, `:${today}`],
 		);
 
-		// COMMIT releases the transaction-scoped advisory lock automatically.
-		// Notification enqueueing happens AFTER commit so a Redis failure cannot
-		// cause a rollback of what is already committed DB state.
+		if (candidates.length === 0) {
+			await client.query("COMMIT");
+			logger.debug({ durationMs: Date.now() - startedAt }, "cron:expiryWarning — no listings approaching expiry");
+			return;
+		}
+
+		// For each candidate, attempt a durable INSERT of the notification row
+		// inside this transaction with the deterministic idempotency key.
+		// ON CONFLICT DO NOTHING means a concurrent runner that somehow slipped
+		// through the advisory lock will insert zero rows for that listing.
+		// We collect only the listing_ids for which the INSERT actually succeeded
+		// (i.e. the row was new) so we only enqueue jobs for those.
+		const insertedListings = [];
+
+		for (const row of candidates) {
+			const key = buildIdempotencyKey(row.listing_id, today);
+			const { rowCount } = await client.query(
+				`INSERT INTO notifications
+           (recipient_id, notification_type, entity_type, entity_id, idempotency_key)
+         VALUES ($1, 'listing_expiring'::notification_type_enum, 'listing', $2, $3)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+				[row.posted_by, row.listing_id, key],
+			);
+
+			if (rowCount === 1) {
+				// Row was freshly inserted — safe to enqueue after commit.
+				insertedListings.push(row);
+			}
+		}
+
+		// COMMIT atomically persists all inserted notification rows and releases
+		// the advisory lock. Post-commit enqueueing below is therefore safe: if
+		// enqueueNotification fails for any listing, the notification row is
+		// already durably stored, and the BullMQ worker will process it on the
+		// next retry triggered by some other code path (or the notification will
+		// remain undelivered until the next cron run, which is acceptable because
+		// there are still multiple days until expiry).
 		await client.query("COMMIT");
 
-		if (rows.length > 0) {
-			for (const row of rows) {
+		if (insertedListings.length > 0) {
+			for (const row of insertedListings) {
 				enqueueNotification({
 					recipientId: row.posted_by,
 					type: "listing_expiring",
@@ -120,18 +176,22 @@ const runExpiryWarning = async () => {
 
 			logger.info(
 				{
-					warningSent: rows.length,
+					warningSent: insertedListings.length,
+					skipped: candidates.length - insertedListings.length,
 					durationMs: Date.now() - startedAt,
 				},
 				"cron:expiryWarning — expiry warnings enqueued",
 			);
 		} else {
-			logger.debug({ durationMs: Date.now() - startedAt }, "cron:expiryWarning — no listings approaching expiry");
+			// All candidates already had their notification rows inserted (race
+			// with another runner that committed first). Nothing to enqueue.
+			logger.debug(
+				{ candidateCount: candidates.length, durationMs: Date.now() - startedAt },
+				"cron:expiryWarning — all candidates already warned; nothing enqueued",
+			);
 		}
 	} catch (err) {
-		// ROLLBACK releases the transaction-scoped advisory lock if it was acquired.
-		// If the lock was never acquired, ROLLBACK is still safe to call — it is
-		// idempotent and will not error on an already-rolled-back transaction.
+		// ROLLBACK releases the advisory lock if it was acquired.
 		try {
 			await client.query("ROLLBACK");
 		} catch (rollbackErr) {
@@ -139,8 +199,7 @@ const runExpiryWarning = async () => {
 		}
 		logger.error({ err, durationMs: Date.now() - startedAt }, "cron:expiryWarning — run failed");
 	} finally {
-		// No pg_advisory_unlock call needed — the transaction ending handles
-		// the lock release automatically. Simply return the client to the pool.
+		// No pg_advisory_unlock call needed — the transaction ending handles it.
 		client.release();
 	}
 };
