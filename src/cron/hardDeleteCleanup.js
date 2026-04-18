@@ -48,16 +48,23 @@
 // If so, the parent is skipped — it will be cleaned up in a future run once all
 // its children have also aged past the retention cutoff.
 //
-// This means the invariant is:
-//   "A parent row can be hard-deleted only when ALL referencing child rows have
-//    either been hard-deleted already (don't exist in the table) OR have also
-//    been soft-deleted long enough to be eligible for hard-deletion themselves."
+// ─── CONNECTIONS → RATINGS FK GUARD ─────────────────────────────────────────
 //
-// The NOT EXISTS guards use the same cutoffExpr so they are evaluated
-// consistently with the main WHERE clause within the same transaction.
+// ratings.connection_id references connections.connection_id ON DELETE RESTRICT.
+// Step 2 hard-deletes aged ratings, but a connection aged enough for hard-delete
+// may still have a recently-soft-deleted (not-yet-aged) rating referencing it.
+// Without a guard, Step 4 (DELETE connections) would be blocked by that rating
+// and the entire transaction would roll back.
 //
-// We run all deletes in one transaction so either all aged rows are cleaned or
-// none are — no half-committed state that leaves orphaned child rows.
+// Fix: Step 4's DELETE skips any connection that still has a not-yet-aged
+// soft-deleted rating (i.e. a rating whose deleted_at >= cutoff OR is NULL).
+//
+// ─── ALIAS NAMING ────────────────────────────────────────────────────────────
+//
+// PostgreSQL treats `no` as an unreserved keyword (used in NO ACTION, NO MAXVALUE
+// etc.) and it is legal as an alias in most contexts. However, using reserved or
+// near-reserved words as aliases is error-prone and confusing to human readers.
+// The notifications alias is renamed to `nt` throughout this file for clarity.
 //
 // ─── RETENTION VALIDATION ────────────────────────────────────────────────────
 //
@@ -159,7 +166,8 @@ const runHardDeleteCleanup = async () => {
 		results.ratings = ra;
 
 		// ── Step 3: notifications (depends on users) ──────────────────────────
-		// No children reference notifications.
+		// No children reference notifications. Alias 'nt' used (not 'no') to
+		// avoid ambiguity with PostgreSQL's unreserved keyword NO.
 		const { rowCount: no } = await client.query(
 			`DELETE FROM notifications
        WHERE deleted_at IS NOT NULL
@@ -169,11 +177,24 @@ const runHardDeleteCleanup = async () => {
 		results.notifications = no;
 
 		// ── Step 4: connections (depends on interest_requests, listings, users) ─
-		// ratings that reference this connection were deleted in step 2.
+		//
+		// ratings.connection_id ON DELETE RESTRICT means we must NOT hard-delete a
+		// connection if a not-yet-aged rating still references it. Step 2 removed
+		// aged ratings, but a rating soft-deleted recently (deleted_at >= cutoff)
+		// or not yet soft-deleted (deleted_at IS NULL) still holds the FK.
+		//
+		// Guard A (ratings): skip connections that still have a live or recently
+		// soft-deleted rating. We check both NULL (not soft-deleted) and
+		// recent (deleted_at >= cutoff) to cover every RESTRICT scenario.
 		const { rowCount: co } = await client.query(
 			`DELETE FROM connections
        WHERE deleted_at IS NOT NULL
-         AND deleted_at < ${cutoffExpr}`,
+         AND deleted_at < ${cutoffExpr}
+         AND NOT EXISTS (
+           SELECT 1 FROM ratings ra
+           WHERE ra.connection_id = connections.connection_id
+             AND (ra.deleted_at IS NULL OR ra.deleted_at >= ${cutoffExpr})
+         )`,
 			p,
 		);
 		results.connections = co;
@@ -318,8 +339,8 @@ const runHardDeleteCleanup = async () => {
 		//   - connections (initiator_id, counterpart_id)
 		//   - interest_requests (sender_id)
 		//   - ratings (reviewer_id)
-		//   - notifications (recipient_id, actor_id) — actor_id is SET NULL, so
-		//     only recipient_id is RESTRICT
+		//   - notifications (recipient_id) — actor_id is SET NULL so only
+		//     recipient_id is RESTRICT; alias 'nt' used (not 'no')
 		//   - verification_requests (user_id)
 		//   - student_profiles (user_id)
 		//   - pg_owner_profiles (user_id)
@@ -349,10 +370,10 @@ const runHardDeleteCleanup = async () => {
              AND ra.deleted_at  >= ${cutoffExpr}
          )
          AND NOT EXISTS (
-           SELECT 1 FROM notifications no
-           WHERE no.recipient_id = users.user_id
-             AND no.deleted_at   IS NOT NULL
-             AND no.deleted_at   >= ${cutoffExpr}
+           SELECT 1 FROM notifications nt
+           WHERE nt.recipient_id = users.user_id
+             AND nt.deleted_at   IS NOT NULL
+             AND nt.deleted_at   >= ${cutoffExpr}
          )
          AND NOT EXISTS (
            SELECT 1 FROM verification_requests vr
