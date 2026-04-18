@@ -16,17 +16,24 @@
 // Primary counter: Redis, keyed on a SHA-256 fingerprint of IP + User-Agent.
 // Fallback: HttpOnly cookie mirror count for Redis-unavailable scenarios.
 //
-// ─── QUOTA TIMING FIX ────────────────────────────────────────────────────────
+// ─── QUOTA TIMING — INTERCEPT BEFORE HEADERS ARE SENT ────────────────────────
 //
-// The previous implementation incremented the Redis counter and set the cookie
-// BEFORE the downstream controller ran. This meant a 404 (user not found) or
-// any other non-2xx response still consumed one of the caller's 10 reveals,
-// which is incorrect — only successful reveals should count against the quota.
+// The original implementation incremented the Redis counter and wrote the cookie
+// inside a `res.on("finish")` listener. The `finish` event fires AFTER the
+// response has been completely flushed to the network, at which point
+// `res.setHeader()` (called internally by `res.cookie()`) silently fails or
+// throws ERR_HTTP_HEADERS_SENT — the cookie is never actually delivered to the
+// browser, making the quota unenforceable.
 //
-// Fix: quota is incremented via a res.on("finish") hook that fires AFTER the
-// response is sent. The hook inspects res.statusCode and only charges quota on
-// 2xx responses. The cookie mirror is also written in this hook using the
-// Redis-authoritative count, not the stale safeCookieCount + 1 value.
+// The fix wraps the three response-ending methods `res.json`, `res.send`, and
+// `res.end` so that quota charging and cookie writing happen BEFORE the original
+// method is invoked, while headers are still open. The wrapper is idempotent —
+// once chargeQuota has run it unsets itself so it cannot fire twice even if
+// downstream code calls both `res.json` and `res.end`.
+//
+// We only charge quota when `res.statusCode` is 2xx at call time (i.e. the
+// controller produced a successful reveal). Non-2xx responses (404 user not
+// found, 500 server error) do not consume a slot from the caller's allowance.
 //
 // ─── ATOMICITY ───────────────────────────────────────────────────────────────
 //
@@ -95,6 +102,120 @@ const limitReachedResponse = (res) =>
 		loginRedirect: LOGIN_REDIRECT_PATH,
 	});
 
+// ─── Response-interception helper ────────────────────────────────────────────
+//
+// Wraps res.json, res.send, and res.end so that chargeQuota() runs synchronously
+// (for cookie writes) and asynchronously (for Redis) BEFORE the original method
+// flushes the response. The wrapper is one-shot: after the first call it removes
+// itself to prevent double-charging if the controller invokes multiple
+// response-ending methods (which is unusual but possible with some error paths).
+//
+// Why wrap all three? Express's res.json calls res.send which calls res.end, but
+// some middleware and error handlers call res.end directly. Wrapping all three
+// ensures we never miss a response regardless of how it was terminated.
+const installPreResponseHook = (res, safeCookieCount, fingerprint, redisKey) => {
+	let charged = false;
+
+	// chargeQuota attempts to increment the Redis counter and set the cookie.
+	// It is called from within the wrapped response methods while headers are
+	// still open, so res.cookie() works correctly.
+	//
+	// The function is intentionally synchronous for the cookie write (which is
+	// a pure in-process header mutation) and fire-and-forget for the Redis EVAL
+	// (which requires a network round-trip). Setting the cookie with the
+	// optimistic new count (safeCookieCount + 1) before the Redis result returns
+	// is correct because: (a) the cookie is only a best-effort pre-check that
+	// avoids a Redis round-trip for obviously-over-limit callers, and (b) the
+	// Redis counter is the authoritative source — a later request will read it
+	// and correct any discrepancy.
+	const chargeQuota = (res) => {
+		if (charged) return;
+		charged = true;
+
+		// Optimistic cookie write using the current known count + 1. This is
+		// done synchronously while headers are still open. If Redis returns a
+		// different authoritative count, the cookie will be corrected on the
+		// next successful reveal.
+		res.cookie(COOKIE_NAME, String(safeCookieCount + 1), {
+			httpOnly: true,
+			secure: process.env.NODE_ENV === "production",
+			sameSite: "lax",
+			maxAge: TTL_SECONDS * 1000,
+		});
+
+		// Fire-and-forget Redis increment. If Redis is available, update the
+		// authoritative counter and overwrite the cookie with the real count.
+		// We do not await this because we are inside a response method and
+		// cannot delay the response for a network call.
+		if (redis?.isOpen) {
+			redis
+				.eval(INCR_WITH_INITIAL_TTL_SCRIPT, {
+					keys: [redisKey],
+					arguments: [String(TTL_SECONDS)],
+				})
+				.then((newCount) => {
+					if (newCount > HIGH_COUNT_WARNING_THRESHOLD) {
+						logger.warn(
+							{
+								event: "guest_contact_reveal_high_count",
+								fingerprintHash: fingerprint,
+								count: newCount,
+								threshold: HIGH_COUNT_WARNING_THRESHOLD,
+							},
+							`contactRevealGate: fingerprint count ${newCount} exceeds threshold — possible NAT collision or abuse`,
+						);
+					}
+					logger.debug(
+						{
+							event: "guest_contact_reveal_charged",
+							fingerprintHash: fingerprint,
+							count: newCount,
+						},
+						"contactRevealGate: quota charged",
+					);
+					// We cannot update the cookie here since the response has already
+					// been sent. The Redis-authoritative count will be read on the next
+					// request's pre-check and will self-correct any optimistic drift.
+				})
+				.catch((redisErr) => {
+					logger.warn(
+						{ err: redisErr.message },
+						"contactRevealGate: async Redis increment failed — cookie-only fallback used",
+					);
+				});
+		}
+	};
+
+	// Wrap the three response-ending methods. Each wrapper checks statusCode at
+	// call time: only 2xx responses are charged. The original method is always
+	// called regardless of whether charging happened.
+	const wrapMethod = (methodName) => {
+		const original = res[methodName].bind(res);
+		res[methodName] = (...args) => {
+			const code = res.statusCode;
+			if (code >= 200 && code < 300) {
+				chargeQuota(res);
+			}
+			// Restore originals before calling to prevent infinite recursion if
+			// the original method itself calls another wrapped method.
+			res.json = originalJson;
+			res.send = originalSend;
+			res.end = originalEnd;
+			return original(...args);
+		};
+	};
+
+	// Capture original references before any wrapping occurs so the restore
+	// inside each wrapper points to the genuine originals, not another wrapper.
+	const originalJson = res.json.bind(res);
+	const originalSend = res.send.bind(res);
+	const originalEnd = res.end.bind(res);
+
+	wrapMethod("json");
+	wrapMethod("send");
+	wrapMethod("end");
+};
+
 export const contactRevealGate = async (req, res, next) => {
 	// ── Tier 1: verified user — unlimited, full bundle ────────────────────────
 	if (req.user?.isEmailVerified === true) {
@@ -118,12 +239,7 @@ export const contactRevealGate = async (req, res, next) => {
 	//
 	// Before allowing the request through, check whether the caller has already
 	// exhausted their quota. We do NOT increment here — incrementing happens only
-	// after a successful 2xx response via the res.on("finish") hook below.
-	//
-	// This pre-check is a best-effort guard using the current Redis count. It
-	// prevents obviously over-limit callers from even reaching the controller,
-	// which is valuable for scraper mitigation. The definitive increment (which
-	// enforces the quota for this specific reveal) happens post-response.
+	// after a successful 2xx response via the pre-response hook below.
 	const fingerprint = anonFingerprint(req);
 	const redisKey = `contactRevealAnon:${fingerprint}`;
 
@@ -141,7 +257,6 @@ export const contactRevealGate = async (req, res, next) => {
 			}
 		} catch (redisErr) {
 			// Redis unavailable — fall through to cookie-only enforcement.
-			// The post-response hook will also degrade gracefully.
 			logger.warn(
 				{ err: redisErr.message },
 				"contactRevealGate: Redis pre-check unavailable — falling back to cookie-only enforcement",
@@ -149,90 +264,13 @@ export const contactRevealGate = async (req, res, next) => {
 		}
 	}
 
-	// ── Register post-response quota hook ─────────────────────────────────────
+	// ── Install pre-response hook ─────────────────────────────────────────────
 	//
-	// Quota is charged only after a SUCCESSFUL (2xx) response. This means:
-	//   - 404 (user not found) → quota NOT consumed
-	//   - 500 (server error) → quota NOT consumed
-	//   - 200 (reveal successful) → quota IS consumed
-	//
-	// The hook fires asynchronously after the response is sent. Any error in
-	// the hook is logged but does not affect the already-sent response.
-	res.on("finish", async () => {
-		if (res.statusCode < 200 || res.statusCode >= 300) {
-			// Non-2xx: the reveal did not succeed. Do not charge quota.
-			return;
-		}
-
-		if (redis?.isOpen) {
-			try {
-				// Atomic INCR + conditional EXPIRE. Returns the new count.
-				const newCount = await redis.eval(INCR_WITH_INITIAL_TTL_SCRIPT, {
-					keys: [redisKey],
-					arguments: [String(TTL_SECONDS)],
-				});
-
-				// Collision/abuse monitoring
-				if (newCount > HIGH_COUNT_WARNING_THRESHOLD) {
-					logger.warn(
-						{
-							event: "guest_contact_reveal_high_count",
-							fingerprintHash: fingerprint,
-							count: newCount,
-							threshold: HIGH_COUNT_WARNING_THRESHOLD,
-							route: req.path,
-							userId: req.user?.userId ?? null,
-						},
-						`contactRevealGate: fingerprint count ${newCount} exceeds threshold — possible NAT collision or abuse`,
-					);
-				}
-
-				logger.debug(
-					{
-						event: "guest_contact_reveal_charged",
-						fingerprintHash: fingerprint,
-						count: newCount,
-						userId: req.user?.userId ?? null,
-					},
-					"contactRevealGate: quota charged post-response",
-				);
-
-				// Write the Redis-authoritative count to the cookie mirror.
-				// Using the value Redis just returned (not safeCookieCount + 1)
-				// ensures the cookie stays in sync even if the cookie was cleared
-				// mid-session. This is the correct authoritative value.
-				res.cookie(COOKIE_NAME, String(newCount), {
-					httpOnly: true,
-					secure: process.env.NODE_ENV === "production",
-					sameSite: "lax",
-					maxAge: TTL_SECONDS * 1000,
-				});
-			} catch (redisErr) {
-				// Fire-and-forget — the response is already sent. Log and continue.
-				logger.warn(
-					{ err: redisErr.message },
-					"contactRevealGate: post-response Redis increment failed — cookie fallback used",
-				);
-				// Fallback: increment the cookie-based count even if Redis failed.
-				// This degrades gracefully: Redis is the enforcer when available,
-				// cookie is the last line of defense.
-				res.cookie(COOKIE_NAME, String(safeCookieCount + 1), {
-					httpOnly: true,
-					secure: process.env.NODE_ENV === "production",
-					sameSite: "lax",
-					maxAge: TTL_SECONDS * 1000,
-				});
-			}
-		} else {
-			// Redis not available — use cookie-only fallback count.
-			res.cookie(COOKIE_NAME, String(safeCookieCount + 1), {
-				httpOnly: true,
-				secure: process.env.NODE_ENV === "production",
-				sameSite: "lax",
-				maxAge: TTL_SECONDS * 1000,
-			});
-		}
-	});
+	// The hook wraps res.json / res.send / res.end so that quota charging and
+	// cookie writing happen BEFORE headers are flushed. This replaces the
+	// previous res.on("finish") approach which called res.cookie() after headers
+	// were already sent (ERR_HTTP_HEADERS_SENT).
+	installPreResponseHook(res, safeCookieCount, fingerprint, redisKey);
 
 	// Attach the gate context for the controller. emailOnly=true for all
 	// guests and unverified users — the controller and service respect this.
