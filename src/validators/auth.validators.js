@@ -2,6 +2,23 @@
 
 import { z } from "zod";
 
+// ─── Shared sub-schemas ───────────────────────────────────────────────────────
+
+// refreshToken is optional in the body because browser clients send no body —
+// they carry the refresh token exclusively in the HttpOnly cookie set at login.
+// The controller resolves the token via:
+//   req.body.refreshToken ?? req.cookies?.refreshToken
+// Android clients send the token explicitly in the body. Making it optional
+// here lets both client types reach the same endpoint without a validation
+// failure. The "at least one source must provide a token" check lives in the
+// controller, which can see req.cookies — Zod cannot.
+const optionalRefreshTokenBody = z
+	.object({
+		refreshToken: z.string().min(1, { error: "Refresh token must not be empty" }).optional(),
+	})
+	.optional()
+	.default({});
+
 // ─── Register ───────────────────────────────────────────────────────────────
 // Cross-field dependency (businessName required for pg_owner) is enforced
 // in auth.service.js — Zod handles shape, service handles business rules.
@@ -38,21 +55,29 @@ export const loginSchema = z.object({
 });
 
 // ─── Refresh token ───────────────────────────────────────────────────────────
-// refreshToken is optional in the body because browser clients send no body —
-// they carry the refresh token exclusively in the HttpOnly cookie set at login.
-// The controller resolves the token via:
-//   req.body.refreshToken ?? req.cookies?.refreshToken
-// Android clients send the token explicitly in the body. Making it optional
-// here lets both client types reach the same endpoint without a validation
-// failure. The "at least one source must provide a token" check lives in the
-// controller, which can see req.cookies — Zod cannot.
 export const refreshSchema = z.object({
-	body: z
-		.object({
-			refreshToken: z.string().min(1, { error: "Refresh token must not be empty" }).optional(),
-		})
-		.optional()
-		.default({}),
+	body: optionalRefreshTokenBody,
+});
+
+// ─── Logout current session ───────────────────────────────────────────────────
+export const logoutCurrentSchema = z.object({
+	body: optionalRefreshTokenBody,
+});
+
+// ─── List sessions ────────────────────────────────────────────────────────────
+export const listSessionsSchema = z.object({
+	query: z.object({}).passthrough().optional().default({}),
+});
+
+// ─── Revoke session ───────────────────────────────────────────────────────────
+// sid is validated as a UUID v4 here so the validator and the controller's
+// pattern check are consistent. Sending a non-UUID sid now returns a 422
+// Validation error from Zod rather than a 400 from the controller's regex check,
+// giving a uniform error envelope via the global error handler for all bad sids.
+export const revokeSessionSchema = z.object({
+	params: z.object({
+		sid: z.uuid({ error: "sid must be a valid UUID" }),
+	}),
 });
 
 // ─── OTP verify ──────────────────────────────────────────────────────────────

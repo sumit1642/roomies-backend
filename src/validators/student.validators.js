@@ -1,6 +1,7 @@
 // src/validators/student.validators.js
 
 import { z } from "zod";
+import { requiredPreferencesSchema } from "./preferences.validators.js";
 
 // Params-only schema for the GET route — validates the userId param is a UUID
 // before the controller runs, so invalid IDs are rejected at the edge with a
@@ -24,5 +25,20 @@ export const updateStudentSchema = z.object({
 
 		// ISO date string — e.g. "2000-08-15"
 		dateOfBirth: z.string().date({ error: "Must be a valid date (YYYY-MM-DD)" }).optional(),
+	}),
+});
+
+export const getStudentPreferencesSchema = z.object({
+	params: z.object({
+		userId: z.uuid({ error: "Invalid user ID" }),
+	}),
+});
+
+export const updateStudentPreferencesSchema = z.object({
+	params: z.object({
+		userId: z.uuid({ error: "Invalid user ID" }),
+	}),
+	body: z.object({
+		preferences: requiredPreferencesSchema,
 	}),
 });

@@ -1,13 +1,25 @@
 // src/controllers/photo.controller.js
 
 import * as photoService from "../services/photo.service.js";
+import { rm } from "node:fs/promises";
+import { UPLOAD_FIELD_NAME } from "../config/constants.js";
+import { logger } from "../logger/index.js";
+const cleanupStagedFile = async (filePath) => {
+	if (!filePath) return;
+	try {
+		await rm(filePath, { force: true });
+	} catch (cleanupErr) {
+		// Log but don't throw — preserve the original API error response.
+		logger.warn({ msg: "Failed to cleanup staged file", filePath, err: cleanupErr });
+	}
+};
 
 export const uploadPhoto = async (req, res, next) => {
 	try {
 		if (!req.file) {
 			return res.status(400).json({
 				status: "error",
-				message: "No file uploaded — send the image under the field name 'photo'",
+				message: `No file uploaded — send the image under the field name '${UPLOAD_FIELD_NAME}'`,
 			});
 		}
 
@@ -22,6 +34,7 @@ export const uploadPhoto = async (req, res, next) => {
 		// yet available. The client should poll GET /photos to observe completion.
 		res.status(202).json({ status: "success", data: result });
 	} catch (err) {
+		await cleanupStagedFile(req.file?.path);
 		next(err);
 	}
 };

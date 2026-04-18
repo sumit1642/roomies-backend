@@ -2,12 +2,27 @@
 
 import { pool } from "../db/client.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { logger } from "../logger/index.js";
+import { dedupePreferencesByKey } from "../config/preferences.js";
 
-export const getStudentProfile = async (userId) => {
+const assertStudentProfileExists = async (clientOrPool, userId) => {
+	const { rows } = await clientOrPool.query(
+		`SELECT 1
+     FROM student_profiles
+     WHERE user_id = $1
+       AND deleted_at IS NULL`,
+		[userId],
+	);
+
+	if (!rows.length) {
+		throw new AppError("Student profile not found", 404);
+	}
+};
+
+export const getStudentProfile = async (requestingUserId, targetUserId) => {
 	const { rows } = await pool.query(
-		`
-		SELECT
-		sp.profile_id,
+		`SELECT
+			sp.profile_id,
 			sp.user_id,
 			sp.full_name,
 			sp.date_of_birth,
@@ -18,7 +33,7 @@ export const getStudentProfile = async (userId) => {
 			sp.year_of_study,
 			sp.institution_id,
 			sp.is_aadhaar_verified,
-			u.email,
+			CASE WHEN $2::uuid = sp.user_id THEN u.email ELSE NULL END AS email,
 			u.is_email_verified,
 			u.average_rating,
 			u.rating_count,
@@ -28,21 +43,69 @@ export const getStudentProfile = async (userId) => {
 		WHERE sp.user_id = $1
 		AND sp.deleted_at IS NULL
 		AND u.deleted_at IS NULL`,
-		[userId],
+		[targetUserId, requestingUserId],
 	);
 
 	if (!rows.length) throw new AppError("Student profile not found", 404);
 	return rows[0];
 };
 
+// Returns contact details for a student.
+//
+// Access control and tier determination are handled ENTIRELY upstream by
+// optionalAuthenticate and contactRevealGate before this service is ever
+// reached. The gate sets req.contactReveal.emailOnly based on whether the
+// caller is a verified user (false = full contact) or a guest/unverified
+// user (true = email only). This service TRUSTS that decision — it does not
+// re-derive or override it.
+//
+// Previous implementation re-evaluated ownership (requestingUserId === targetUserId)
+// and forced emailOnly=true for any cross-user access, which silently broke the
+// product requirement that verified users receive full contact for any profile
+// they look up. That logic has been removed.
+//
+// emailOnly: false  — verified callers; returns full bundle: email + whatsapp_phone
+// emailOnly: true   — guests and unverified callers; returns email only.
+//                     The whatsapp_phone field is stripped at this boundary so
+//                     it never exists on any object that leaves this function.
+export const getStudentContactReveal = async (targetUserId, emailOnly = false) => {
+	const { rows } = await pool.query(
+		`SELECT
+			u.user_id,
+			sp.full_name,
+			u.email,
+			u.phone AS whatsapp_phone
+		FROM users u
+		JOIN student_profiles sp
+		  ON sp.user_id    = u.user_id
+		 AND sp.deleted_at IS NULL
+		WHERE u.user_id    = $1
+		  AND u.deleted_at IS NULL`,
+		[targetUserId],
+	);
+
+	if (!rows.length) throw new AppError("Student not found", 404);
+
+	const row = rows[0];
+
+	if (emailOnly) {
+		// Strip whatsapp_phone at this boundary — it must never appear in the
+		// response object for guests or unverified callers, not even as null.
+		return {
+			user_id: row.user_id,
+			full_name: row.full_name,
+			email: row.email,
+		};
+	}
+
+	return row;
+};
+
 export const updateStudentProfile = async (requestingUserId, targetUserId, updates) => {
-	// Ownership check — a student can only update their own profile
 	if (requestingUserId !== targetUserId) {
 		throw new AppError("Forbidden", 403);
 	}
 
-	// Build the SET clause dynamically from only the fields that were provided.
-	// Using a map from camelCase request body to snake_case column names.
 	const columnMap = {
 		fullName: "full_name",
 		bio: "bio",
@@ -68,14 +131,10 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 		throw new AppError("No valid fields provided for update", 400);
 	}
 
-	values.push(targetUserId); // for the WHERE clause
+	values.push(targetUserId);
 
-	// Single UPDATE with RETURNING — atomic: if the profile was soft-deleted
-	// between the ownership check and here, rows will be empty and we surface a
-	// clean 404 rather than returning undefined to the caller.
 	const { rows } = await pool.query(
-		`
-		UPDATE student_profiles
+		`UPDATE student_profiles
 		SET ${setClauses.join(", ")}
 		WHERE user_id = $${paramIndex}
 		AND deleted_at IS NULL
@@ -88,4 +147,67 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 	}
 
 	return rows[0];
+};
+
+const bulkInsertUserPreferences = async (client, userId, preferences) => {
+	if (!preferences.length) return;
+
+	const placeholders = preferences.map((_, i) => `($1, $${i * 2 + 2}, $${i * 2 + 3})`).join(", ");
+	const values = [
+		userId,
+		...preferences.flatMap(({ preferenceKey, preferenceValue }) => [preferenceKey, preferenceValue]),
+	];
+
+	await client.query(
+		`INSERT INTO user_preferences (user_id, preference_key, preference_value)
+     VALUES ${placeholders}`,
+		values,
+	);
+};
+
+export const getStudentPreferences = async (requestingUserId, targetUserId) => {
+	if (requestingUserId !== targetUserId) {
+		throw new AppError("Forbidden", 403);
+	}
+
+	await assertStudentProfileExists(pool, targetUserId);
+
+	const { rows } = await pool.query(
+		`SELECT preference_key AS "preferenceKey", preference_value AS "preferenceValue"
+     FROM user_preferences
+     WHERE user_id = $1
+     ORDER BY preference_key`,
+		[targetUserId],
+	);
+
+	return rows;
+};
+
+export const updateStudentPreferences = async (requestingUserId, targetUserId, preferences) => {
+	if (requestingUserId !== targetUserId) {
+		throw new AppError("Forbidden", 403);
+	}
+
+	const dedupedPreferences = dedupePreferencesByKey(preferences);
+
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
+		await assertStudentProfileExists(client, targetUserId);
+		await client.query(`DELETE FROM user_preferences WHERE user_id = $1`, [targetUserId]);
+		await bulkInsertUserPreferences(client, targetUserId, dedupedPreferences);
+		await client.query("COMMIT");
+
+		logger.info(
+			{ userId: targetUserId, preferenceCount: dedupedPreferences.length },
+			"Student preferences updated",
+		);
+
+		return dedupedPreferences;
+	} catch (err) {
+		await client.query("ROLLBACK");
+		throw err;
+	} finally {
+		client.release();
+	}
 };

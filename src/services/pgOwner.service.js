@@ -3,7 +3,7 @@
 import { pool } from "../db/client.js";
 import { AppError } from "../middleware/errorHandler.js";
 
-export const getPgOwnerProfile = async (userId) => {
+export const getPgOwnerProfile = async (requestingUserId, targetUserId) => {
 	const { rows } = await pool.query(
 		`
 		SELECT
@@ -12,11 +12,11 @@ export const getPgOwnerProfile = async (userId) => {
 			pop.business_name,
 			pop.owner_full_name,
 			pop.business_description,
-			pop.business_phone,
+			CASE WHEN $2::uuid = pop.user_id THEN pop.business_phone ELSE NULL END AS business_phone,
 			pop.operating_since,
 			pop.verification_status,
 			pop.verified_at,
-			u.email,
+			CASE WHEN $2::uuid = pop.user_id THEN u.email ELSE NULL END AS email,
 			u.is_email_verified,
 			u.average_rating,
 			u.rating_count,
@@ -26,11 +26,59 @@ export const getPgOwnerProfile = async (userId) => {
 		WHERE pop.user_id = $1
 		AND pop.deleted_at IS NULL
 		AND u.deleted_at IS NULL`,
-		[userId],
+		[targetUserId, requestingUserId],
 	);
 
 	if (!rows.length) throw new AppError("PG owner profile not found", 404);
 	return rows[0];
+};
+
+// Returns contact details for a PG owner profile.
+//
+// Access control is handled entirely upstream by optionalAuthenticate and
+// contactRevealGate before this service is ever reached. This service trusts
+// that the gate already enforced the quota and caller eligibility — its only
+// job here is to fetch the data and shape the response correctly based on
+// which tier the caller belongs to.
+//
+// emailOnly: false — verified users. Returns the full bundle: email + whatsapp_phone
+//                    (business_phone serves as the WhatsApp number for PG owners).
+// emailOnly: true  — guests and unverified users. Returns email only. The
+//                    whatsapp_phone field is stripped at the service boundary so
+//                    it never exists on any object that leaves this function,
+//                    making it impossible to accidentally serialise or log it
+//                    further down the stack.
+export const getPgOwnerContactReveal = async (targetUserId, emailOnly = false) => {
+	const { rows } = await pool.query(
+		`
+		SELECT
+			u.user_id,
+			pop.owner_full_name,
+			pop.business_name,
+			u.email,
+			pop.business_phone AS whatsapp_phone
+		FROM users u
+		JOIN pg_owner_profiles pop ON pop.user_id = u.user_id
+		WHERE u.user_id = $1
+		AND u.deleted_at IS NULL
+		AND pop.deleted_at IS NULL`,
+		[targetUserId],
+	);
+
+	if (!rows.length) throw new AppError("PG owner profile not found", 404);
+
+	const row = rows[0];
+
+	if (emailOnly) {
+		return {
+			user_id: row.user_id,
+			owner_full_name: row.owner_full_name,
+			business_name: row.business_name,
+			email: row.email,
+		};
+	}
+
+	return row;
 };
 
 export const updatePgOwnerProfile = async (requestingUserId, targetUserId, updates) => {
@@ -64,8 +112,6 @@ export const updatePgOwnerProfile = async (requestingUserId, targetUserId, updat
 
 	values.push(targetUserId);
 
-	// Single UPDATE with RETURNING — atomic: soft-deletes between the ownership
-	// check and here surface as a clean 404 rather than returning undefined.
 	const { rows } = await pool.query(
 		`
 		UPDATE pg_owner_profiles

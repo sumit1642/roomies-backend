@@ -1,0 +1,546 @@
+// src/services/rating.service.js
+
+import { pool } from "../db/client.js";
+import { logger } from "../logger/index.js";
+import { AppError } from "../middleware/errorHandler.js";
+import { enqueueNotification } from "../workers/notificationQueue.js";
+
+// ─── Submit rating ─────────────────────────────────────────────────────────────
+// Ratings require a confirmed connection between reviewer and reviewee.
+// The INSERT uses WHERE EXISTS to atomically verify eligibility, preventing
+// a rating without a confirmed interaction at the database level.
+//
+// ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING matches the
+// partial unique index idx_ratings_one_per_connection exactly. The original code
+// incorrectly appended "WHERE deleted_at IS NULL" to the ON CONFLICT clause,
+// which PostgreSQL does not support — conflict predicates must match the index
+// definition verbatim, which has no deleted_at predicate.
+export const submitRating = async (reviewerId, data) => {
+	const {
+		connectionId,
+		revieweeType,
+		revieweeId,
+		overallScore,
+		cleanlinessScore,
+		communicationScore,
+		reliabilityScore,
+		valueScore,
+		comment,
+	} = data;
+
+	if (revieweeType !== "user" && revieweeType !== "property") {
+		throw new AppError("Invalid revieweeType: must be 'user' or 'property'", 400);
+	}
+
+	// Step 1: polymorphic reviewee existence check before the gated INSERT.
+	if (revieweeType === "user") {
+		const { rows } = await pool.query(`SELECT 1 FROM users WHERE user_id = $1 AND deleted_at IS NULL`, [
+			revieweeId,
+		]);
+		if (!rows.length) throw new AppError("Reviewee user not found", 404);
+	} else {
+		const { rows } = await pool.query(`SELECT 1 FROM properties WHERE property_id = $1 AND deleted_at IS NULL`, [
+			revieweeId,
+		]);
+		if (!rows.length) throw new AppError("Reviewee property not found", 404);
+	}
+
+	// Step 2: atomic gated INSERT.
+	// WHERE EXISTS verifies: connection exists and is confirmed, caller is a
+	// party, and caller and reviewee are different parties (no self-rating).
+	let result;
+	if (revieweeType === "user") {
+		result = await pool.query(
+			`INSERT INTO ratings
+         (reviewer_id, connection_id, reviewee_type, reviewee_id,
+          overall_score, cleanliness_score, communication_score,
+          reliability_score, value_score, review_text)
+       SELECT $1, $2, $3::reviewee_type_enum, $4, $5, $6, $7, $8, $9, $10
+       WHERE EXISTS (
+         SELECT 1 FROM connections
+         WHERE connection_id       = $2
+           AND confirmation_status = 'confirmed'
+           AND deleted_at          IS NULL
+           AND (
+             (initiator_id  = $1 AND counterpart_id = $4)
+             OR
+             (counterpart_id = $1 AND initiator_id  = $4)
+           )
+       )
+       ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING
+       RETURNING rating_id, created_at`,
+			[
+				reviewerId,
+				connectionId,
+				revieweeType,
+				revieweeId,
+				overallScore,
+				cleanlinessScore ?? null,
+				communicationScore ?? null,
+				reliabilityScore ?? null,
+				valueScore ?? null,
+				comment ?? null,
+			],
+		);
+	} else {
+		// Property path: the WITH gate CTE captures owner_id alongside eligibility
+		// so the notification can fire without a second query.
+		result = await pool.query(
+			`WITH gate AS (
+         SELECT p.owner_id
+         FROM connections c
+         JOIN listings l   ON l.listing_id   = c.listing_id   AND l.deleted_at IS NULL
+         JOIN properties p ON p.property_id  = l.property_id  AND p.deleted_at IS NULL
+         WHERE c.connection_id       = $2
+           AND c.confirmation_status = 'confirmed'
+           AND c.deleted_at          IS NULL
+           AND p.property_id         = $4
+           AND (
+             (c.initiator_id  = $1 AND c.counterpart_id = p.owner_id)
+             OR
+             (c.counterpart_id = $1 AND c.initiator_id  = p.owner_id)
+           )
+       )
+       INSERT INTO ratings
+         (reviewer_id, connection_id, reviewee_type, reviewee_id,
+          overall_score, cleanliness_score, communication_score,
+          reliability_score, value_score, review_text)
+       SELECT $1, $2, $3::reviewee_type_enum, $4, $5, $6, $7, $8, $9, $10
+       FROM gate
+       ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING
+       RETURNING rating_id, created_at,
+         (SELECT owner_id FROM gate) AS owner_id`,
+			[
+				reviewerId,
+				connectionId,
+				revieweeType,
+				revieweeId,
+				overallScore,
+				cleanlinessScore ?? null,
+				communicationScore ?? null,
+				reliabilityScore ?? null,
+				valueScore ?? null,
+				comment ?? null,
+			],
+		);
+	}
+
+	// Step 3: interpret rowCount === 0.
+	// Zero rows means either: (a) the connection does not exist or caller is not
+	// a party → 404; (b) connection exists but is unconfirmed → 422;
+	// (c) ON CONFLICT fired (duplicate) → 409.
+	if (result.rowCount === 0) {
+		const { rows: connRows } = await pool.query(
+			`SELECT connection_id, confirmation_status
+       FROM connections
+       WHERE connection_id = $1
+         AND (initiator_id = $2 OR counterpart_id = $2)
+         AND deleted_at IS NULL`,
+			[connectionId, reviewerId],
+		);
+
+		if (!connRows.length) {
+			throw new AppError("Connection not found", 404);
+		}
+
+		if (connRows[0].confirmation_status !== "confirmed") {
+			throw new AppError("Ratings can only be submitted for confirmed connections", 422);
+		}
+
+		const { rows: existingRating } = await pool.query(
+			`SELECT rating_id FROM ratings
+       WHERE reviewer_id   = $1
+         AND connection_id = $2
+         AND reviewee_id   = $3
+         AND deleted_at    IS NULL`,
+			[reviewerId, connectionId, revieweeId],
+		);
+
+		if (existingRating.length) {
+			throw new AppError("You have already submitted a rating for this connection and reviewee", 409);
+		}
+
+		throw new AppError("The reviewee is not a valid party to this connection, or you cannot rate yourself", 422);
+	}
+
+	const { rating_id: ratingId, created_at: createdAt } = result.rows[0];
+
+	logger.info({ reviewerId, connectionId, revieweeType, revieweeId, ratingId, overallScore }, "Rating submitted");
+
+	// Step 4: post-commit notification.
+	if (revieweeType === "user") {
+		enqueueNotification({
+			recipientId: revieweeId,
+			type: "rating_received",
+			entityType: "rating",
+			entityId: ratingId,
+		});
+	} else {
+		const ownerId = result.rows[0].owner_id;
+		if (ownerId) {
+			enqueueNotification({
+				recipientId: ownerId,
+				type: "rating_received",
+				entityType: "rating",
+				entityId: ratingId,
+			});
+		}
+	}
+
+	return { ratingId, createdAt };
+};
+
+// ─── Get ratings for a connection ─────────────────────────────────────────────
+// Returns { myRatings: Rating[], theirRatings: Rating[] } for both parties.
+// Only the two connection parties can call this; third parties get 404.
+export const getRatingsForConnection = async (callerId, connectionId) => {
+	const { rows: connRows } = await pool.query(
+		`SELECT initiator_id, counterpart_id
+     FROM connections
+     WHERE connection_id = $1
+       AND (initiator_id = $2 OR counterpart_id = $2)
+       AND deleted_at IS NULL`,
+		[connectionId, callerId],
+	);
+
+	if (!connRows.length) {
+		throw new AppError("Connection not found", 404);
+	}
+
+	const { initiator_id: initiatorId, counterpart_id: counterpartId } = connRows[0];
+	const otherPartyId = callerId === initiatorId ? counterpartId : initiatorId;
+
+	const { rows } = await pool.query(
+		`SELECT
+       r.rating_id,
+       r.reviewer_id,
+       r.reviewee_type,
+       r.reviewee_id,
+       r.overall_score,
+       r.cleanliness_score,
+       r.communication_score,
+       r.reliability_score,
+       r.value_score,
+       r.review_text,
+       r.is_visible,
+       r.created_at
+     FROM ratings r
+     WHERE r.connection_id = $1
+       AND r.reviewer_id   = ANY($2::uuid[])
+       AND r.deleted_at    IS NULL
+       AND r.is_visible    = TRUE`,
+		[connectionId, [callerId, otherPartyId]],
+	);
+
+	const formatRating = (row) => ({
+		ratingId: row.rating_id,
+		reviewerId: row.reviewer_id,
+		revieweeType: row.reviewee_type,
+		revieweeId: row.reviewee_id,
+		overallScore: row.overall_score,
+		cleanlinessScore: row.cleanliness_score,
+		communicationScore: row.communication_score,
+		reliabilityScore: row.reliability_score,
+		valueScore: row.value_score,
+		comment: row.review_text,
+		createdAt: row.created_at,
+	});
+
+	const myRatings = rows.filter((r) => r.reviewer_id === callerId).map(formatRating);
+	const theirRatings = rows.filter((r) => r.reviewer_id === otherPartyId).map(formatRating);
+
+	return { myRatings, theirRatings };
+};
+
+const buildCursorClause = (cursorTime, cursorId, paramIndex) => {
+	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
+	if (!hasCursor) {
+		return { clause: null, params: [], nextIndex: paramIndex };
+	}
+
+	return {
+		clause: `(r.created_at < $${paramIndex} OR (r.created_at = $${paramIndex} AND r.rating_id > $${paramIndex + 1}::uuid))`,
+		params: [cursorTime, cursorId],
+		nextIndex: paramIndex + 2,
+	};
+};
+
+const buildNextCursor = (fetchedRows, limit) => {
+	if (fetchedRows.length <= limit) {
+		return null;
+	}
+
+	const lastVisibleRow = fetchedRows[limit - 1];
+	return {
+		cursorTime: lastVisibleRow.created_at.toISOString(),
+		cursorId: lastVisibleRow.rating_id,
+	};
+};
+
+// ─── Get public ratings for a user ────────────────────────────────────────────
+// No auth required. Returns paginated visible ratings received by the user.
+export const getPublicRatings = async (userId, filters) => {
+	const { cursorTime, cursorId, limit = 20 } = filters;
+
+	const clauses = [
+		`r.reviewee_id   = $1`,
+		`r.reviewee_type = 'user'::reviewee_type_enum`,
+		`r.is_visible    = TRUE`,
+		`r.deleted_at    IS NULL`,
+	];
+	const params = [userId];
+	let paramIndex = 2;
+
+	const {
+		clause: cursorClause,
+		params: cursorParams,
+		nextIndex,
+	} = buildCursorClause(cursorTime, cursorId, paramIndex);
+	if (cursorClause) {
+		clauses.push(cursorClause);
+		params.push(...cursorParams);
+	}
+	paramIndex = nextIndex;
+
+	params.push(limit + 1);
+	const limitParam = paramIndex;
+
+	const { rows } = await pool.query(
+		`SELECT
+       r.rating_id,
+       r.overall_score,
+       r.cleanliness_score,
+       r.communication_score,
+       r.reliability_score,
+       r.value_score,
+       r.review_text        AS comment,
+       r.created_at,
+       COALESCE(sp.full_name, pop.owner_full_name, 'Anonymous Reviewer') AS reviewer_name,
+       sp.profile_photo_url AS reviewer_photo_url
+     FROM ratings r
+     JOIN users u
+       ON u.user_id    = r.reviewer_id
+      AND u.deleted_at IS NULL
+     LEFT JOIN student_profiles sp
+       ON sp.user_id    = r.reviewer_id
+      AND sp.deleted_at IS NULL
+     LEFT JOIN pg_owner_profiles pop
+       ON pop.user_id    = r.reviewer_id
+      AND pop.deleted_at IS NULL
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY r.created_at DESC, r.rating_id ASC
+     LIMIT $${limitParam}`,
+		params,
+	);
+
+	const items = rows.slice(0, limit);
+	const nextCursor = buildNextCursor(rows, limit);
+
+	return {
+		items: items.map((row) => ({
+			ratingId: row.rating_id,
+			overallScore: row.overall_score,
+			cleanlinessScore: row.cleanliness_score,
+			communicationScore: row.communication_score,
+			reliabilityScore: row.reliability_score,
+			valueScore: row.value_score,
+			comment: row.comment,
+			createdAt: row.created_at,
+			reviewer: {
+				fullName: row.reviewer_name,
+				profilePhotoUrl: row.reviewer_photo_url,
+			},
+		})),
+		nextCursor,
+	};
+};
+
+// ─── Get my given ratings ──────────────────────────────────────────────────────
+// The authenticated user's full history of ratings they submitted.
+// Includes is_visible so reviewers can see their own hidden ratings.
+export const getMyGivenRatings = async (reviewerId, filters) => {
+	const { cursorTime, cursorId, limit = 20 } = filters;
+
+	const clauses = [`r.reviewer_id = $1`, `r.deleted_at  IS NULL`];
+	const params = [reviewerId];
+	let paramIndex = 2;
+
+	const {
+		clause: cursorClause,
+		params: cursorParams,
+		nextIndex,
+	} = buildCursorClause(cursorTime, cursorId, paramIndex);
+	if (cursorClause) {
+		clauses.push(cursorClause);
+		params.push(...cursorParams);
+	}
+	paramIndex = nextIndex;
+
+	params.push(limit + 1);
+	const limitParam = paramIndex;
+
+	const { rows } = await pool.query(
+		`SELECT
+       r.rating_id,
+       r.connection_id,
+       r.reviewee_type,
+       r.reviewee_id,
+       r.overall_score,
+       r.cleanliness_score,
+       r.communication_score,
+       r.reliability_score,
+       r.value_score,
+       r.review_text AS comment,
+       r.is_visible,
+       r.created_at,
+
+       CASE
+         WHEN r.reviewee_type = 'user'
+         THEN COALESCE(sp_rev.full_name, pop_rev.owner_full_name, 'Anonymous User')
+         ELSE p_rev.property_name
+       END AS reviewee_name,
+
+       CASE
+         WHEN r.reviewee_type = 'user'
+         THEN sp_rev.profile_photo_url
+         ELSE NULL
+       END AS reviewee_photo_url
+
+     FROM ratings r
+
+     LEFT JOIN users u_rev
+       ON u_rev.user_id    = r.reviewee_id
+      AND r.reviewee_type  = 'user'
+      AND u_rev.deleted_at IS NULL
+
+     LEFT JOIN student_profiles sp_rev
+       ON sp_rev.user_id    = r.reviewee_id
+      AND r.reviewee_type   = 'user'
+      AND sp_rev.deleted_at IS NULL
+
+     LEFT JOIN pg_owner_profiles pop_rev
+       ON pop_rev.user_id   = r.reviewee_id
+      AND r.reviewee_type   = 'user'
+      AND pop_rev.deleted_at IS NULL
+
+     LEFT JOIN properties p_rev
+       ON p_rev.property_id = r.reviewee_id
+      AND r.reviewee_type   = 'property'
+      AND p_rev.deleted_at  IS NULL
+
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY r.created_at DESC, r.rating_id ASC
+     LIMIT $${limitParam}`,
+		params,
+	);
+
+	const items = rows.slice(0, limit);
+	const nextCursor = buildNextCursor(rows, limit);
+
+	return {
+		items: items.map((row) => ({
+			ratingId: row.rating_id,
+			connectionId: row.connection_id,
+			revieweeType: row.reviewee_type,
+			revieweeId: row.reviewee_id,
+			overallScore: row.overall_score,
+			cleanlinessScore: row.cleanliness_score,
+			communicationScore: row.communication_score,
+			reliabilityScore: row.reliability_score,
+			valueScore: row.value_score,
+			comment: row.comment,
+			isVisible: row.is_visible,
+			createdAt: row.created_at,
+			reviewee: {
+				fullName: row.reviewee_name,
+				profilePhotoUrl: row.reviewee_photo_url,
+				type: row.reviewee_type,
+			},
+		})),
+		nextCursor,
+	};
+};
+
+// ─── Get public ratings for a property ────────────────────────────────────────
+// No auth required. 404 if property does not exist.
+export const getPublicPropertyRatings = async (propertyId, filters) => {
+	const { rows: propRows } = await pool.query(
+		`SELECT 1 FROM properties WHERE property_id = $1 AND deleted_at IS NULL`,
+		[propertyId],
+	);
+	if (!propRows.length) throw new AppError("Property not found", 404);
+
+	const { cursorTime, cursorId, limit = 20 } = filters;
+
+	const clauses = [
+		`r.reviewee_id   = $1`,
+		`r.reviewee_type = 'property'::reviewee_type_enum`,
+		`r.is_visible    = TRUE`,
+		`r.deleted_at    IS NULL`,
+	];
+	const params = [propertyId];
+	let paramIndex = 2;
+
+	const {
+		clause: cursorClause,
+		params: cursorParams,
+		nextIndex,
+	} = buildCursorClause(cursorTime, cursorId, paramIndex);
+	if (cursorClause) {
+		clauses.push(cursorClause);
+		params.push(...cursorParams);
+	}
+	paramIndex = nextIndex;
+
+	params.push(limit + 1);
+	const limitParam = paramIndex;
+
+	const { rows } = await pool.query(
+		`SELECT
+       r.rating_id,
+       r.overall_score,
+       r.cleanliness_score,
+       r.communication_score,
+       r.reliability_score,
+       r.value_score,
+       r.review_text        AS comment,
+       r.created_at,
+       COALESCE(sp.full_name, pop.owner_full_name, 'Anonymous Reviewer') AS reviewer_name,
+       sp.profile_photo_url AS reviewer_photo_url
+     FROM ratings r
+     JOIN users u
+       ON u.user_id    = r.reviewer_id
+      AND u.deleted_at IS NULL
+     LEFT JOIN student_profiles sp
+       ON sp.user_id    = r.reviewer_id
+      AND sp.deleted_at IS NULL
+     LEFT JOIN pg_owner_profiles pop
+       ON pop.user_id    = r.reviewer_id
+      AND pop.deleted_at IS NULL
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY r.created_at DESC, r.rating_id ASC
+     LIMIT $${limitParam}`,
+		params,
+	);
+
+	const items = rows.slice(0, limit);
+	const nextCursor = buildNextCursor(rows, limit);
+
+	return {
+		items: items.map((row) => ({
+			ratingId: row.rating_id,
+			overallScore: row.overall_score,
+			cleanlinessScore: row.cleanliness_score,
+			communicationScore: row.communication_score,
+			reliabilityScore: row.reliability_score,
+			valueScore: row.value_score,
+			comment: row.comment,
+			createdAt: row.created_at,
+			reviewer: {
+				fullName: row.reviewer_name,
+				profilePhotoUrl: row.reviewer_photo_url,
+			},
+		})),
+		nextCursor,
+	};
+};

@@ -19,9 +19,12 @@ export const uploadPhotoSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
 	}),
-	body: z.object({
-		displayOrder: z.coerce.number().int().min(0).optional(),
-	}),
+	body: z
+		.object({
+			displayOrder: z.coerce.number().int().min(0).optional(),
+		})
+		.optional()
+		.default({}),
 });
 
 // Used by DELETE /listings/:listingId/photos/:photoId
@@ -38,10 +41,9 @@ export const deletePhotoSchema = z.object({
 // Used by PUT /listings/:listingId/photos/reorder
 // The client sends an array of { photoId, displayOrder } objects representing
 // the desired display sequence for all photos in this listing.
-// The constraint is that every photoId in the array must belong to this listing —
-// the service enforces this with a WHERE listing_id = $1 AND photo_id = ANY(...)
-// check, so a client that sends a photoId from a different listing is silently
-// ignored (rowCount mismatch).
+// The constraint is that every photoId in the array must belong to this listing,
+// and both photoId and displayOrder values must be unique within the payload.
+// The service also performs server-side defensive checks before writing.
 export const reorderPhotosSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
@@ -54,7 +56,35 @@ export const reorderPhotosSchema = z.object({
 					displayOrder: z.coerce.number().int().min(0),
 				}),
 			)
-			.min(1, { error: "photos array must contain at least one entry" }),
+			.min(1, { message: "photos array must contain at least one entry" })
+			.superRefine((photos, ctx) => {
+				const seenPhotoIds = new Map();
+				const seenDisplayOrders = new Map();
+
+				photos.forEach((photo, index) => {
+					const { photoId, displayOrder } = photo;
+
+					if (seenPhotoIds.has(photoId)) {
+						ctx.addIssue({
+							code: z.ZodIssueCode.custom,
+							message: "Duplicate photoId values are not allowed in reorder payload",
+							path: [index, "photoId"],
+						});
+					} else {
+						seenPhotoIds.set(photoId, index);
+					}
+
+					if (seenDisplayOrders.has(displayOrder)) {
+						ctx.addIssue({
+							code: z.ZodIssueCode.custom,
+							message: "Duplicate displayOrder values are not allowed in reorder payload",
+							path: [index, "displayOrder"],
+						});
+					} else {
+						seenDisplayOrders.set(displayOrder, index);
+					}
+				});
+			}),
 	}),
 });
 

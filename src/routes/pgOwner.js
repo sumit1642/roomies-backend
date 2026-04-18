@@ -2,6 +2,8 @@
 
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
+import { optionalAuthenticate } from "../middleware/optionalAuthenticate.js";
+import { contactRevealGate } from "../middleware/contactRevealGate.js";
 import { authorize } from "../middleware/authorize.js";
 import { validate } from "../middleware/validate.js";
 import { getPgOwnerParamsSchema, updatePgOwnerSchema } from "../validators/pgOwner.validators.js";
@@ -11,15 +13,35 @@ import * as verificationController from "../controllers/verification.controller.
 
 export const pgOwnerRouter = Router();
 
-// GET is intentionally readable by any authenticated user — students need to
-// view PG owner profiles to evaluate listings and credibility.
 pgOwnerRouter.get("/:userId/profile", authenticate, validate(getPgOwnerParamsSchema), pgOwnerController.getProfile);
 
-// PUT is restricted to pg_owner role — no other role has a legitimate reason to
-// update a PG owner's business profile. authorize('pg_owner') rejects a wrong-role
-// caller at the middleware layer before validation or any DB work happens.
-// The service adds a second independent check (requestingUserId === targetUserId)
-// so a pg_owner cannot update another pg_owner's profile either.
+// Contact reveal is POST rather than GET for two reasons:
+//   1. GET requests can be prefetched by browsers and cached by intermediaries,
+//      risking PII leakage via caches or browser history even before the user
+//      intends to reveal the contact.
+//   2. POST semantics correctly model the intent: the caller is performing an
+//      action (consuming a quota slot and disclosing PII) rather than merely
+//      reading a resource.
+//
+// Cache-Control: no-store is set inline here so the response is never stored by
+// the browser or any intermediate proxy, regardless of what the client or CDN
+// defaults to.
+//
+// validate runs before contactRevealGate so that malformed UUIDs in the path
+// are rejected before the gate increments the caller's reveal quota.
+pgOwnerRouter.post(
+	"/:userId/contact/reveal",
+	optionalAuthenticate,
+	validate(getPgOwnerParamsSchema),
+	contactRevealGate,
+	(req, res, next) => {
+		// Prevent any caching of the PII response by browsers, CDNs, or proxies.
+		res.setHeader("Cache-Control", "no-store");
+		next();
+	},
+	pgOwnerController.revealContact,
+);
+
 pgOwnerRouter.put(
 	"/:userId/profile",
 	authenticate,
@@ -28,23 +50,6 @@ pgOwnerRouter.put(
 	pgOwnerController.updateProfile,
 );
 
-// Document submission for PG owner verification.
-//
-// Two independent guards protect this route:
-//
-//   1. authorize('pg_owner') — checks req.user.roles to confirm the caller
-//      actually holds the pg_owner role. A student JWT reaches this middleware
-//      and is rejected before any DB work happens.
-//
-//   2. Service-layer ownership + profile existence check — verifies the
-//      authenticated user matches :userId AND that a pg_owner_profiles row
-//      actually exists for them. This catches data-integrity edge cases that
-//      the role check alone cannot see (e.g. role exists but profile row was
-//      deleted, or the JWT userId doesn't match the :userId param).
-//
-// These two guards address different failure modes and neither is redundant:
-// authorize() catches the wrong-role case at the middleware layer (zero DB cost);
-// the service check catches integrity anomalies after the role is confirmed.
 pgOwnerRouter.post(
 	"/:userId/documents",
 	authenticate,

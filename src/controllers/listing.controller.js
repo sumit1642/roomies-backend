@@ -20,9 +20,12 @@ export const getListing = async (req, res, next) => {
 	}
 };
 
+// userId is nullable: req.user is undefined for guests (optionalAuthenticate ran).
+// Passing null signals the service to skip compatibility scoring.
 export const searchListings = async (req, res, next) => {
 	try {
-		const result = await listingService.searchListings(req.user.userId, req.query);
+		const userId = req.user?.userId ?? null;
+		const result = await listingService.searchListings(userId, req.query);
 		res.json({ status: "success", data: result });
 	} catch (err) {
 		next(err);
@@ -41,6 +44,15 @@ export const updateListing = async (req, res, next) => {
 export const deleteListing = async (req, res, next) => {
 	try {
 		const result = await listingService.deleteListing(req.user.userId, req.params.listingId);
+		res.json({ status: "success", data: result });
+	} catch (err) {
+		next(err);
+	}
+};
+
+export const updateListingStatus = async (req, res, next) => {
+	try {
+		const result = await listingService.updateListingStatus(req.user.userId, req.params.listingId, req.body.status);
 		res.json({ status: "success", data: result });
 	} catch (err) {
 		next(err);

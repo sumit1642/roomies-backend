@@ -8,6 +8,9 @@ import {
 	registerSchema,
 	loginSchema,
 	refreshSchema,
+	logoutCurrentSchema,
+	listSessionsSchema,
+	revokeSessionSchema,
 	otpVerifySchema,
 	googleCallbackSchema,
 } from "../validators/auth.validators.js";
@@ -19,29 +22,40 @@ export const authRouter = Router();
 // so abusive traffic is dropped at the router edge with zero downstream cost.
 authRouter.post("/register", authLimiter, validate(registerSchema), authController.register);
 authRouter.post("/login", authLimiter, validate(loginSchema), authController.login);
-authRouter.post("/logout", authenticate, authController.logout);
+
+// /logout does NOT require authenticate because a client may call it with an
+// expired access token — the whole point of logout is to revoke the refresh
+// token from the HttpOnly cookie even when the access token is already expired.
+// The controller reads the refresh token from req.body or req.cookies and the
+// auth service validates it directly. A 401 from the access token must not
+// block the user from logging out.
+authRouter.post("/logout", validate(logoutCurrentSchema), authController.logout);
+
+// /logout/current DOES require authenticate: this variant is explicitly tied
+// to the currently authenticated session (the sid in the access token) so a
+// valid access token is required to identify which session to revoke.
+authRouter.post("/logout/current", authenticate, validate(logoutCurrentSchema), authController.logout);
+
+authRouter.post("/logout/all", authLimiter, authenticate, authController.logoutAll);
+authRouter.get("/sessions", authLimiter, authenticate, validate(listSessionsSchema), authController.listSessions);
+authRouter.delete(
+	"/sessions/:sid",
+	authLimiter,
+	authenticate,
+	validate(revokeSessionSchema),
+	authController.revokeSession,
+);
 
 // refreshSchema now accepts an optional body — browser clients send no body and
-// carry the token in the HttpOnly cookie. The controller resolves the token from
-// whichever source is present.
+// carry the token in the HttpOnly cookie.
 authRouter.post("/refresh", authLimiter, validate(refreshSchema), authController.refresh);
 
 // OTP send: stricter limit — each request triggers an outbound email.
 // OTP verify: authenticate ensures a valid token is present; no extra limiter
-// needed here because the service-layer attempt counter (5 wrong attempts → lock)
-// already provides the necessary throttle at the OTP level.
+// needed here because the service-layer attempt counter is the throttle.
 authRouter.post("/otp/send", otpLimiter, authenticate, authController.sendOtp);
 authRouter.post("/otp/verify", authenticate, validate(otpVerifySchema), authController.verifyOtp);
 authRouter.get("/me", authenticate, authController.me);
 
 // ─── Google OAuth callback ────────────────────────────────────────────────────
-//
-// The client obtains a Google ID token directly (via One Tap on web, or the
-// GoogleSignIn SDK on Android) and POSTs it here. The server verifies the token
-// with google-auth-library and handles all three cases: returning user, new
-// registration, and account linking.
-//
-// authLimiter applies for the same reason as login and register — this endpoint
-// hits the database and Google's JWKS endpoint on every request. No authenticate
-// middleware — this endpoint IS the authentication entry point.
 authRouter.post("/google/callback", authLimiter, validate(googleCallbackSchema), authController.googleCallback);

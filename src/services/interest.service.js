@@ -1,317 +1,513 @@
 // src/services/interest.service.js
-//
-//
-// ─── THE STATE MACHINE ────────────────────────────────────────────────────────
-//
-// States:  pending → accepted | declined | withdrawn
-//          accepted → declined | withdrawn
-//          declined → (terminal)
-//          withdrawn → (terminal)
-//          expired → (terminal, system-set only)
-//
-// Who can trigger which transitions:
-//   student (requester): pending → withdrawn, accepted → withdrawn
-//   poster  (responder): pending → accepted,  pending → declined, accepted → declined
-//
-// The ALLOWED_TRANSITIONS map below is the single source of truth for this logic.
-// Any code that needs to know "can actor X move from state Y to state Z?" should
-// consult this map — never inline the logic elsewhere.
-
-//
-// ─── NOTIFICATION HOOKS ──────────────────────────────────────────────────────
-//
-// Every state transition is an event the other party cares about. The hook
-// points are marked with TODO(phase3:notifications) comments. In Phase 3 the
-// notification service will fill these in. Nothing in the state machine logic
-// changes when notifications are added — they are side effects that run after
-// the transaction commits, never inside it.
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
+import { enqueueNotification } from "../workers/notificationQueue.js";
 
-const ALLOWED_TRANSITIONS = {
-	student: {
-		pending: ["withdrawn"],
-		accepted: ["withdrawn"],
-	},
-	poster: {
-		pending: ["accepted", "declined"],
-		accepted: ["declined"],
-	},
+const _buildWhatsAppLink = (phone, message) => {
+	const encoded = encodeURIComponent(message);
+	return `https://wa.me/${phone}?text=${encoded}`;
 };
 
-const fetchInterestWithContext = async (interestId, client = pool) => {
-	const { rows } = await client.query(
-		// Fix: schema column is sender_id, not student_id
-		`SELECT
-       ir.interest_id,
-       ir.sender_id,
-       ir.listing_id,
-       ir.status,
-       ir.message,
-       ir.created_at,
-       ir.updated_at,
-       l.posted_by AS poster_id,
-       l.title     AS listing_title
-     FROM interest_requests ir
-     JOIN listings l ON l.listing_id = ir.listing_id
-     WHERE ir.interest_id = $1
-       AND ir.deleted_at  IS NULL`,
-		[interestId],
-	);
-	return rows[0] ?? null;
+const LISTING_TYPE_TO_CONNECTION_TYPE = {
+	student_room: "student_roommate",
+	pg_room: "pg_stay",
+	hostel_bed: "hostel_stay",
 };
 
-const resolveActorRole = (callerId, row) => {
-	// Fix: row field is sender_id, not student_id
-	if (callerId === row.sender_id) return "student";
-	if (callerId === row.poster_id) return "poster";
-	return null;
-};
+// ─── Create interest request ─────────────────────────────────────────────────
+// A student expresses interest in a listing. Only one active (pending or
+// accepted) interest request per student per listing is allowed; the partial
+// unique index idx_interest_requests_no_duplicates enforces this at DB level.
+export const createInterestRequest = async (studentId, listingId, data) => {
+	const { message } = data;
 
-const toStudentInterestShape = (row) => ({
-	interestId: row.interest_id,
-	status: row.status,
-	message: row.message,
-	createdAt: row.created_at,
-	updatedAt: row.updated_at,
-	listing: {
-		listingId: row.listing_id,
-		title: row.listing_title,
-		city: row.listing_city,
-		locality: row.listing_locality,
-		rentPerMonth: row.rent_per_month / 100, // paise → rupees
-		roomType: row.room_type,
-		listingType: row.listing_type,
-		coverPhotoUrl: row.cover_photo_url,
-		posterName: row.poster_name,
-		posterRating: row.poster_rating,
-		propertyName: row.property_name,
-	},
-});
-
-// Shapes a raw interest DB row into the API response format for the poster's
-// listing-management view, including the student's public profile.
-const toPosterInterestShape = (row) => ({
-	interestId: row.interest_id,
-	status: row.status,
-	message: row.message,
-	createdAt: row.created_at,
-	updatedAt: row.updated_at,
-	student: {
-		// Fix: result column is sender_id, not student_id
-		userId: row.sender_id,
-		fullName: row.student_name,
-		institution: row.student_institution,
-		profilePhotoUrl: row.student_photo_url,
-		averageRating: row.student_rating,
-		ratingCount: row.student_rating_count,
-	},
-});
-
-// ─── Create interest request ──────────────────────────────────────────────────
-
-export const createInterestRequest = async (studentId, listingId, message) => {
-	// Guard 1: listing must be active and not deleted.
-	// We also check that expires_at has not passed — an expired listing should
-	// not receive new interest even if a cron hasn't flipped its status yet.
 	const { rows: listingRows } = await pool.query(
-		`SELECT posted_by, title
-     FROM listings
-     WHERE listing_id = $1
-       AND status     = 'active'
-       AND deleted_at IS NULL
-       AND expires_at > NOW()`,
+		`SELECT
+       l.listing_id,
+       l.posted_by,
+       l.status,
+       l.title,
+       l.expires_at,
+       (l.expires_at <= NOW()) AS is_expired,
+       u.phone
+     FROM listings l
+     JOIN users u ON u.user_id = l.posted_by AND u.deleted_at IS NULL
+     WHERE l.listing_id = $1 AND l.deleted_at IS NULL`,
 		[listingId],
 	);
 
 	if (!listingRows.length) {
-		throw new AppError("Listing not found or no longer active", 404);
+		throw new AppError("Listing not found", 404);
 	}
 
-	// Guard 2: a student cannot express interest in their own listing.
-	// This covers the case where a student posts their own room — they should
-	// not be able to send themselves an interest request.
-	if (listingRows[0].posted_by === studentId) {
+	const listing = listingRows[0];
+
+	if (listing.is_expired) {
+		throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
+	}
+
+	if (listing.status !== "active") {
+		throw new AppError(UNAVAILABLE_LISTING_MESSAGE, 422);
+	}
+
+	if (listing.posted_by === studentId) {
 		throw new AppError("You cannot express interest in your own listing", 422);
 	}
 
-	// Guard 3: check for an existing active request and give a clean error
-	// message. This SELECT is not strictly necessary for correctness (the
-	// partial unique index on the INSERT catches races atomically), but it
-	// produces a far better error message than a raw 23505 database error.
-	const { rows: existingRows } = await pool.query(
-		// Fix: schema column is sender_id, not student_id
-		`SELECT interest_id, status
-     FROM interest_requests
-     WHERE sender_id  = $1
-       AND listing_id = $2
-       AND status IN ('pending', 'accepted')
-       AND deleted_at IS NULL`,
-		[studentId, listingId],
-	);
-
-	if (existingRows.length) {
-		throw new AppError(
-			`You already have an active interest request for this listing (status: ${existingRows[0].status})`,
-			409,
-		);
-	}
-
-	// Insert the new request. status defaults to 'pending' in the DB schema,
-	// but we set it explicitly here for clarity and to avoid silent schema
-	// default drift.
+	// ON CONFLICT predicate must exactly match the partial unique index:
+	//   idx_interest_requests_no_duplicates ON (sender_id, listing_id)
+	//   WHERE status IN ('pending','accepted') AND deleted_at IS NULL
+	// The original clause incorrectly included "AND deleted_at IS NULL" inside
+	// the ON CONFLICT WHERE, which caused PostgreSQL to skip conflict detection
+	// for soft-deleted rows and allowed duplicate active requests to be inserted.
+	// The fix removes that extra predicate so the clause matches the index exactly.
 	const { rows } = await pool.query(
-		// Fix: schema column is sender_id, not student_id
 		`INSERT INTO interest_requests
-       (sender_id, listing_id, status, message)
-     VALUES ($1, $2, 'pending', $3)
-     RETURNING interest_id, sender_id, listing_id, status, message, created_at`,
+       (sender_id, listing_id, message, status)
+     VALUES ($1, $2, $3, 'pending')
+     ON CONFLICT (sender_id, listing_id)
+       WHERE status IN ('pending', 'accepted')
+     DO NOTHING
+     RETURNING request_id, sender_id, listing_id, message, status, created_at`,
 		[studentId, listingId, message ?? null],
 	);
 
+	if (!rows.length) {
+		throw new AppError("You already have a pending or accepted interest request for this listing", 409);
+	}
+
 	const request = rows[0];
 
-	logger.info({ studentId, listingId, interestId: request.interest_id }, "Interest request created");
+	logger.info({ studentId, listingId, requestId: request.request_id }, "Interest request created");
 
-	// TODO(phase3:notifications): notify the listing poster that a new interest
-	// request has arrived. Fire after INSERT, never inside a transaction.
-	// notificationService.send(listingRows[0].posted_by, 'new_interest', { interestId })
+	enqueueNotification({
+		recipientId: listing.posted_by,
+		type: "interest_request_received",
+		entityType: "interest_request",
+		entityId: request.request_id,
+	});
 
 	return {
-		interestId: request.interest_id,
+		interestRequestId: request.request_id,
+		studentId: request.sender_id,
 		listingId: request.listing_id,
-		status: request.status,
 		message: request.message,
+		status: request.status,
 		createdAt: request.created_at,
 	};
 };
 
-// ─── Update interest status (state machine transition) ────────────────────────
-
-export const updateInterestStatus = async (callerId, interestId, newStatus) => {
-	const row = await fetchInterestWithContext(interestId);
-	if (!row) throw new AppError("Interest request not found", 404);
-
-	const actorRole = resolveActorRole(callerId, row);
-	if (!actorRole) {
-		throw new AppError("Interest request not found", 404);
+// ─── Transition interest request status ──────────────────────────────────────
+// Routes accepted → _acceptInterestRequest (atomic multi-step).
+// Routes declined/withdrawn → simple UPDATE with actor ownership check.
+export const transitionInterestRequest = async (callerId, requestId, targetStatus) => {
+	const ALLOWED_STATUSES = new Set(["accepted", "declined", "withdrawn"]);
+	if (!ALLOWED_STATUSES.has(targetStatus)) {
+		throw new AppError(`Invalid target status: ${targetStatus}`, 400);
 	}
 
-	// Validate the transition against the state machine.
-	const allowedFromCurrent = ALLOWED_TRANSITIONS[actorRole]?.[row.status] ?? [];
-	if (!allowedFromCurrent.includes(newStatus)) {
-		throw new AppError(`Cannot transition from '${row.status}' to '${newStatus}' as ${actorRole}`, 422);
+	if (targetStatus === "accepted") {
+		return _acceptInterestRequest(callerId, requestId);
 	}
 
-	const { rowCount, rows: updatedRows } = await pool.query(
-		// Fix: RETURNING sender_id, not student_id
-		`UPDATE interest_requests
-     SET status     = $1,
+	const ownershipClause = targetStatus === "declined" ? `AND l.posted_by = $2` : `AND ir.sender_id = $2`;
+
+	const { rowCount, rows } = await pool.query(
+		`UPDATE interest_requests ir
+     SET status     = $3::request_status_enum,
          updated_at = NOW()
-     WHERE interest_id = $2
-       AND status      = $3
-       AND deleted_at  IS NULL
-     RETURNING interest_id, sender_id, listing_id, status, updated_at`,
-		[newStatus, interestId, row.status],
+     FROM listings l
+     WHERE ir.request_id  = $1
+       AND ir.listing_id  = l.listing_id
+       AND ir.status      = 'pending'
+       AND ir.deleted_at  IS NULL
+       ${ownershipClause}
+     RETURNING
+       ir.request_id,
+       ir.sender_id,
+       ir.listing_id,
+       ir.status,
+       ir.updated_at,
+       l.posted_by`,
+		[requestId, callerId, targetStatus],
 	);
 
 	if (rowCount === 0) {
-		throw new AppError("Interest request not found or status has already changed — please refresh", 409);
+		const { rows: checkRows } = await pool.query(
+			`SELECT request_id, status, sender_id, listing_id FROM interest_requests
+       WHERE request_id = $1 AND deleted_at IS NULL`,
+			[requestId],
+		);
+
+		if (!checkRows.length) {
+			throw new AppError("Interest request not found", 404);
+		}
+
+		const existing = checkRows[0];
+
+		if (existing.status !== "pending") {
+			throw new AppError(
+				`Interest request cannot be ${targetStatus} — current status is '${existing.status}'`,
+				409,
+			);
+		}
+
+		throw new AppError("You are not authorised to perform this action", 403);
 	}
 
-	const updated = updatedRows[0];
+	const ir = rows[0];
 
-	logger.info(
-		{
-			callerId,
-			actorRole,
-			interestId,
-			from: row.status,
-			to: newStatus,
-		},
-		"Interest request status updated",
-	);
+	logger.info({ callerId, requestId, targetStatus }, `Interest request ${targetStatus}`);
 
-	// TODO(phase3:notifications): notify the other party about the status change.
-	// The other party is: if actorRole === 'student', notify the poster.
-	//                      if actorRole === 'poster',  notify the student.
-	// const notifyUserId = actorRole === 'student' ? row.poster_id : row.sender_id
-	// notificationService.send(notifyUserId, 'interest_status_changed', { interestId, newStatus })
+	if (targetStatus === "declined") {
+		enqueueNotification({
+			recipientId: ir.sender_id,
+			type: "interest_request_declined",
+			entityType: "interest_request",
+			entityId: requestId,
+		});
+	} else if (targetStatus === "withdrawn") {
+		enqueueNotification({
+			recipientId: ir.posted_by,
+			type: "interest_request_withdrawn",
+			entityType: "interest_request",
+			entityId: requestId,
+		});
+	}
 
 	return {
-		interestId: updated.interest_id,
-		listingId: updated.listing_id,
-		status: updated.status,
-		updatedAt: updated.updated_at,
+		interestRequestId: ir.request_id,
+		studentId: ir.sender_id,
+		listingId: ir.listing_id,
+		status: ir.status,
+		updatedAt: ir.updated_at,
 	};
 };
 
-// ─── Get interest requests for a listing (poster view) ────────────────────────
+// ─── Accept interest request (internal) ──────────────────────────────────────
+// Atomically: accepts the request, creates the connection row, increments
+// current_occupants, and (if capacity exhausted) marks the listing 'filled'
+// and expires all remaining pending requests. All within one BEGIN/COMMIT.
+// Post-commit notifications are fire-and-forget via enqueueNotification.
+const _acceptInterestRequest = async (posterId, requestId) => {
+	const client = await pool.connect();
 
-export const getListingInterests = async (posterId, listingId, filters) => {
-	// Fix: default limit to 20 — undefined limit makes limit + 1 = NaN in PostgreSQL
-	const { status, cursorTime, cursorId, limit = 20 } = filters;
+	try {
+		await client.query("BEGIN");
 
-	// Verify the listing exists and belongs to the caller. Ownership-in-WHERE:
-	// a poster who supplies a valid listingId belonging to someone else gets 404.
-	const { rows: ownerCheck } = await pool.query(
-		`SELECT 1 FROM listings
-     WHERE listing_id = $1
-       AND posted_by  = $2
-       AND deleted_at IS NULL`,
+		// Lock both the interest request and its parent listing simultaneously.
+		// FOR UPDATE on the JOIN prevents concurrent accepts or listing status
+		// changes for the duration of this transaction.
+		const { rows: irRows } = await client.query(
+			`SELECT
+         ir.request_id,
+         ir.sender_id,
+         ir.listing_id,
+         ir.status,
+         l.posted_by,
+         l.status             AS listing_status,
+         l.expires_at,
+         (l.expires_at <= NOW()) AS listing_is_expired,
+         l.title              AS listing_title,
+         l.listing_type,
+         l.total_capacity,
+         l.current_occupants,
+         CASE
+           WHEN l.listing_type = 'student_room' THEN u_poster.phone
+           ELSE pop.business_phone
+         END AS poster_phone,
+         COALESCE(pop.business_name, sp_poster.full_name, u_poster.email) AS poster_name
+       FROM interest_requests ir
+       JOIN listings l
+         ON l.listing_id    = ir.listing_id
+        AND l.deleted_at    IS NULL
+       JOIN users u_poster
+         ON u_poster.user_id = l.posted_by
+        AND u_poster.deleted_at IS NULL
+       LEFT JOIN student_profiles sp_poster
+         ON sp_poster.user_id = l.posted_by
+        AND sp_poster.deleted_at IS NULL
+       LEFT JOIN pg_owner_profiles pop
+         ON pop.user_id = l.posted_by
+        AND pop.deleted_at IS NULL
+       WHERE ir.request_id = $1
+         AND ir.deleted_at IS NULL
+       FOR UPDATE OF ir, l`,
+			[requestId],
+		);
+
+		if (!irRows.length) {
+			await client.query("ROLLBACK");
+			throw new AppError("Interest request not found", 404);
+		}
+
+		const ir = irRows[0];
+
+		if (ir.posted_by !== posterId) {
+			await client.query("ROLLBACK");
+			throw new AppError("You are not authorised to perform this action", 403);
+		}
+
+		if (ir.status !== "pending") {
+			await client.query("ROLLBACK");
+			throw new AppError(`Cannot accept a request with status '${ir.status}'`, 422);
+		}
+
+		if (ir.listing_is_expired) {
+			await client.query("ROLLBACK");
+			throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
+		}
+
+		if (ir.listing_status !== "active") {
+			await client.query("ROLLBACK");
+			throw new AppError(UNAVAILABLE_LISTING_MESSAGE, 422);
+		}
+
+		await client.query(
+			`UPDATE interest_requests
+       SET status = 'accepted'::request_status_enum, updated_at = NOW()
+       WHERE request_id = $1`,
+			[requestId],
+		);
+
+		const connectionType = LISTING_TYPE_TO_CONNECTION_TYPE[ir.listing_type];
+		if (!connectionType) {
+			await client.query("ROLLBACK");
+			throw new AppError(`Cannot derive connection type from listing_type '${ir.listing_type}'`, 422);
+		}
+
+		const { rows: connRows } = await client.query(
+			`INSERT INTO connections
+         (initiator_id, counterpart_id, listing_id, connection_type, interest_request_id)
+       VALUES ($1, $2, $3, $4::connection_type_enum, $5)
+       RETURNING connection_id`,
+			[ir.sender_id, posterId, ir.listing_id, connectionType, requestId],
+		);
+
+		const connectionId = connRows[0].connection_id;
+
+		const newOccupantCount = (ir.current_occupants ?? 0) + 1;
+		const capacityExhausted = newOccupantCount >= ir.total_capacity;
+
+		if (capacityExhausted) {
+			const { rowCount: fillRowCount } = await client.query(
+				`UPDATE listings
+         SET current_occupants = $1,
+             status             = 'filled'::listing_status_enum,
+             filled_at          = NOW()
+         WHERE listing_id = $2
+           AND status     = 'active'
+           AND deleted_at IS NULL`,
+				[newOccupantCount, ir.listing_id],
+			);
+
+			if (fillRowCount === 0) {
+				await client.query("ROLLBACK");
+				throw new AppError("Listing status has already changed — please refresh", 409);
+			}
+
+			await expirePendingRequestsForListing(ir.listing_id, client, null);
+		} else {
+			const { rowCount: occupancyRowCount } = await client.query(
+				`UPDATE listings
+         SET current_occupants = $1
+         WHERE listing_id = $2
+           AND status     = 'active'
+           AND deleted_at IS NULL`,
+				[newOccupantCount, ir.listing_id],
+			);
+
+			if (occupancyRowCount === 0) {
+				await client.query("ROLLBACK");
+				throw new AppError("Listing status has already changed — please refresh", 409);
+			}
+		}
+
+		await client.query("COMMIT");
+
+		logger.info(
+			{
+				posterId,
+				requestId,
+				connectionId,
+				studentId: ir.sender_id,
+				newOccupantCount,
+				totalCapacity: ir.total_capacity,
+				capacityExhausted,
+			},
+			"Interest request accepted — connection created, occupancy updated",
+		);
+
+		enqueueNotification({
+			recipientId: ir.sender_id,
+			type: "interest_request_accepted",
+			entityType: "interest_request",
+			entityId: requestId,
+		});
+
+		if (capacityExhausted) {
+			enqueueNotification({
+				recipientId: posterId,
+				type: "listing_filled",
+				entityType: "listing",
+				entityId: ir.listing_id,
+			});
+		}
+
+		const whatsappLink =
+			ir.poster_phone ?
+				_buildWhatsAppLink(
+					ir.poster_phone,
+					`Hi ${ir.poster_name}, my interest request for ${ir.listing_title} was accepted!`,
+				)
+			:	null;
+
+		return {
+			interestRequestId: requestId,
+			studentId: ir.sender_id,
+			listingId: ir.listing_id,
+			status: "accepted",
+			connectionId,
+			whatsappLink,
+			listingFilled: capacityExhausted,
+		};
+	} catch (err) {
+		try {
+			await client.query("ROLLBACK");
+		} catch (rollbackErr) {
+			logger.error({ rollbackErr }, "Failed to rollback accept transaction");
+		}
+		throw err;
+	} finally {
+		client.release();
+	}
+};
+
+// ─── Get single interest request ─────────────────────────────────────────────
+// Both the sender and the listing poster can fetch detail. Third parties get 404.
+export const getInterestRequest = async (callerId, requestId) => {
+	const { rows } = await pool.query(
+		`SELECT
+       ir.request_id,
+       ir.sender_id,
+       ir.listing_id,
+       ir.message,
+       ir.status,
+       ir.created_at,
+       ir.updated_at,
+       l.posted_by,
+       l.title        AS listing_title,
+       l.city         AS listing_city,
+       l.listing_type AS listing_type,
+       COALESCE(sp.full_name, u_sender.email) AS sender_name,
+       sp.profile_photo_url                   AS sender_photo_url
+     FROM interest_requests ir
+     JOIN listings l
+       ON l.listing_id  = ir.listing_id
+      AND l.deleted_at  IS NULL
+     JOIN users u_sender
+       ON u_sender.user_id   = ir.sender_id
+      AND u_sender.deleted_at IS NULL
+     LEFT JOIN student_profiles sp
+       ON sp.user_id    = ir.sender_id
+      AND sp.deleted_at IS NULL
+     WHERE ir.request_id = $1
+       AND (ir.sender_id = $2 OR l.posted_by = $2)
+       AND ir.deleted_at IS NULL`,
+		[requestId, callerId],
+	);
+
+	if (!rows.length) {
+		throw new AppError("Interest request not found", 404);
+	}
+
+	const row = rows[0];
+
+	return {
+		interestRequestId: row.request_id,
+		studentId: row.sender_id,
+		listingId: row.listing_id,
+		message: row.message,
+		status: row.status,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+		listing: {
+			listingId: row.listing_id,
+			title: row.listing_title,
+			city: row.listing_city,
+			listingType: row.listing_type,
+		},
+		student: {
+			userId: row.sender_id,
+			fullName: row.sender_name,
+			profilePhotoUrl: row.sender_photo_url,
+		},
+	};
+};
+
+// ─── Get interest requests for a listing (poster's view) ─────────────────────
+// Only the listing poster can call this. Returns keyset-paginated requests.
+export const getInterestRequestsForListing = async (posterId, listingId, filters) => {
+	const { rows: listingRows } = await pool.query(
+		`SELECT listing_id FROM listings
+     WHERE listing_id = $1 AND posted_by = $2 AND deleted_at IS NULL`,
 		[listingId, posterId],
 	);
-	if (!ownerCheck.length) throw new AppError("Listing not found", 404);
+
+	if (!listingRows.length) {
+		const { rows: existRows } = await pool.query(
+			`SELECT listing_id FROM listings WHERE listing_id = $1 AND deleted_at IS NULL`,
+			[listingId],
+		);
+		if (!existRows.length) throw new AppError("Listing not found", 404);
+		throw new AppError("You do not own this listing", 403);
+	}
+
+	const { status, cursorTime, cursorId, limit: rawLimit = 20 } = filters;
+	const limit = Math.min(Math.max(1, rawLimit), 100);
 
 	const clauses = [`ir.listing_id = $1`, `ir.deleted_at IS NULL`];
 	const params = [listingId];
 	let p = 2;
 
 	if (status !== undefined) {
-		clauses.push(`ir.status = $${p}`);
+		clauses.push(`ir.status = $${p}::request_status_enum`);
 		params.push(status);
 		p++;
 	}
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (hasCursor) {
-		clauses.push(`(ir.created_at < $${p} OR (ir.created_at = $${p} AND ir.interest_id > $${p + 1}::uuid))`);
+		clauses.push(`(ir.created_at < $${p} OR (ir.created_at = $${p} AND ir.request_id > $${p + 1}::uuid))`);
 		params.push(cursorTime, cursorId);
 		p += 2;
 	}
 
 	params.push(limit + 1);
 
-	// The poster sees each requester's public profile: name, institution, photo,
-	// and rating. This is the information they need to evaluate whether to accept
-	// or decline — essentially a lightweight student profile card per request.
 	const { rows } = await pool.query(
 		`SELECT
-       ir.interest_id,
+       ir.request_id,
        ir.sender_id,
        ir.status,
        ir.message,
        ir.created_at,
        ir.updated_at,
-       -- Student public profile
-       COALESCE(sp.full_name, u.email)      AS student_name,
-       -- Fix: sp.institution_name doesn't exist; JOIN institutions on institution_id
-       i.name                               AS student_institution,
-       sp.profile_photo_url                 AS student_photo_url,
-       u.average_rating                     AS student_rating,
-       u.rating_count                       AS student_rating_count
+       COALESCE(sp.full_name, u.email) AS sender_name,
+       sp.profile_photo_url            AS sender_photo_url,
+       u.average_rating                AS sender_rating
      FROM interest_requests ir
-     JOIN users u          ON u.user_id  = ir.sender_id
+     JOIN users u
+       ON u.user_id    = ir.sender_id
+      AND u.deleted_at IS NULL
      LEFT JOIN student_profiles sp
        ON sp.user_id    = ir.sender_id
       AND sp.deleted_at IS NULL
-     LEFT JOIN institutions i
-       ON i.institution_id = sp.institution_id
-      AND i.deleted_at     IS NULL
      WHERE ${clauses.join(" AND ")}
-     ORDER BY ir.created_at DESC, ir.interest_id ASC
+     ORDER BY ir.created_at DESC, ir.request_id ASC
      LIMIT $${p}`,
 		params,
 	);
@@ -323,32 +519,47 @@ export const getListingInterests = async (posterId, listingId, filters) => {
 		hasNextPage ?
 			{
 				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].interest_id,
+				cursorId: items[items.length - 1].request_id,
 			}
 		:	null;
 
-	return { items: items.map(toPosterInterestShape), nextCursor };
+	return {
+		items: items.map((row) => ({
+			interestRequestId: row.request_id,
+			studentId: row.sender_id,
+			status: row.status,
+			message: row.message,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at,
+			student: {
+				userId: row.sender_id,
+				fullName: row.sender_name,
+				profilePhotoUrl: row.sender_photo_url,
+				averageRating: row.sender_rating,
+			},
+		})),
+		nextCursor,
+	};
 };
 
-// ─── Get my interest requests (student dashboard) ─────────────────────────────
-
+// ─── Get my interest requests (student's view) ───────────────────────────────
+// Returns all requests the authenticated student has sent, keyset-paginated.
 export const getMyInterestRequests = async (studentId, filters) => {
-	const { status, cursorTime, cursorId, limit } = filters;
+	const { status, cursorTime, cursorId, limit = 20 } = filters;
 
-	// Fix: filter on sender_id, not student_id
 	const clauses = [`ir.sender_id = $1`, `ir.deleted_at IS NULL`];
 	const params = [studentId];
 	let p = 2;
 
 	if (status !== undefined) {
-		clauses.push(`ir.status = $${p}`);
+		clauses.push(`ir.status = $${p}::request_status_enum`);
 		params.push(status);
 		p++;
 	}
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (hasCursor) {
-		clauses.push(`(ir.created_at < $${p} OR (ir.created_at = $${p} AND ir.interest_id > $${p + 1}::uuid))`);
+		clauses.push(`(ir.created_at < $${p} OR (ir.created_at = $${p} AND ir.request_id > $${p + 1}::uuid))`);
 		params.push(cursorTime, cursorId);
 		p += 2;
 	}
@@ -357,41 +568,22 @@ export const getMyInterestRequests = async (studentId, filters) => {
 
 	const { rows } = await pool.query(
 		`SELECT
-       ir.interest_id,
+       ir.request_id,
        ir.listing_id,
        ir.status,
        ir.message,
        ir.created_at,
        ir.updated_at,
-       -- Listing summary
        l.title          AS listing_title,
        l.city           AS listing_city,
-       l.locality       AS listing_locality,
-       l.rent_per_month,
-       l.room_type,
-       l.listing_type,
-       -- Cover photo (scalar subquery — no JOIN + GROUP BY needed)
-       (
-         SELECT ph.photo_url
-         FROM listing_photos ph
-         WHERE ph.listing_id = l.listing_id
-           AND ph.is_cover   = TRUE
-           AND ph.deleted_at IS NULL
-         LIMIT 1
-       ) AS cover_photo_url,
-       -- Poster public name and rating
-       COALESCE(sp2.full_name, pop.owner_full_name, u2.email) AS poster_name,
-       COALESCE(p.average_rating, u2.average_rating)          AS poster_rating,
-       -- Parent property name (non-null only for PG listings)
-       p.property_name
+       l.listing_type   AS listing_type,
+       l.rent_per_month AS listing_rent_per_month
      FROM interest_requests ir
-     JOIN listings l    ON l.listing_id  = ir.listing_id
-     JOIN users u2      ON u2.user_id    = l.posted_by
-     LEFT JOIN student_profiles  sp2 ON sp2.user_id  = l.posted_by AND sp2.deleted_at IS NULL
-     LEFT JOIN pg_owner_profiles pop ON pop.user_id  = l.posted_by AND pop.deleted_at IS NULL
-     LEFT JOIN properties p          ON p.property_id = l.property_id AND p.deleted_at IS NULL
+     JOIN listings l
+       ON l.listing_id = ir.listing_id
+      AND l.deleted_at IS NULL
      WHERE ${clauses.join(" AND ")}
-     ORDER BY ir.created_at DESC, ir.interest_id ASC
+     ORDER BY ir.created_at DESC, ir.request_id ASC
      LIMIT $${p}`,
 		params,
 	);
@@ -403,29 +595,54 @@ export const getMyInterestRequests = async (studentId, filters) => {
 		hasNextPage ?
 			{
 				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].interest_id,
+				cursorId: items[items.length - 1].request_id,
 			}
 		:	null;
 
-	return { items: items.map(toStudentInterestShape), nextCursor };
+	return {
+		items: items.map((row) => ({
+			interestRequestId: row.request_id,
+			listingId: row.listing_id,
+			status: row.status,
+			message: row.message,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at,
+			listing: {
+				listingId: row.listing_id,
+				title: row.listing_title,
+				city: row.listing_city,
+				listingType: row.listing_type,
+				rentPerMonth: row.listing_rent_per_month != null ? row.listing_rent_per_month / 100 : null,
+			},
+		})),
+		nextCursor,
+	};
 };
 
-// ─── Expire pending requests for a listing ────────────────────────────────────
-export const expirePendingRequestsForListing = async (listingId, client = pool) => {
+// ─── Expire pending requests for a listing ───────────────────────────────────
+// Bulk-expires all pending interest requests on a listing. Called inside
+// transactions when a listing is deactivated, deleted, or filled.
+export const expirePendingRequestsForListing = async (listingId, client = pool, excludeRequestId = null) => {
+	const params = [listingId];
+	let excludeClause = "";
+
+	if (excludeRequestId) {
+		params.push(excludeRequestId);
+		excludeClause = `AND request_id != $2`;
+	}
+
 	const { rowCount } = await client.query(
 		`UPDATE interest_requests
-     SET status     = 'expired',
-         updated_at = NOW()
+     SET status = 'expired'::request_status_enum, updated_at = NOW()
      WHERE listing_id = $1
        AND status     = 'pending'
-       AND deleted_at IS NULL`,
-		[listingId],
+       AND deleted_at IS NULL
+       ${excludeClause}`,
+		params,
 	);
 
 	if (rowCount > 0) {
 		logger.info({ listingId, expiredCount: rowCount }, "Pending interest requests expired for listing");
-		// TODO(phase3:notifications): notify each expired sender_id that their
-		// request was expired because the listing is no longer available.
 	}
 
 	return rowCount;

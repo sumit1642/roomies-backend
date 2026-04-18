@@ -5,6 +5,7 @@ import path from "path";
 import crypto from "crypto";
 import fs from "fs/promises";
 import { AppError } from "./errorHandler.js";
+import { MAX_UPLOAD_SIZE_BYTES } from "../config/constants.js";
 
 // Maps each allowed MIME type to its valid file extensions.
 // Used to catch obvious mismatches like a .txt file claiming image/jpeg.
@@ -17,8 +18,6 @@ const MIME_TO_EXTENSIONS = {
 // Derived from MIME_TO_EXTENSIONS so a new entry in the map automatically
 // becomes an allowed type — no second list to keep in sync.
 const ALLOWED_MIME_TYPES = new Set(Object.keys(MIME_TO_EXTENSIONS));
-
-const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 
 const storage = multer.diskStorage({
 	destination: async (_req, _file, cb) => {
@@ -66,7 +65,7 @@ export const upload = multer({
 	storage,
 	fileFilter,
 	limits: {
-		fileSize: MAX_FILE_SIZE_BYTES,
+		fileSize: MAX_UPLOAD_SIZE_BYTES,
 		files: 1,
 	},
 });

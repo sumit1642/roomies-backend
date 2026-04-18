@@ -4,6 +4,25 @@ import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 
+// ─── Shared rollback-failure logger ──────────────────────────────────────────
+//
+// Both approveRequest and rejectRequest wrap their ROLLBACK in a try/catch and
+// log identically. Extracting the pattern here removes the duplication and
+// ensures any future logging change only needs to happen in one place.
+//
+// Parameters:
+//   rollbackErr  — the error thrown by client.query("ROLLBACK")
+//   originalErr  — the error that triggered the rollback in the first place
+//   context      — plain object with { adminUserId, requestId } for log correlation
+const handleRollbackFailure = (
+	rollbackErr,
+	originalErr,
+	context,
+	message = "Rollback failed during verification operation",
+) => {
+	logger.error({ rollbackErr, originalErr, ...context }, message);
+};
+
 // ─── Document submission ──────────────────────────────────────────────────────
 
 export const submitDocument = async (requestingUserId, targetUserId, { documentType, documentUrl }) => {
@@ -15,55 +34,88 @@ export const submitDocument = async (requestingUserId, targetUserId, { documentT
 		throw new AppError("Forbidden", 403);
 	}
 
-	const { rows: profileRows } = await pool.query(
-		`SELECT profile_id
-     FROM pg_owner_profiles
-     WHERE user_id = $1
-       AND deleted_at IS NULL`,
-		[targetUserId],
-	);
-	if (!profileRows.length) {
-		throw new AppError("PG owner profile not found", 404);
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
+
+		const { rows: profileRows } = await client.query(
+			`SELECT profile_id
+       FROM pg_owner_profiles
+       WHERE user_id = $1
+         AND deleted_at IS NULL
+       FOR UPDATE`,
+			[targetUserId],
+		);
+		if (!profileRows.length) {
+			throw new AppError("PG owner profile not found", 404);
+		}
+
+		const { rowCount: pendingRequestCount } = await client.query(
+			`SELECT 1
+       FROM verification_requests
+       WHERE user_id = $1
+         AND status = 'pending'
+         AND deleted_at IS NULL
+       LIMIT 1`,
+			[targetUserId],
+		);
+		if (pendingRequestCount > 0) {
+			throw new AppError("You already have a pending verification request", 409);
+		}
+
+		const { rows } = await client.query(
+			`INSERT INTO verification_requests (user_id, document_type, document_url)
+       VALUES ($1, $2, $3)
+       RETURNING request_id, document_type, document_url, status, submitted_at`,
+			[targetUserId, documentType, documentUrl],
+		);
+
+		const { rowCount: profileRowCount } = await client.query(
+			`UPDATE pg_owner_profiles
+       SET verification_status = 'pending',
+           rejection_reason    = NULL
+       WHERE user_id = $1
+         AND deleted_at IS NULL`,
+			[targetUserId],
+		);
+		if (profileRowCount === 0) {
+			throw new AppError("PG owner profile not found — cannot submit verification", 409);
+		}
+
+		await client.query("COMMIT");
+
+		logger.info(
+			{ userId: targetUserId, documentType, requestId: rows[0].request_id },
+			"Document submitted for verification",
+		);
+
+		return rows[0];
+	} catch (err) {
+		try {
+			await client.query("ROLLBACK");
+		} catch (rollbackErr) {
+			logger.error(
+				{ rollbackErr, originalErr: err, userId: targetUserId },
+				"Rollback failed during document submission",
+			);
+		}
+
+		if (err.code === "23505" && err.constraint === "uq_verification_requests_active_pending_per_user") {
+			throw new AppError("You already have a pending verification request", 409);
+		}
+
+		throw err;
+	} finally {
+		client.release();
 	}
-
-	// Single-table INSERT — no transaction needed because there are no other
-	// coupled writes. The pg_owner_profiles status flip to 'pending' happens
-	// explicitly when an admin acts on the request, not automatically on submission.
-	const { rows } = await pool.query(
-		`INSERT INTO verification_requests (user_id, document_type, document_url)
-     VALUES ($1, $2, $3)
-     RETURNING request_id, document_type, document_url, status, submitted_at`,
-		[targetUserId, documentType, documentUrl],
-	);
-
-	logger.info(
-		{ userId: targetUserId, documentType, requestId: rows[0].request_id },
-		"Document submitted for verification",
-	);
-
-	return rows[0];
 };
 
 // ─── Admin queue ──────────────────────────────────────────────────────────────
 
 export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
-	// Keyset pagination — stable under concurrent inserts.
-	// Offset pagination is not used here because new submissions arriving while an
-	// admin is paginating would cause rows to shift, leading to duplicates on one
-	// page and gaps on the next. The keyset cursor is anchored to a specific data
-	// value and is unaffected by concurrent writes before or after the cursor point.
-	//
-	// The compound cursor (submitted_at + request_id) is necessary because
-	// submitted_at alone is not unique. PostgreSQL's row value comparison
-	// `(col1, col2) > ($1, $2)` evaluates as a true lexicographic comparison that
-	// mirrors the ORDER BY clause exactly — not application-level cursor arithmetic.
-	//
-	// Oldest-first ordering (submitted_at ASC) ensures every submission is
-	// eventually reviewed regardless of queue volume. Newest-first would allow
-	// older submissions to starve as new ones keep appearing at the front.
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 
-	const params = [limit + 1]; // fetch one extra to determine if a next page exists
+	const params = [limit + 1];
 	let cursorClause = "";
 
 	if (hasCursor) {
@@ -71,17 +123,6 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 		cursorClause = `AND (vr.submitted_at, vr.request_id) > ($2, $3::uuid)`;
 	}
 
-	// Three-way JOIN — returns everything the admin needs to make a decision
-	// without any additional requests. Driving from verification_requests
-	// (filtered to pending) allows the composite index on (status, submitted_at)
-	// to be used for the initial filtered scan.
-	//
-	// vr.user_id is included so the admin UI can construct a deep-link to the
-	// PG owner's profile page (/pg-owners/:userId/profile) from each queue row,
-	// without requiring a second request.
-	//
-	// Explicit column selection: no SELECT * from a JOIN — ambiguous column names
-	// and silent breakage on schema changes.
 	const { rows } = await pool.query(
 		`SELECT
       vr.request_id,
@@ -104,11 +145,9 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 		params,
 	);
 
-	// The extra row tells us whether there are more pages without a separate COUNT.
 	const hasNextPage = rows.length > limit;
 	const items = hasNextPage ? rows.slice(0, limit) : rows;
 
-	// Build the cursor from the last item in the current page.
 	const nextCursor =
 		hasNextPage ?
 			{
@@ -127,10 +166,6 @@ export const approveRequest = async (adminUserId, requestId, { adminNotes } = {}
 	try {
 		await client.query("BEGIN");
 
-		// Update the request row first.
-		// AND status = 'pending' makes the transition conditional at the query level:
-		// if two admins act simultaneously, one will get rowCount = 0 and receive a
-		// 409 rather than both "succeeding" and producing a silent redundant write.
 		const { rowCount, rows: requestRows } = await client.query(
 			`UPDATE verification_requests
        SET status      = 'verified',
@@ -145,19 +180,11 @@ export const approveRequest = async (adminUserId, requestId, { adminNotes } = {}
 		);
 
 		if (rowCount === 0) {
-			// Either the request does not exist or it has already been reviewed.
 			throw new AppError("Verification request not found or already resolved", 409);
 		}
 
 		const ownerId = requestRows[0].user_id;
 
-		// Update the profile status in the same transaction.
-		// Both writes must commit together — a partially-applied state (request
-		// says 'verified' but profile still says 'pending') has no automated
-		// recovery path and would leave the PG owner in an inconsistent state.
-		// rowCount is checked here for the same reason as above: if the profile row
-		// is absent or soft-deleted (data integrity issue or race with a hard-delete),
-		// we must not commit — the verification_requests UPDATE would be orphaned.
 		const { rowCount: profileRowCount } = await client.query(
 			`UPDATE pg_owner_profiles
        SET verification_status = 'verified',
@@ -178,7 +205,11 @@ export const approveRequest = async (adminUserId, requestId, { adminNotes } = {}
 
 		return { requestId, status: "verified" };
 	} catch (err) {
-		await client.query("ROLLBACK");
+		try {
+			await client.query("ROLLBACK");
+		} catch (rollbackErr) {
+			handleRollbackFailure(rollbackErr, err, { adminUserId, requestId });
+		}
 		throw err;
 	} finally {
 		client.release();
@@ -190,11 +221,8 @@ export const rejectRequest = async (adminUserId, requestId, { rejectionReason, a
 	try {
 		await client.query("BEGIN");
 
-		// Same conditional-transition pattern as approveRequest.
-		// AND status = 'pending' is the concurrency safety net.
 		const { rowCount, rows: requestRows } = await client.query(
-			`
-			UPDATE verification_requests
+			`UPDATE verification_requests
 			SET status      = 'rejected',
 				reviewed_at = NOW(),
 				reviewed_by = $1,
@@ -212,15 +240,8 @@ export const rejectRequest = async (adminUserId, requestId, { rejectionReason, a
 
 		const ownerId = requestRows[0].user_id;
 
-		// Write rejection_reason to the profile so the PG owner sees a meaningful
-		// explanation when they check their status. Without this they would only
-		// know they were rejected, not what to fix or resubmit.
-		// rowCount checked for consistency with approveRequest — a missing or
-		// soft-deleted profile row must abort the transaction, not silently commit
-		// an orphaned verification_requests status change.
 		const { rowCount: profileRowCount } = await client.query(
-			`
-			UPDATE pg_owner_profiles
+			`UPDATE pg_owner_profiles
 			SET verification_status = 'rejected',
 				rejection_reason    = $1
 			WHERE user_id = $2
@@ -238,7 +259,11 @@ export const rejectRequest = async (adminUserId, requestId, { rejectionReason, a
 
 		return { requestId, status: "rejected" };
 	} catch (err) {
-		await client.query("ROLLBACK");
+		try {
+			await client.query("ROLLBACK");
+		} catch (rollbackErr) {
+			handleRollbackFailure(rollbackErr, err, { adminUserId, requestId });
+		}
 		throw err;
 	} finally {
 		client.release();

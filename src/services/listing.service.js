@@ -8,14 +8,35 @@
 // This file is the ONLY place where the conversion happens:
 //   write path:  rupees × 100  before any INSERT or UPDATE
 //   read path:   paise  ÷ 100  after any SELECT, before returning to caller
+//
+// ─── GUEST ACCESS ────────────────────────────────────────────────────────────
+//
+// searchListings and getListing accept a nullable userId (null for guests).
+// When userId is null:
+//   - Compatibility scoring is skipped (no user preferences to compare against)
+//   - compatibilityScore is always 0, compatibilityAvailable is always false
+//   - All other listing data is returned normally
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { assertPgOwnerVerified } from "../db/utils/pgOwner.js";
-import { findListingsNearPoint } from "../db/utils/spatial.js";
 import { scoreListingsForUser } from "../db/utils/compatibility.js";
+import { expirePendingRequestsForListing } from "./interest.service.js";
+import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
+import { dedupePreferencesByKey } from "../config/preferences.js";
+
+// ─── Location fields that belong to the parent property for pg/hostel listings ─
+const PROPERTY_OWNED_LOCATION_FIELDS = new Set([
+	"addressLine",
+	"city",
+	"locality",
+	"landmark",
+	"pincode",
+	"latitude",
+	"longitude",
+]);
 
 const toRupees = (listing) => {
 	if (!listing) return null;
@@ -39,10 +60,13 @@ const bulkInsertListingAmenities = async (client, listingId, amenityIds) => {
 
 const bulkInsertListingPreferences = async (client, listingId, preferences) => {
 	if (!preferences.length) return;
-	const placeholders = preferences.map((_, i) => `($1, $${i * 2 + 2}, $${i * 2 + 3})`).join(", ");
+	const canonicalPreferences = dedupePreferencesByKey(preferences);
+	if (!canonicalPreferences.length) return;
+
+	const placeholders = canonicalPreferences.map((_, i) => `($1, $${i * 2 + 2}, $${i * 2 + 3})`).join(", ");
 	const values = [
 		listingId,
-		...preferences.flatMap(({ preferenceKey, preferenceValue }) => [preferenceKey, preferenceValue]),
+		...canonicalPreferences.flatMap(({ preferenceKey, preferenceValue }) => [preferenceKey, preferenceValue]),
 	];
 	await client.query(
 		`INSERT INTO listing_preferences (listing_id, preference_key, preference_value)
@@ -110,8 +134,6 @@ const fetchListingDetail = async (listingId, client = pool) => {
         '[]'
       ) AS preferences,
 
-      -- Correlated subquery avoids a Cartesian product with the amenities and
-      -- preferences 1:N JOINs, allowing ORDER BY inside the aggregation.
       (
         SELECT COALESCE(
           JSON_AGG(
@@ -178,8 +200,6 @@ export const createListing = async (posterId, posterRoles, body) => {
 		throw new AppError("Only students can create student_room listings", 403);
 	}
 
-	// Fix: also SELECT city from property so PG listings can satisfy the NOT NULL constraint on city.
-	// Previously SELECT 1 was used, which left city as null and caused the INSERT to fail.
 	let propertyCity = null;
 	if (isPgOwner && body.listingType !== "student_room") {
 		await assertPgOwnerVerified(posterId);
@@ -206,7 +226,6 @@ export const createListing = async (posterId, posterRoles, body) => {
 		await client.query("BEGIN");
 
 		const propertyId = body.listingType === "student_room" ? null : body.propertyId;
-		// Fix: PG listings inherit city from the parent property; student listings use body.city.
 		const city = body.listingType === "student_room" ? body.city : propertyCity;
 
 		const { rows } = await client.query(
@@ -294,15 +313,31 @@ export const createListing = async (posterId, posterRoles, body) => {
 	}
 };
 
+// ─── Get single listing ───────────────────────────────────────────────────────
+//
+// userId may be null for guest callers. The listing detail is returned
+// regardless — guests see all listing data except compatibility scoring,
+// which requires a logged-in user's preferences.
 export const getListing = async (listingId) => {
 	const listing = await fetchListingDetail(listingId);
 	if (!listing) throw new AppError("Listing not found", 404);
 
-	pool.query(`UPDATE listings SET views_count = views_count + 1 WHERE listing_id = $1`, [listingId]);
+	void pool
+		.query(`UPDATE listings SET views_count = views_count + 1 WHERE listing_id = $1`, [listingId])
+		.catch((err) => {
+			logger.warn({ err, listingId }, "Failed to increment listing view count");
+		});
 
 	return toRupees(listing);
 };
 
+// ─── Search listings ──────────────────────────────────────────────────────────
+//
+// userId may be null when called for a guest (optionalAuthenticate set no user).
+// When null:
+//   - scoreListingsForUser is skipped entirely
+//   - every item gets compatibilityScore: 0 and compatibilityAvailable: false
+//   - all filter/sort/pagination logic is identical to the authenticated path
 export const searchListings = async (userId, filters) => {
 	const {
 		city,
@@ -316,27 +351,32 @@ export const searchListings = async (userId, filters) => {
 		lat,
 		lng,
 		radius,
-		amenityIds,
+		amenityIds = [],
 		cursorTime,
 		cursorId,
-		limit,
+		limit = 20,
 	} = filters;
-
-	let proximityIds = null;
-	if (lat !== undefined && lng !== undefined) {
-		proximityIds = await findListingsNearPoint(lat, lng, radius);
-		if (!proximityIds.length) {
-			return { items: [], nextCursor: null };
-		}
-	}
 
 	const clauses = [`l.status = 'active'`, `l.deleted_at IS NULL`, `l.expires_at > NOW()`];
 	const params = [];
 	let p = 1;
 
+	if (lat !== undefined && lng !== undefined) {
+		clauses.push(
+			`ST_DWithin(
+        COALESCE(l.location, p.location)::geography,
+        ST_SetSRID(ST_MakePoint($${p + 1}, $${p}), 4326)::geography,
+        $${p + 2}
+      )`,
+		);
+		params.push(lat, lng, radius);
+		p += 3;
+	}
+
 	if (city !== undefined) {
-		clauses.push(`l.city ILIKE $${p}`);
-		params.push(`%${city}%`);
+		const escapedCity = city.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+		clauses.push(`LOWER(l.city) LIKE LOWER($${p}) ESCAPE '\\'`);
+		params.push(`${escapedCity}%`);
 		p++;
 	}
 
@@ -382,22 +422,20 @@ export const searchListings = async (userId, filters) => {
 		p++;
 	}
 
-	if (proximityIds !== null) {
-		clauses.push(`l.listing_id = ANY($${p}::uuid[])`);
-		params.push(proximityIds);
-		p++;
-	}
-
-	for (const amenityId of amenityIds) {
+	if (amenityIds.length > 0) {
+		const uniqueAmenityIds = [...new Set(amenityIds)];
 		clauses.push(
 			`EXISTS (
-        SELECT 1 FROM listing_amenities la_f
+        SELECT 1
+        FROM listing_amenities la_f
         WHERE la_f.listing_id = l.listing_id
-          AND la_f.amenity_id = $${p}
+          AND la_f.amenity_id = ANY($${p}::uuid[])
+        GROUP BY la_f.listing_id
+        HAVING COUNT(DISTINCT la_f.amenity_id) = $${p + 1}
       )`,
 		);
-		params.push(amenityId);
-		p++;
+		params.push(uniqueAmenityIds, uniqueAmenityIds.length);
+		p += 2;
 	}
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
@@ -448,8 +486,38 @@ export const searchListings = async (userId, filters) => {
 	const hasNextPage = rows.length > limit;
 	const items = hasNextPage ? rows.slice(0, limit) : rows;
 
-	const listingIds = items.map((r) => r.listing_id);
-	const scoreMap = await scoreListingsForUser(userId, listingIds);
+	// Compatibility scoring requires an authenticated user with saved preferences.
+	// For guests (userId === null), skip both DB queries and return zero scores.
+	let scoreMap = {};
+	let userHasPreferences = false;
+	let listingPreferenceCounts = new Map();
+
+	if (userId !== null) {
+		const listingIds = items.map((r) => r.listing_id);
+		scoreMap = await scoreListingsForUser(userId, listingIds);
+
+		const { rows: preferenceRows } = await pool.query(
+			`SELECT EXISTS (
+        SELECT 1 FROM user_preferences WHERE user_id = $1
+      ) AS has_preferences`,
+			[userId],
+		);
+		userHasPreferences = preferenceRows[0]?.has_preferences === true;
+
+		if (listingIds.length) {
+			const { rows: listingPreferenceRows } = await pool.query(
+				`SELECT listing_id, COUNT(*)::int AS preference_count
+         FROM listing_preferences
+         WHERE listing_id = ANY($1::uuid[])
+         GROUP BY listing_id`,
+				[listingIds],
+			);
+
+			listingPreferenceCounts = new Map(
+				listingPreferenceRows.map((row) => [row.listing_id, Number(row.preference_count)]),
+			);
+		}
+	}
 
 	const enrichedItems = items.map((row) => ({
 		...row,
@@ -457,7 +525,9 @@ export const searchListings = async (userId, filters) => {
 		depositAmount: row.deposit_amount / 100,
 		rent_per_month: undefined,
 		deposit_amount: undefined,
-		compatibilityScore: scoreMap[row.listing_id] ?? 0,
+		compatibilityScore: userId !== null ? (scoreMap[row.listing_id] ?? 0) : 0,
+		compatibilityAvailable:
+			userId !== null && userHasPreferences && (listingPreferenceCounts.get(row.listing_id) ?? 0) > 0,
 	}));
 
 	const nextCursor =
@@ -526,6 +596,34 @@ export const updateListing = async (posterId, listingId, body) => {
 	try {
 		await client.query("BEGIN");
 
+		const { rows: typeRows } = await client.query(
+			`SELECT listing_type
+       FROM listings
+       WHERE listing_id = $1
+         AND posted_by  = $2
+         AND deleted_at IS NULL
+       FOR UPDATE`,
+			[listingId, posterId],
+		);
+
+		if (!typeRows.length) {
+			throw new AppError("Listing not found", 404);
+		}
+
+		const listingType = typeRows[0].listing_type;
+		const isPropertyLinked = listingType === "pg_room" || listingType === "hostel_bed";
+
+		if (isPropertyLinked) {
+			const forbiddenFields = Object.keys(body).filter((key) => PROPERTY_OWNED_LOCATION_FIELDS.has(key));
+			if (forbiddenFields.length > 0) {
+				throw new AppError(
+					`Location fields (${forbiddenFields.join(", ")}) cannot be updated on a ${listingType} listing — ` +
+						`they are inherited from the parent property. Update the property's address instead.`,
+					422,
+				);
+			}
+		}
+
 		if (setClauses.length) {
 			values.push(listingId, posterId);
 			const { rowCount } = await client.query(
@@ -537,15 +635,6 @@ export const updateListing = async (posterId, listingId, body) => {
 				values,
 			);
 			if (rowCount === 0) throw new AppError("Listing not found", 404);
-		} else {
-			const { rows } = await client.query(
-				`SELECT 1 FROM listings
-         WHERE listing_id = $1
-           AND posted_by  = $2
-           AND deleted_at IS NULL`,
-				[listingId, posterId],
-			);
-			if (!rows.length) throw new AppError("Listing not found", 404);
 		}
 
 		if (updateAmenities) {
@@ -572,33 +661,140 @@ export const updateListing = async (posterId, listingId, body) => {
 };
 
 export const deleteListing = async (posterId, listingId) => {
-	const { rows: requestRows } = await pool.query(
-		`SELECT 1
-     FROM interest_requests
-     WHERE listing_id = $1
-       AND status IN ('pending', 'accepted')
-       AND deleted_at IS NULL
-     LIMIT 1`,
-		[listingId],
-	);
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
 
-	if (requestRows.length) {
-		throw new AppError("Decline or withdraw all active interest requests before deleting this listing", 409);
+		const { rowCount } = await client.query(
+			`UPDATE listings
+       SET deleted_at = NOW()
+       WHERE listing_id = $1
+         AND posted_by  = $2
+         AND deleted_at IS NULL`,
+			[listingId, posterId],
+		);
+
+		if (rowCount === 0) {
+			throw new AppError("Listing not found", 404);
+		}
+
+		await expirePendingRequestsForListing(listingId, client);
+
+		await client.query("COMMIT");
+	} catch (err) {
+		await client.query("ROLLBACK");
+		throw err;
+	} finally {
+		client.release();
 	}
 
-	const { rowCount } = await pool.query(
-		`UPDATE listings
-     SET deleted_at = NOW()
+	logger.info({ posterId, listingId }, "Listing soft-deleted");
+	return { listingId, deleted: true };
+};
+
+const ALLOWED_STATUS_TRANSITIONS = {
+	active: ["filled", "deactivated"],
+	deactivated: ["active"],
+};
+
+export const updateListingStatus = async (posterId, listingId, newStatus) => {
+	const { rows: listingRows } = await pool.query(
+		`SELECT status, expires_at, (expires_at <= NOW()) AS is_expired
+     FROM listings
      WHERE listing_id = $1
        AND posted_by  = $2
        AND deleted_at IS NULL`,
 		[listingId, posterId],
 	);
 
-	if (rowCount === 0) throw new AppError("Listing not found", 404);
+	if (!listingRows.length) {
+		throw new AppError("Listing not found", 404);
+	}
 
-	logger.info({ posterId, listingId }, "Listing soft-deleted");
-	return { listingId, deleted: true };
+	const currentStatus = listingRows[0].status;
+
+	if (newStatus === "active" && listingRows[0].is_expired) {
+		throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
+	}
+
+	const allowed = ALLOWED_STATUS_TRANSITIONS[currentStatus] ?? [];
+
+	if (!allowed.includes(newStatus)) {
+		throw new AppError(`Cannot change listing status from '${currentStatus}' to '${newStatus}'`, 422);
+	}
+
+	const deactivating = newStatus === "filled" || newStatus === "deactivated";
+
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
+
+		const { rows: updatedRows } = await client.query(
+			`UPDATE listings l
+       SET status     = $1,
+           filled_at  = CASE WHEN $1 = 'filled' THEN NOW() ELSE l.filled_at END
+       WHERE l.listing_id = $2
+         AND l.posted_by  = $3
+         AND l.status     = $4
+         AND l.deleted_at IS NULL
+				 AND ($1 <> 'active' OR l.expires_at > NOW())
+         AND (
+           $1 <> 'active'
+           OR l.property_id IS NULL
+           OR EXISTS (
+             SELECT 1
+             FROM properties p
+             WHERE p.property_id = l.property_id
+               AND p.deleted_at IS NULL
+           )
+         )
+       RETURNING l.listing_id, l.status`,
+			[newStatus, listingId, posterId, currentStatus],
+		);
+
+		if (!updatedRows.length) {
+			const { rows: currentRows } = await client.query(
+				`SELECT status, expires_at
+         FROM listings
+         WHERE listing_id = $1
+           AND posted_by  = $2
+           AND deleted_at IS NULL`,
+				[listingId, posterId],
+			);
+
+			if (!currentRows.length) {
+				throw new AppError("Listing not found", 404);
+			}
+
+			const currentRow = currentRows[0];
+			const isNowExpired =
+				currentRow.expires_at ? new Date(currentRow.expires_at).getTime() <= Date.now() : false;
+
+			if (newStatus === "active" && isNowExpired) {
+				throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
+			}
+
+			if (currentRow.status !== currentStatus) {
+				throw new AppError("Listing status has already changed — please refresh", 409);
+			}
+
+			throw new AppError("Listing status update could not be applied — please refresh", 409);
+		}
+
+		if (deactivating) {
+			await expirePendingRequestsForListing(listingId, client);
+		}
+
+		await client.query("COMMIT");
+	} catch (err) {
+		await client.query("ROLLBACK");
+		throw err;
+	} finally {
+		client.release();
+	}
+
+	logger.info({ posterId, listingId, from: currentStatus, to: newStatus }, "Listing status updated");
+	return { listingId, status: newStatus };
 };
 
 export const getListingPreferences = async (listingId) => {
@@ -648,11 +844,29 @@ export const saveListing = async (userId, listingId) => {
 		`SELECT 1 FROM listings
      WHERE listing_id = $1
        AND status     = 'active'
+       AND expires_at > NOW()
        AND deleted_at IS NULL`,
 		[listingId],
 	);
 	if (!listingCheck.length) {
-		throw new AppError("Listing not found or no longer active", 404);
+		const { rows: availabilityRows } = await pool.query(
+			`SELECT status, expires_at, (expires_at <= NOW()) AS is_expired
+       FROM listings
+       WHERE listing_id = $1
+         AND deleted_at IS NULL`,
+			[listingId],
+		);
+
+		if (!availabilityRows.length) {
+			throw new AppError("Listing not found", 404);
+		}
+
+		const listing = availabilityRows[0];
+		if (listing.is_expired) {
+			throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
+		}
+
+		throw new AppError(UNAVAILABLE_LISTING_MESSAGE, 422);
 	}
 
 	await pool.query(
@@ -722,6 +936,7 @@ export const getSavedListings = async (userId, { cursorTime, cursorId, limit = 2
     WHERE sl.user_id    = $1
       AND sl.deleted_at IS NULL
       AND l.status      = 'active'
+      AND l.expires_at  > NOW()
       AND l.deleted_at  IS NULL
       ${cursorClause}
     ORDER BY sl.saved_at DESC, l.listing_id ASC

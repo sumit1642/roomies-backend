@@ -1,6 +1,7 @@
 // src/validators/verification.validators.js
 
 import { z } from "zod";
+import { keysetPaginationQuerySchema } from "./pagination.validators.js";
 
 // ─── Document submission ──────────────────────────────────────────────────────
 
@@ -27,21 +28,7 @@ export const submitDocumentSchema = z.object({
 // Both fields are required together or neither: a partial cursor is ambiguous.
 // limit defaults to 20 and is capped at 100 to prevent accidentally large responses.
 export const getQueueSchema = z.object({
-	query: z
-		.object({
-			cursorTime: z.string().optional(),
-			cursorId: z.uuid({ error: "cursorId must be a valid UUID" }).optional(),
-			limit: z.coerce.number().int().min(1).max(100).default(20),
-		})
-		.refine(
-			(data) => {
-				const hasTime = data.cursorTime !== undefined;
-				const hasId = data.cursorId !== undefined;
-				// Either both cursor fields are present or neither is.
-				return hasTime === hasId;
-			},
-			{ error: "cursorTime and cursorId must be provided together" },
-		),
+	query: keysetPaginationQuerySchema,
 });
 
 // ─── Admin resolution ─────────────────────────────────────────────────────────
