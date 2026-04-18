@@ -305,3 +305,255 @@ export const sendOtpEmail = async (to, otp) => {
 		throw new AppError("Failed to send OTP email — try again shortly", 502);
 	}
 };
+
+// These are PLANNED email types — the email worker has handlers registered
+// for them, but the admin verification service does not yet enqueue jobs of
+// these types. They are defined now so the worker does not crash if a job
+// arrives, and so the service layer can wire them up cleanly in phase 5 admin.
+
+// ─── Verification approved email ─────────────────────────────────────────────
+//
+// Sent to a PG owner when an admin approves their verification request.
+// The owner can now create properties and listings.
+export const sendVerificationApprovedEmail = async (to, ownerName, businessName) => {
+	if (!to || typeof to !== "string" || !to.includes("@")) {
+		throw new AppError("Invalid recipient email address", 400);
+	}
+	if (!ownerName || typeof ownerName !== "string") {
+		throw new AppError("ownerName is required for verification approved email", 400);
+	}
+
+	const maskedTo = maskEmail(to);
+	const fromAddress = getSenderAddress();
+	const displayName = businessName ? `${ownerName} (${businessName})` : ownerName;
+
+	logger.info({ to: maskedTo, provider: activeEmailProvider }, "Preparing verification approved email");
+
+	try {
+		const info = await transport.sendMail({
+			from: fromAddress,
+			to,
+			subject: "Your Roomies PG owner account has been verified",
+			text:
+				`Hi ${ownerName},\n\n` +
+				`Great news! Your PG owner account on Roomies has been verified.\n\n` +
+				`You can now create properties and post listings for students to discover.\n\n` +
+				`Log in to get started: https://roomies.in/dashboard\n\n` +
+				`If you have any questions, please contact our support team.\n\n` +
+				`— The Roomies Team`,
+			html: `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Account Verified — Roomies</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f4f4f5; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background-color:#f4f4f5; padding:40px 16px;">
+    <tr>
+      <td align="center">
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:480px; background-color:#ffffff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.08); overflow:hidden;">
+ 
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#18181b; padding:28px 40px 24px;">
+              <p style="margin:0; font-size:22px; font-weight:700; color:#ffffff; letter-spacing:-0.3px;">Roomies</p>
+              <p style="margin:6px 0 0; font-size:13px; color:#a1a1aa;">Find your perfect PG or roommate</p>
+            </td>
+          </tr>
+ 
+          <!-- Body -->
+          <tr>
+            <td style="padding:36px 40px 32px;">
+              <p style="margin:0 0 8px; font-size:22px;">✅</p>
+              <p style="margin:0 0 8px; font-size:16px; font-weight:600; color:#18181b;">Account verified!</p>
+              <p style="margin:0 0 20px; font-size:14px; line-height:1.6; color:#52525b;">
+                Hi ${ownerName}, your PG owner account for <strong>${businessName ?? "your business"}</strong>
+                has been reviewed and approved by our team.
+              </p>
+              <p style="margin:0 0 28px; font-size:14px; line-height:1.6; color:#52525b;">
+                You can now create properties and post listings for students across India to discover.
+              </p>
+ 
+              <!-- CTA -->
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+                <tr>
+                  <td align="center">
+                    <a href="https://roomies.in/dashboard"
+                       style="display:inline-block; background-color:#18181b; color:#ffffff; text-decoration:none;
+                              padding:12px 28px; border-radius:8px; font-size:14px; font-weight:600;">
+                      Go to Dashboard
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+ 
+          <!-- Footer -->
+          <tr>
+            <td style="background-color:#fafafa; border-top:1px solid #f0f0f0; padding:20px 40px;">
+              <p style="margin:0; font-size:12px; color:#a1a1aa; line-height:1.5;">
+                This is an automated message from Roomies. Please do not reply to this email.
+              </p>
+            </td>
+          </tr>
+ 
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+      `,
+		});
+
+		const previewUrl = nodemailer.getTestMessageUrl(info);
+		if (previewUrl) {
+			logger.info({ to: maskedTo, previewUrl }, "Verification approved email sent (Ethereal preview)");
+		} else {
+			logger.info(
+				{ to: maskedTo, messageId: info.messageId, provider: config.EMAIL_PROVIDER },
+				"Verification approved email sent",
+			);
+		}
+
+		return info.messageId;
+	} catch (err) {
+		logger.error(
+			{ to: maskedTo, provider: config.EMAIL_PROVIDER, errCode: err.code, errMessage: err.message },
+			"Failed to send verification approved email",
+		);
+		throw new AppError("Failed to send verification approved email — try again shortly", 502);
+	}
+};
+
+// ─── Verification rejected email ──────────────────────────────────────────────
+//
+// Sent to a PG owner when an admin rejects their verification request.
+// Includes the rejection reason so the owner knows what to fix before resubmitting.
+export const sendVerificationRejectedEmail = async (to, ownerName, rejectionReason) => {
+	if (!to || typeof to !== "string" || !to.includes("@")) {
+		throw new AppError("Invalid recipient email address", 400);
+	}
+	if (!ownerName || typeof ownerName !== "string") {
+		throw new AppError("ownerName is required for verification rejected email", 400);
+	}
+
+	const maskedTo = maskEmail(to);
+	const fromAddress = getSenderAddress();
+	const reasonText = rejectionReason?.trim() || "Please review your submitted documents and try again.";
+
+	logger.info({ to: maskedTo, provider: activeEmailProvider }, "Preparing verification rejected email");
+
+	try {
+		const info = await transport.sendMail({
+			from: fromAddress,
+			to,
+			subject: "Update on your Roomies verification request",
+			text:
+				`Hi ${ownerName},\n\n` +
+				`We've reviewed your PG owner verification request and unfortunately we were unable to approve it at this time.\n\n` +
+				`Reason: ${reasonText}\n\n` +
+				`You can submit a new verification request with updated documents from your account settings.\n\n` +
+				`If you have questions, please contact our support team.\n\n` +
+				`— The Roomies Team`,
+			html: `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Verification Update — Roomies</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f4f4f5; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background-color:#f4f4f5; padding:40px 16px;">
+    <tr>
+      <td align="center">
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:480px; background-color:#ffffff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.08); overflow:hidden;">
+ 
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#18181b; padding:28px 40px 24px;">
+              <p style="margin:0; font-size:22px; font-weight:700; color:#ffffff; letter-spacing:-0.3px;">Roomies</p>
+              <p style="margin:6px 0 0; font-size:13px; color:#a1a1aa;">Find your perfect PG or roommate</p>
+            </td>
+          </tr>
+ 
+          <!-- Body -->
+          <tr>
+            <td style="padding:36px 40px 32px;">
+              <p style="margin:0 0 8px; font-size:16px; font-weight:600; color:#18181b;">Verification update</p>
+              <p style="margin:0 0 20px; font-size:14px; line-height:1.6; color:#52525b;">
+                Hi ${ownerName}, we've reviewed your verification request but were unable to approve it
+                with the documents currently on file.
+              </p>
+ 
+              <!-- Reason box -->
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:24px;">
+                <tr>
+                  <td style="background-color:#fef2f2; border-left:3px solid #ef4444; border-radius:4px; padding:16px 20px;">
+                    <p style="margin:0 0 4px; font-size:11px; font-weight:600; letter-spacing:1px; text-transform:uppercase; color:#dc2626;">Reason</p>
+                    <p style="margin:0; font-size:14px; color:#18181b; line-height:1.5;">${reasonText}</p>
+                  </td>
+                </tr>
+              </table>
+ 
+              <p style="margin:0 0 28px; font-size:14px; line-height:1.6; color:#52525b;">
+                You can submit a new verification request with updated documents from your account settings.
+                If you believe this decision was made in error, please contact our support team.
+              </p>
+ 
+              <!-- CTA -->
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+                <tr>
+                  <td align="center">
+                    <a href="https://roomies.in/settings/verification"
+                       style="display:inline-block; background-color:#18181b; color:#ffffff; text-decoration:none;
+                              padding:12px 28px; border-radius:8px; font-size:14px; font-weight:600;">
+                      Resubmit Documents
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+ 
+          <!-- Footer -->
+          <tr>
+            <td style="background-color:#fafafa; border-top:1px solid #f0f0f0; padding:20px 40px;">
+              <p style="margin:0; font-size:12px; color:#a1a1aa; line-height:1.5;">
+                This is an automated message from Roomies. Please do not reply to this email.
+              </p>
+            </td>
+          </tr>
+ 
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+      `,
+		});
+
+		const previewUrl = nodemailer.getTestMessageUrl(info);
+		if (previewUrl) {
+			logger.info({ to: maskedTo, previewUrl }, "Verification rejected email sent (Ethereal preview)");
+		} else {
+			logger.info(
+				{ to: maskedTo, messageId: info.messageId, provider: config.EMAIL_PROVIDER },
+				"Verification rejected email sent",
+			);
+		}
+
+		return info.messageId;
+	} catch (err) {
+		logger.error(
+			{ to: maskedTo, provider: config.EMAIL_PROVIDER, errCode: err.code, errMessage: err.message },
+			"Failed to send verification rejected email",
+		);
+		throw new AppError("Failed to send verification rejected email — try again shortly", 502);
+	}
+};

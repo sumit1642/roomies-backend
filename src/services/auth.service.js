@@ -11,7 +11,7 @@ import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { findUserByEmail, findUserByGoogleId } from "../db/utils/auth.js";
 import { findInstitutionByDomain } from "../db/utils/institutions.js";
-import { sendOtpEmail } from "./email.service.js";
+import { enqueueEmail } from "../workers/emailQueue.js";
 
 const googleOAuthClient = config.GOOGLE_CLIENT_ID ? new OAuth2Client(config.GOOGLE_CLIENT_ID) : null;
 
@@ -503,10 +503,21 @@ export const sendOtp = async (userId, email) => {
 	const otp = generateOtp();
 	const hash = await bcrypt.hash(otp, 10);
 
+	// Store the OTP hash and reset the attempt counter atomically.
+	// This must complete before enqueuing the email — if Redis is down here,
+	// we throw immediately and the email is never queued (correct: there is no
+	// OTP to verify). If Redis goes down between setEx and enqueueEmail, the OTP
+	// is stored but no email is sent. The user can hit "resend" to create a fresh
+	// job. This is the accepted failure mode documented in emailQueue.js.
 	await Promise.all([redis.setEx(`otp:${userId}`, OTP_TTL, hash), redis.del(`otpAttempts:${userId}`)]);
 
-	await sendOtpEmail(email, otp);
-	logger.info({ userId }, "OTP sent");
+	// Enqueue the email job — fire and forget. The worker handles SMTP delivery,
+	// retries on Brevo failures, and logs exhaustion at error level.
+	// We no longer await email delivery in the HTTP path, so the response returns
+	// in ~1ms (just the Redis write above) instead of waiting for the SMTP round-trip.
+	enqueueEmail({ type: "otp", to: email, data: { otp } });
+
+	logger.info({ userId }, "OTP enqueued for delivery");
 };
 
 export const verifyOtp = async (userId, otp, ipAddress) => {
