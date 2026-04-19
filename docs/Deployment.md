@@ -1,357 +1,217 @@
-# Roomies — Azure Deployment Plan
+# Roomies — Azure Deployment Guide (2026 Edition)
 
-**Author:** Solo Developer  
-**Target Date:** April 2026 — December 2026  
-**Azure Region:** Central India (Pune)  
-**Budget:** ₹9,480 total (~₹1,350/month ceiling, shared across all future projects)  
-**Traffic:** ~100 visitors/day, ~50 registered users/day, variable  
-**Stack:** Node.js + Express (ES Modules) · PostgreSQL 16 + PostGIS · Redis · BullMQ · Azure Blob Storage
+> **Status:** Replace `docs/Deployment.md` entirely with this file.  
+> **Written for:** Azure for Students subscription, no custom domain, API-only, ≤50 users/day.  
+> **Last researched:** April 2026
 
 ---
 
-## Table of Contents
+## Part 0 — Critical Decisions Before You Start
 
-1. [Email Provider Decision (Current)](#1-email-provider-decision-current)
-2. [Architecture Overview](#2-architecture-overview)
-3. [Priority-Based Budget Plan](#3-priority-based-budget-plan)
-4. [Service Tier Decisions](#4-service-tier-decisions)
-5. [Phase 0 — One-Time Azure Setup](#5-phase-0--one-time-azure-setup)
-6. [Phase 1 — Database Setup (PostgreSQL + PostGIS)](#6-phase-1--database-setup-postgresql--postgis)
-7. [Phase 2 — Redis Setup](#7-phase-2--redis-setup)
-8. [Phase 3 — Blob Storage Setup](#8-phase-3--blob-storage-setup)
-9. [Phase 4 — Key Vault Setup](#9-phase-4--key-vault-setup)
-10. [Phase 5 — App Service Setup](#10-phase-5--app-service-setup)
-11. [Phase 6 — Email Setup (Brevo SMTP)](#11-phase-6--email-setup-brevo-smtp)
-12. [Phase 7 — Environment Variables & Key Vault Wiring](#12-phase-7--environment-variables--key-vault-wiring)
-13. [Phase 8 — First Manual Deployment](#13-phase-8--first-manual-deployment)
-14. [Phase 9 — Post-Deploy Verification](#14-phase-9--post-deploy-verification)
-15. [Phase 10 — CI/CD Pipeline (GitHub Actions)](#15-phase-10--cicd-pipeline-github-actions)
-16. [Phase 11 — Frontend (Vercel) CORS Wiring](#16-phase-11--frontend-vercel-cors-wiring)
-17. [Phase 12 — Custom Domain (Future)](#17-phase-12--custom-domain-future)
-18. [Code Changes Required Before Deployment](#18-code-changes-required-before-deployment)
-19. [Security Checklist](#19-security-checklist)
-20. [Cost Monitoring](#20-cost-monitoring)
-21. [Scaling Path (When Traffic Grows)](#21-scaling-path-when-traffic-grows)
+Before touching the Azure portal, you need to understand five decisions that override everything in the old
+`docs/Deployment.md`.
+
+### Decision 1: No Docker Required
+
+Azure App Service for Node.js supports **zip-based code deployment without Docker**. You zip your source, push it,
+Azure's Oryx build system runs `npm install` automatically. Docker adds operational complexity and costs RAM you don't
+have on B1. Skip it entirely.
+
+### Decision 2: Upstash Redis (NOT Azure Cache for Redis)
+
+The old plan used Azure Cache for Redis Basic C0 at ~₹1,050/month. This is your single biggest cost after PostgreSQL.
+
+However, **BullMQ is NOT compatible with the Upstash free tier** (500K commands/month). Here is why:
+
+BullMQ uses a blocking Redis command called `BZPOPMIN` to wait for new jobs. Even with zero user traffic, each of your 3
+workers (media, notification, email) calls `BZPOPMIN` roughly once every 5 seconds. That's:
+
+```
+3 workers × 12 calls/min × 60 min × 24 hr × 30 days = ~1,555,200 commands/month
+```
+
+The 500K free tier is exhausted in **~10 days** just from idle polling. When it runs out, Redis gets rate-limited and
+BullMQ stops processing jobs entirely.
+
+**Use the Upstash Fixed 250MB plan at $10/month (~₹840/month).** Upstash explicitly documents this as the correct plan
+for BullMQ. It is ₹210/month cheaper than Azure Redis.
+
+### Decision 3: Single Process (No Worker Separation)
+
+With ≤50 serious users/day, running Express + BullMQ workers + cron jobs in one App Service B1 process is correct.
+Worker separation requires multiple App Service instances or Container Apps, which would double or triple your compute
+cost. The B1 has 1.75GB RAM; your app uses roughly 200–350MB at idle. You have headroom.
+
+### Decision 4: Zero Code Changes for Upstash
+
+Your codebase already handles everything correctly. Both `src/cache/client.js` (node-redis v5) and
+`src/workers/bullConnection.js` (BullMQ ioredis) already parse `rediss://` TLS URLs and extract host, port, password,
+and TLS settings automatically. The only change is the `REDIS_URL` environment variable value.
+
+### Decision 5: Revised Realistic Budget
+
+| Service                        | Tier                     | Price/month                 |
+| ------------------------------ | ------------------------ | --------------------------- |
+| Azure App Service B1 Linux     | Basic (1 vCore, 1.75GB)  | ~₹1,092 (~$13)              |
+| Azure PostgreSQL Flexible B1ms | Burstable (1 vCore, 2GB) | ~₹1,043 (~$12.41) + storage |
+| PostgreSQL storage (32GB P4)   | Provisioned SSD          | ~₹280 (~$3.33)              |
+| Upstash Redis Fixed 250MB      | Fixed plan               | ~₹840 (~$10)                |
+| Azure Blob Storage LRS         | Hot tier, first 5GB      | ~₹42 (~$0.50)               |
+| Azure Key Vault Standard       | ~5K ops/month            | ~₹5 (~$0.06)                |
+| **Total**                      |                          | **~₹3,302/month**           |
+
+With ₹9,480 credits: **~2.9 months of runtime.**
+
+Azure for Students credits renew annually. By the time they run out, you will have real users and can justify either
+renewal or a paid plan. Stop the PostgreSQL server when you are not developing (the stop/start feature saves compute
+cost, you only pay for storage).
 
 ---
 
-## 1. Email Provider Decision (Current)
-
-**Current state:** Roomies uses Nodemailer in all environments, with provider selection via `EMAIL_PROVIDER`.
-
-- **`EMAIL_PROVIDER=ethereal`** → fake SMTP for local testing (no real delivery).
-- **`EMAIL_PROVIDER=brevo`** → real SMTP delivery via `smtp-relay.brevo.com:587`.
-
-**Decision for Roomies:** keep a single Nodemailer code path and switch credentials by environment. This preserves local
-DX (Ethereal preview URLs) and enables production OTP delivery via Brevo.
-
-**Required Brevo env vars in production:** `BREVO_SMTP_LOGIN`, `BREVO_SMTP_KEY`, `BREVO_SMTP_FROM`.
-
----
-
-## 2. Architecture Overview
+## Part 1 — Architecture Overview
 
 ```
 Internet
     │
     ▼
-[Azure App Service B1 — Central India]
-  Node.js + Express API (src/server.js)
-  + BullMQ workers (same process)
-  + node-cron jobs (same process)
+[Azure App Service B1 Linux — Central India]
+  Node.js 22 LTS
+  src/server.js — Express + BullMQ workers + node-cron (single process)
     │
-    ├─────────────────────────────────┐
-    │                                 │
-    ▼                                 ▼
-[Azure Database for PostgreSQL   [Azure Cache for Redis]
- Flexible Server — B1ms]          Basic C0 — 250MB
- PostgreSQL 16 + PostGIS           Central India
- Central India]
+    ├───────────────────────────────────────────┐
+    │                                           │
+    ▼                                           ▼
+[Azure PostgreSQL Flexible B1ms]         [Upstash Redis Fixed 250MB]
+ PostgreSQL 16 + PostGIS                  Mumbai or Singapore region
+ Central India                            rediss:// TLS connection
     │
     ▼
-[Azure Blob Storage]
- Standard LRS
+[Azure Blob Storage Standard LRS]
  Central India
- (Photo storage for all listings)
+ Container: roomies-uploads (public blob read)
     │
     ▼
-[Azure Key Vault — Standard]
- All secrets: JWT, DB URL,
- Redis URL, Brevo keys, etc.
+[Azure Key Vault Standard]
+ Stores all secrets
+ App Service reads via Managed Identity (zero credentials stored)
     │
     ▼
 [Brevo SMTP Relay]
- Email via smtp-relay.brevo.com
- (OTPs, verification emails)
+ smtp-relay.brevo.com:587
+ Transactional email (OTPs, verification)
 ```
 
-**Frontend (separate):**
-
-```
-[Vercel — React + Vite]
-    │
-    ▼ HTTPS API calls
-[Azure App Service — Roomies API]
-```
-
-**URL shape before custom domain:**
-
-- API: `https://roomies-api.azurewebsites.net/api/v1`
-- Blob photos: `https://roomiesblob.blob.core.windows.net/roomies-uploads/...`
+API base URL (no custom domain): `https://roomies-api.azurewebsites.net/api/v1`
 
 ---
 
-## 3. Priority-Based Budget Plan
+## Part 2 — Pre-Deployment Checklist
 
-Budget rule: **Critical services get 60% of monthly budget. Non-critical / free-tier-eligible services get the remaining
-40%.**
+Do these before you open the Azure portal.
 
-### Monthly Cost Breakdown (Estimated in INR, Central India region)
+### 2.1 Create Accounts
 
-| Priority                                                                                 | Service                                       | Tier                                         | Est. ₹/month             | Category   |
-| ---------------------------------------------------------------------------------------- | --------------------------------------------- | -------------------------------------------- | ------------------------ | ---------- |
-| 🔴 Critical                                                                              | Azure Database for PostgreSQL Flexible Server | Burstable B1ms (1 vCore, 2GB RAM)            | ~₹1,050                  | Critical   |
-| 🔴 Critical                                                                              | Azure App Service (Linux)                     | Basic B1 (1 vCore, 1.75GB RAM)               | ~₹630                    | Critical   |
-| 🔴 Critical                                                                              | Azure Cache for Redis                         | Basic C0 (250MB)                             | ~₹1,050                  | Critical   |
-| 🟡 Important                                                                             | Azure Blob Storage                            | Standard LRS (first 5GB free, then ~₹1.5/GB) | ~₹50–₹100                | Important  |
-| 🟢 Free/Negligible                                                                       | Azure Key Vault                               | Standard (pay per operation: ₹2.5/10k ops)   | ~₹5–₹10                  | Negligible |
-| 🟢 Free/Negligible                                                                       | Brevo SMTP (Email)                            | Pay per send (plan-dependent)                | ~₹90                     | Negligible |
-| `NOTE: The brevo allows free tier users to send 300 emails per day for free for forever` |
-| 🟢 Free                                                                                  | Azure Resource Group                          | Free                                         | ₹0                       | Free       |
-| 🟢 Free                                                                                  | Azure Container Registry                      | Not needed                                   | ₹0                       | Free       |
-| **TOTAL**                                                                                |                                               |                                              | **~₹2,875–₹2,940/month** |            |
+- [ ] **Azure portal** — go to [portal.azure.com](https://portal.azure.com), sign in with your student email. You should
+      see ₹9,480 (or equivalent) in credits under "Azure for Students."
+- [ ] **Upstash account** — go to [upstash.com](https://upstash.com), sign up free.
+- [ ] **Brevo account** — go to [brevo.com](https://brevo.com), sign up free. Free tier allows 300 emails/day forever.
 
-### Budget Analysis
+### 2.2 Gather Credentials Before Starting
 
-- **Monthly ceiling:** ₹1,350 (to survive 7 months = ₹9,450 total)
-- **Projected actual:** ~₹2,875–₹2,940/month
+You will need these handy during setup. Write them somewhere secure:
 
-⚠️ **This exceeds the strict ₹1,350/month ceiling.** However, your student credits are ₹9,480 and PostgreSQL + Redis are
-the most expensive items. Here's the honest breakdown:
+```
+Azure PostgreSQL admin username: roomiesadmin
+Azure PostgreSQL admin password: [generate: 16+ chars, mixed case, numbers, symbols]
+JWT_SECRET: [generate: openssl rand -base64 48]
+JWT_REFRESH_SECRET: [generate: openssl rand -base64 48]
+```
 
-**The Redis problem:** Azure Cache for Redis Basic C0 costs ~₹1,050/month which alone exceeds a third of budget. There
-is no free tier for Redis on Azure. At 100 users/day, Redis is used for sessions, OTPs, rate limiting, and BullMQ. It is
-not optional — removing Redis would break the entire auth system and job queuing.
-
-**The realistic budget projection:**
-
-| Scenario                                 | Monthly | Duration with ₹9,480 |
-| ---------------------------------------- | ------- | -------------------- |
-| Full stack as planned                    | ~₹2,900 | ~3.3 months          |
-| PostgreSQL + App Service only (no Redis) | ~₹1,680 | ~5.6 months          |
-| Full stack + 1 more small project        | ~₹3,500 | ~2.7 months          |
-
-**Recommendation:** Run the full stack. Accept ~3–3.5 months of runtime on current credits. By then, either renew
-student credits (Azure for Students renews annually), switch to a paying tier, or migrate to alternatives. The student
-subscription can often be renewed each academic year, and many students report getting fresh credits. This is the
-correct stack for a production-ready app.
-
-**Cost-cutting measures already baked in:**
-
-- PostgreSQL Burstable (not General Purpose) — saves ~₹1,500/month vs GP2
-- Redis Basic (no SLA, no replication) — saves ~₹1,050/month vs Standard
-- Blob LRS (not GRS/ZRS) — saves ~₹30/month
-- App Service B1 Linux (cheaper than Windows)
-- No Azure CDN (direct blob URLs, add CDN later)
-- No Application Insights (Pino to stdout, captured by App Service logs)
-- No Azure Container Registry (direct code deploy via zip, not Docker)
-
----
-
-## 4. Service Tier Decisions
-
-### PostgreSQL — Burstable B1ms
-
-**Why Burstable B1ms and not General Purpose?**  
-Burstable instances have CPU credits. When idle (which is most of the time at 100 users/day), they accumulate credits.
-Bursts of traffic consume credits. For a low-traffic API this is perfect — you get burst performance when needed without
-paying for always-on vCPUs.
-
-- **1 vCore, 2 GB RAM**
-- **32 GB Storage** (start small, auto-grow is available)
-- **PostgreSQL version: 16** (confirmed PostGIS support in 2026)
-- **No High Availability** (zone-redundant standby not needed at this scale)
-- **Backups: 7 days** (default, free — do not reduce)
-- **Public access with firewall rules** (simpler than VNet for a solo dev project)
-
-### Redis — Basic C0
-
-**Why Basic and not Standard?**  
-Standard tier adds a secondary replica and an SLA. For 100 users/day, a few minutes of Redis downtime means:
-
-- Users can't log in or refresh tokens (sessions are in Redis)
-- OTP verification fails
-- BullMQ jobs queue up
-
-This is an inconvenience, not a catastrophe. You can afford the ~0.01% chance of downtime at this scale. **Basic C0
-saves ₹1,050/month vs Standard C0.**
-
-- **C0 = 250MB memory** — more than enough for sessions, OTPs, rate limiting counters, and BullMQ job data at this scale
-- **TLS enabled** — your code already uses `rediss://` in production (see `bullConnection.js`)
-
-### App Service — Basic B1 Linux
-
-- **1 vCore, 1.75 GB RAM**
-- **Linux** (cheaper than Windows, Node.js runs natively)
-- **Always-on** (enabled by default on B1, unlike F1 which sleeps)
-- **No deployment slots** (B1 doesn't support slots — that's Standard tier only)
-- **Node.js 22 LTS runtime** (Azure supports it as of 2026)
-
-### Blob Storage — Standard LRS
-
-- **LRS** = data stored in 3 copies within one datacenter in Central India
-- **Hot access tier** (photos are read frequently)
-- **No CDN initially** — blob URLs will be long but functional. Add Azure CDN later when you have a custom domain
-- **Container name:** `roomies-uploads` (public read access for photos)
-
-### Key Vault — Standard
-
-- **Standard tier** = software-protected keys (not HSM)
-- **Pricing:** ₹2.5 per 10,000 operations. At app startup + 100 users/day, you'll do maybe 5,000–10,000 operations/month
-  = ~₹2.50/month
-
-### Brevo SMTP — Pay As You Go
-
-- **Billing:** Based on Brevo plan and sent email volume
-- **Transport:** SMTP relay via `smtp-relay.brevo.com:587`
-- **Requirement:** Sender email must be verified in Brevo
-
----
-
-## 5. Phase 0 — One-Time Azure Setup
-
-### 5.1 Create a Resource Group
-
-A Resource Group is a logical container for all Roomies resources. It makes cost tracking and deletion clean.
-
-1. Go to [portal.azure.com](https://portal.azure.com)
-2. Search for **Resource groups** → click **+ Create**
-3. Fill in:
-    - **Subscription:** Azure for Students
-    - **Resource group name:** `roomies-rg`
-    - **Region:** `(Asia Pacific) Central India`
-4. Click **Review + create** → **Create**
-
-> **Why one resource group?** Deleting `roomies-rg` will delete ALL Roomies resources at once. This is intentional —
-> clean teardown when you move on or migrate.
-
-### 5.2 Install Azure CLI Locally (Optional but Useful)
+To generate secrets locally:
 
 ```bash
-# On Ubuntu/Debian (WSL works too)
-curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-
-# Verify
-az --version
-
-# Login
-az login
-# This opens a browser — log in with your student account
-
-# Set default subscription
-az account set --subscription "Azure for Students"
-
-# Set default location
-az configure --defaults location=centralindia group=roomies-rg
+node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
 ```
-
-You don't have to use the CLI — every step below can also be done via the portal. But the CLI is faster for repeated
-operations.
 
 ---
 
-## 6. Phase 1 — Database Setup (PostgreSQL + PostGIS)
+## Part 3 — Step-by-Step Azure Setup
 
-### 6.1 Create the PostgreSQL Flexible Server
+### Phase 1: Resource Group
 
-**Via Azure Portal:**
+A resource group is a logical container. Deleting it later removes everything at once — useful for cleanup.
 
-1. Search **Azure Database for PostgreSQL flexible server** → **+ Create**
-2. **Basics tab:**
-    - Subscription: Azure for Students
+**Portal steps:**
+
+1. Go to [portal.azure.com](https://portal.azure.com)
+2. Search for **"Resource groups"** in the top search bar
+3. Click **+ Create**
+4. Fill in:
+    - Subscription: `Azure for Students`
+    - Resource group name: `roomies-rg`
+    - Region: `Central India`
+5. Click **Review + create** → **Create**
+
+**CLI equivalent (optional, install Azure CLI):**
+
+```bash
+az login
+az account set --subscription "Azure for Students"
+az configure --defaults location=centralindia group=roomies-rg
+az group create --name roomies-rg --location centralindia
+```
+
+---
+
+### Phase 2: PostgreSQL Database
+
+#### 2.1 Create the Server
+
+**Portal steps:**
+
+1. Search **"Azure Database for PostgreSQL flexible server"**
+2. Click **+ Create** → **Flexible server**
+3. **Basics tab:**
     - Resource group: `roomies-rg`
-    - Server name: `roomies-db` (this becomes `roomies-db.postgres.database.azure.com`)
+    - Server name: `roomies-db` → URL becomes `roomies-db.postgres.database.azure.com`
     - Region: `Central India`
     - PostgreSQL version: **16**
-    - Workload type: **Development** (this pre-selects Burstable)
-    - Compute + storage: Click **Configure server**
+    - Workload type: **Development** (pre-selects Burstable tier)
+    - Click **Configure server**:
         - Compute tier: **Burstable**
         - Compute size: **Standard_B1ms** (1 vCore, 2 GiB)
         - Storage size: **32 GiB**
-        - Storage auto-growth: **Enabled** ✅
-        - Performance tier: **P4** (pre-selected, leave as is)
+        - Storage auto-grow: **Enabled**
     - Availability zone: **No preference**
-    - High availability: **Disabled** (uncheck)
-3. **Authentication tab:**
+    - High availability: **Disabled**
+4. **Authentication tab:**
     - Authentication method: **PostgreSQL authentication only**
-    - Admin username: `roomiesadmin` (note this down)
-    - Password: Create a strong password (16+ chars, mix of uppercase, lowercase, numbers, symbols). Store it
-      immediately — you will put it in Key Vault later.
-4. **Networking tab:**
-    - Connectivity method: **Public access (allowed IP addresses)**
+    - Admin username: `roomiesadmin`
+    - Password: your generated strong password
+5. **Networking tab:**
+    - Connectivity: **Public access (allowed IP addresses)**
     - Allow public access: **Yes**
-    - Firewall rules: Click **+ Add current client IP address** (this adds your dev machine's IP)
-    - Azure services access: **Yes** ✅ (required for App Service to connect)
-5. **Security tab:** Leave defaults (SSL enforced is ON by default — keep it)
-6. **Backups tab:**
-    - Backup retention period: **7 days** (default)
-    - Backup redundancy: **Locally redundant** (cheaper, fine for this scale)
-7. Click **Review + create** → **Create**
+    - Click **+ Add current client IP address** (adds your dev machine)
+    - Azure services access: **Yes** ← critical, allows App Service to connect
+6. **Security tab:** Leave SSL enforced ON (default)
+7. **Backups tab:**
+    - Retention: **7 days**
+    - Redundancy: **Locally redundant**
+8. Click **Review + create** → **Create** (takes 3–5 minutes)
 
-Deployment takes 3–5 minutes.
+#### 2.2 Enable PostGIS and pgcrypto Extensions
 
-**Via CLI (equivalent):**
+Azure requires allowlisting extensions before `CREATE EXTENSION` works in SQL.
 
-```bash
-az postgres flexible-server create \
-  --resource-group roomies-rg \
-  --name roomies-db \
-  --location centralindia \
-  --admin-user roomiesadmin \
-  --admin-password "YOUR_STRONG_PASSWORD" \
-  --sku-name Standard_B1ms \
-  --tier Burstable \
-  --storage-size 32 \
-  --version 16 \
-  --public-access 0.0.0.0 \
-  --backup-retention 7
-```
+**Portal steps:**
 
-### 6.2 Create the Application Database
-
-After the server is created:
-
-1. In the portal, go to your server → **Databases** (left menu) → **+ Add**
-2. Database name: `roomies_db`
-3. Click **Save**
-
-**Via CLI:**
-
-```bash
-az postgres flexible-server db create \
-  --resource-group roomies-rg \
-  --server-name roomies-db \
-  --database-name roomies_db
-```
-
-### 6.3 Enable PostGIS and pgcrypto Extensions
-
-This is the critical step your schema requires. **Do this before running the schema SQL.**
-
-1. In the portal, go to your server → **Server parameters** (left menu under Settings)
-2. Search for `azure.extensions`
-3. In the **Value** column, click the dropdown and select both:
-    - `POSTGIS`
-    - `PGCRYPTO`
+1. Go to your PostgreSQL server → left menu → **Server parameters**
+2. Search for: `azure.extensions`
+3. In the Value dropdown, select: **POSTGIS** and **PGCRYPTO**
 4. Click **Save** at the top
+5. Wait 1–2 minutes
 
-> **Why here first?** Azure Flexible Server requires extensions to be allowlisted in the `azure.extensions` parameter
-> BEFORE you can run `CREATE EXTENSION` in SQL. If you run the schema SQL first without doing this, PostGIS and pgcrypto
-> CREATE EXTENSION calls will fail with a permission error.
-
-Wait 1–2 minutes for the parameter change to apply (no server restart needed for `azure.extensions`).
-
-**Via CLI:**
+**CLI equivalent:**
 
 ```bash
 az postgres flexible-server parameter set \
@@ -361,436 +221,283 @@ az postgres flexible-server parameter set \
   --value POSTGIS,PGCRYPTO
 ```
 
-### 6.4 Get the Connection String
+#### 2.3 Create Application Database
 
-From the portal: Server → **Connect** (left menu) → copy the **Connection string** for psql. It looks like:
+**Portal steps:**
 
+1. Go to server → **Databases** (left menu) → **+ Add**
+2. Database name: `roomies_db`
+3. Click **Save**
+
+**CLI equivalent:**
+
+```bash
+az postgres flexible-server db create \
+  --resource-group roomies-rg \
+  --server-name roomies-db \
+  --database-name roomies_db
 ```
-psql "host=roomies-db.postgres.database.azure.com port=5432 dbname=roomies_db user=roomiesadmin password=YOUR_PASSWORD sslmode=require"
-```
 
-Your `DATABASE_URL` for the app will be:
+#### 2.4 Run Your Schema
+
+Your connection string will be:
 
 ```
 postgresql://roomiesadmin:YOUR_PASSWORD@roomies-db.postgres.database.azure.com:5432/roomies_db?sslmode=require
 ```
 
-### 6.5 Add Your Dev Machine IP to Firewall (If Not Done)
-
-If you didn't add your IP in step 6.1, do it now:
-
-Portal → Server → **Networking** → **+ Add current client IP address** → **Save**
-
-Or via CLI:
-
-```bash
-# Get your public IP first
-curl ifconfig.me
-
-az postgres flexible-server firewall-rule create \
-  --resource-group roomies-rg \
-  --name roomies-db \
-  --rule-name "my-dev-machine" \
-  --start-ip-address YOUR.IP.HERE \
-  --end-ip-address YOUR.IP.HERE
-```
-
-### 6.6 Run the Schema from Your Terminal
-
-Connect from your local terminal using the psql connection string:
+From your local terminal:
 
 ```bash
 # Test connection first
 psql "host=roomies-db.postgres.database.azure.com port=5432 dbname=roomies_db user=roomiesadmin password=YOUR_PASSWORD sslmode=require"
+# If it connects, exit with \q
 
-# If connected, you should see: roomies_db=>
-# Exit with \q
-
-# Now run the full schema
+# Run the schema
 psql "host=roomies-db.postgres.database.azure.com port=5432 dbname=roomies_db user=roomiesadmin password=YOUR_PASSWORD sslmode=require" \
-  -f roomies_db_setup.sql
+  -f migrations/001_initial_schema.sql
 
-# Watch for errors. The script is idempotent (IF NOT EXISTS everywhere)
-# so it is safe to run again if something fails partway through
+psql "host=roomies-db.postgres.database.azure.com port=5432 dbname=roomies_db user=roomiesadmin password=YOUR_PASSWORD sslmode=require" \
+  -f migrations/002_verification_event_outbox.sql
+
+# Verify PostGIS works
+psql "..." -c "SELECT ST_AsText(ST_MakePoint(77.21, 28.63));"
+# Should print: POINT(77.21 28.63)
 ```
 
-**After the schema runs, verify PostGIS is working:**
-
-```sql
--- Connect to the DB
-psql "..."
-
--- Verify extensions
-SELECT name, installed_version FROM pg_extension WHERE name IN ('postgis', 'pgcrypto');
-
--- Should output:
---  name     | installed_version
--- ----------+------------------
---  pgcrypto | 1.3
---  postgis  | 3.5.2
-
--- Test spatial function
-SELECT ST_AsText(ST_MakePoint(77.21, 28.63));
--- Should return: POINT(77.21 28.63)
-```
-
-### 6.7 Run the Amenity Seed
+**Run migrations via the npm script** (requires `DATABASE_URL` in your local env):
 
 ```bash
-# From your project root, with .env.azure pointing at the Azure DB
-ENV_FILE=.env.azure node src/db/seeds/amenities.js
+ENV_FILE=.env.azure node src/db/migrate.js
+# or just psql as shown above — both work fine
 ```
 
-> You'll create `.env.azure` in Phase 7. If you haven't yet, do the seed after Phase 7.
+#### 2.5 Run the Amenity Seed
+
+After setting up `.env.azure` in Phase 7:
+
+```bash
+npm run seed:amenities
+```
 
 ---
 
-## 7. Phase 2 — Redis Setup
+### Phase 3: Upstash Redis
 
-### 7.1 Create Azure Cache for Redis (Basic C0)
+#### 3.1 Create the Database
 
-**Via Azure Portal:**
-
-1. Search **Azure Cache for Redis** → **+ Create**
-2. **Basics tab:**
-    - Subscription: Azure for Students
-    - Resource group: `roomies-rg`
-    - DNS name: `roomies-redis` (becomes `roomies-redis.redis.cache.windows.net`)
-    - Location: `Central India`
-    - Cache type: Click **Change** → Select **Basic C0 (250 MB)** — this is the cheapest
-3. **Networking tab:**
-    - Connectivity method: **Public endpoint** (simpler for a small app)
-4. **Advanced tab:**
-    - Redis version: **6** (or latest available)
-    - TLS minimum version: **1.2**
-    - Non-TLS port (6379): **Disabled** (your code uses TLS)
-5. Click **Review + create** → **Create**
-
-Deployment takes 5–10 minutes.
-
-**Via CLI:**
-
-```bash
-az redis create \
-  --resource-group roomies-rg \
-  --name roomies-redis \
-  --location centralindia \
-  --sku Basic \
-  --vm-size c0 \
-  --redis-version 6 \
-  --minimum-tls-version 1.2
-```
-
-### 7.2 Get the Redis Connection String
-
-Portal → Your Redis → **Access keys** (left menu under Settings)  
-Copy the **Primary connection string** — it looks like:
-
-```
-roomies-redis.redis.cache.windows.net:6380,password=XXXX,ssl=True,abortConnect=False
-```
-
-Your app uses the `redis` npm package which expects a URL format. Convert it to:
-
-```
-rediss://:YOUR_ACCESS_KEY@roomies-redis.redis.cache.windows.net:6380
-```
-
-Note: `rediss://` (double s) = TLS. The password goes after the colon before the `@`. No username in the URL since Azure
-Redis uses password-only auth for Basic/Standard tiers.
-
-> **Important:** Your `bullConnection.js` parses this URL format correctly — it handles `rediss://` protocol and
-> extracts `host`, `port`, `password`, and `tls: {}` automatically.
-
----
-
-## 8. Phase 3 — Blob Storage Setup
-
-### 8.1 Create a Storage Account
-
-**Via Azure Portal:**
-
-1. Search **Storage accounts** → **+ Create**
-2. **Basics tab:**
-    - Subscription: Azure for Students
-    - Resource group: `roomies-rg`
-    - Storage account name: `roomiesblob` (globally unique, all lowercase, 3–24 chars, no hyphens)
-    - Region: `Central India`
-    - Performance: **Standard**
-    - Redundancy: **Locally redundant storage (LRS)** — cheapest
-3. **Advanced tab:**
-    - Allow blob anonymous access: **Enabled** ✅ (needed for photos to be publicly viewable without auth)
-    - Minimum TLS version: **TLS 1.2**
-4. Leave all other tabs as defaults
-5. **Review + create** → **Create**
-
-**Via CLI:**
-
-```bash
-az storage account create \
-  --resource-group roomies-rg \
-  --name roomiesblob \
-  --location centralindia \
-  --sku Standard_LRS \
-  --kind StorageV2 \
-  --allow-blob-public-access true \
-  --min-tls-version TLS1_2
-```
-
-### 8.2 Create the Blob Container
-
-1. Portal → Storage account → **Containers** (left menu under Data storage) → **+ Container**
-2. Name: `roomies-uploads`
-3. Public access level: **Blob (anonymous read access for blobs only)** — this lets photo URLs be accessed directly
-   without any auth headers, which is what your frontend needs to display images
+1. Go to [console.upstash.com](https://console.upstash.com)
+2. Click **Create database**
+3. Fill in:
+    - Name: `roomies-redis`
+    - Type: **Regional** (not Global)
+    - Region: **AWS ap-south-1 (Mumbai)** — closest to Central India Azure
+    - Plan: **Fixed 250MB** ← critical, do NOT use Pay-as-you-go for BullMQ
+    - TLS: **Enabled** (default, leave on)
 4. Click **Create**
 
-**Via CLI:**
+#### 3.2 Get Connection Details
 
-```bash
-az storage container create \
-  --account-name roomiesblob \
-  --name roomies-uploads \
-  --public-access blob
-```
+From the database overview page, click **Connect** and copy:
 
-### 8.3 Get the Connection String
+- **Endpoint**: something like `amusing-panda-12345.upstash.io`
+- **Password**: a long random string
 
-Portal → Storage account → **Access keys** (left menu under Security)  
-Click **Show** next to **Connection string** under key1. It looks like:
+Your `REDIS_URL` will be:
 
 ```
-DefaultEndpointsProtocol=https;AccountName=roomiesblob;AccountKey=XXXX;EndpointSuffix=core.windows.net
+rediss://default:YOUR_UPSTASH_PASSWORD@amusing-panda-12345.upstash.io:6380
 ```
 
-This is your `AZURE_STORAGE_CONNECTION_STRING`.
+The format is: `rediss://default:PASSWORD@ENDPOINT:6380`
 
-Your `AZURE_STORAGE_CONTAINER` = `roomies-uploads`
+- `rediss://` (double-s) = TLS
+- `default` = username (Upstash always uses "default")
+- Port `6380` = TLS port
+
+**Verify your existing code handles this:** `bullConnection.js` and `cache/client.js` both parse this URL format
+correctly. No code changes needed.
 
 ---
 
-## 9. Phase 4 — Key Vault Setup
+### Phase 4: Blob Storage
 
-### 9.1 Create the Key Vault
+#### 4.1 Create Storage Account
 
-**Via Azure Portal:**
+**Portal steps:**
 
-1. Search **Key vaults** → **+ Create**
-2. **Basics tab:**
-    - Subscription: Azure for Students
+1. Search **"Storage accounts"** → **+ Create**
+2. **Basics:**
     - Resource group: `roomies-rg`
-    - Key vault name: `roomies-kv` (globally unique)
+    - Storage account name: `roomiesblob` (must be globally unique, lowercase, no hyphens)
     - Region: `Central India`
-    - Pricing tier: **Standard**
-    - Days to retain deleted vaults: **7** (minimum)
-3. **Access configuration tab:**
-    - Permission model: **Azure role-based access control (RBAC)** — recommended over legacy Vault Access Policies
+    - Performance: **Standard**
+    - Redundancy: **Locally redundant storage (LRS)**
+3. **Advanced tab:**
+    - Allow blob anonymous access: **Enabled** ← required for photo URLs to be publicly viewable
+    - Minimum TLS version: **TLS 1.2**
 4. **Review + create** → **Create**
 
-**Via CLI:**
+#### 4.2 Create the Blob Container
 
-```bash
-az keyvault create \
-  --resource-group roomies-rg \
-  --name roomies-kv \
-  --location centralindia \
-  --sku standard \
-  --enable-rbac-authorization true
+1. Storage account → **Containers** (left menu under Data storage) → **+ Container**
+2. Name: `roomies-uploads`
+3. Public access level: **Blob (anonymous read access for blobs only)**
+4. Click **Create**
+
+#### 4.3 Get the Connection String
+
+1. Storage account → **Access keys** (left menu under Security)
+2. Click **Show** next to **Connection string** under key1
+3. Copy the full string — this is `AZURE_STORAGE_CONNECTION_STRING`
+
+Example format:
+
 ```
-
-### 9.2 Grant Yourself Admin Access to Key Vault
-
-With RBAC model, you need to assign yourself the Key Vault Administrator role:
-
-1. Portal → Key Vault → **Access control (IAM)** → **+ Add role assignment**
-2. Role: **Key Vault Administrator**
-3. Members: Select your own Azure account
-4. **Review + assign**
-
-**Via CLI:**
-
-```bash
-# Get your user Object ID
-az ad signed-in-user show --query id -o tsv
-
-# Assign Key Vault Administrator role
-az role assignment create \
-  --role "Key Vault Administrator" \
-  --assignee YOUR_OBJECT_ID \
-  --scope $(az keyvault show --name roomies-kv --query id -o tsv)
+DefaultEndpointsProtocol=https;AccountName=roomiesblob;AccountKey=XXXX==;EndpointSuffix=core.windows.net
 ```
-
-### 9.3 Store All Secrets in Key Vault
-
-Store every secret your app needs. Use the portal (Key Vault → **Secrets** → **+ Generate/Import**) or CLI:
-
-```bash
-# Each secret: az keyvault secret set --vault-name roomies-kv --name "SECRET-NAME" --value "value"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "DATABASE-URL" \
-  --value "postgresql://roomiesadmin:YOUR_PASSWORD@roomies-db.postgres.database.azure.com:5432/roomies_db?sslmode=require"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "REDIS-URL" \
-  --value "rediss://:YOUR_REDIS_KEY@roomies-redis.redis.cache.windows.net:6380"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "JWT-SECRET" \
-  --value "$(openssl rand -base64 48)"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "JWT-REFRESH-SECRET" \
-  --value "$(openssl rand -base64 48)"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "AZURE-STORAGE-CONNECTION-STRING" \
-  --value "DefaultEndpointsProtocol=https;AccountName=roomiesblob;..."
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "AZURE-STORAGE-CONTAINER" \
-  --value "roomies-uploads"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "EMAIL-PROVIDER" \
-  --value "brevo"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "BREVO-SMTP-LOGIN" \
-  --value "YOUR_BREVO_SMTP_LOGIN"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "BREVO-SMTP-KEY" \
-  --value "YOUR_BREVO_SMTP_KEY"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "BREVO-SMTP-FROM" \
-  --value "verified-sender@yourdomain.com"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "GOOGLE-CLIENT-ID" \
-  --value "YOUR_GOOGLE_CLIENT_ID"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "GOOGLE-CLIENT-SECRET" \
-  --value "YOUR_GOOGLE_CLIENT_SECRET"
-
-az keyvault secret set --vault-name roomies-kv \
-  --name "ALLOWED-ORIGINS" \
-  --value "https://your-vercel-app.vercel.app"
-```
-
-> **JWT secrets:** The `openssl rand -base64 48` command generates a cryptographically secure 64-character random
-> string. If you don't have OpenSSL, use any password manager's "generate secure password" feature with length 64 and
-> all character types enabled.
 
 ---
 
-## 10. Phase 5 — App Service Setup
+### Phase 5: Key Vault
 
-### 10.1 Create App Service Plan
+Key Vault stores all secrets. App Service reads them via Managed Identity — you never store raw credentials in App
+Service settings.
 
-The plan is the compute resource. The App Service (your actual app) runs on the plan.
+#### 5.1 Create the Key Vault
 
-**Via Azure Portal:**
+**Portal steps:**
 
-1. Search **App Service plans** → **+ Create**
+1. Search **"Key vaults"** → **+ Create**
 2. **Basics:**
-    - Subscription: Azure for Students
     - Resource group: `roomies-rg`
-    - Name: `roomies-plan`
-    - Operating System: **Linux**
+    - Key vault name: `roomies-kv` (must be globally unique)
     - Region: `Central India`
-    - Pricing plan: **Basic B1** (click **Explore pricing plans** → select B1)
-3. **Review + create** → **Create**
+    - Pricing tier: **Standard**
+3. **Access configuration tab:**
+    - Permission model: **Azure role-based access control (RBAC)**
+4. **Review + create** → **Create**
 
-**Via CLI:**
+#### 5.2 Grant Yourself Admin Access
+
+1. Go to your Key Vault → **Access control (IAM)** → **+ Add role assignment**
+2. Role: **Key Vault Administrator**
+3. Assign access to: **User, group, or service principal**
+4. Select your own Azure account
+5. Click **Review + assign**
+
+#### 5.3 Store All Secrets
+
+Go to Key Vault → **Secrets** → **+ Generate/Import** for each of these:
+
+| Secret Name                       | Value                                                                                                       |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `DATABASE-URL`                    | `postgresql://roomiesadmin:PASSWORD@roomies-db.postgres.database.azure.com:5432/roomies_db?sslmode=require` |
+| `REDIS-URL`                       | `rediss://default:UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6380`                                           |
+| `JWT-SECRET`                      | your generated 64-char secret                                                                               |
+| `JWT-REFRESH-SECRET`              | your second generated 64-char secret                                                                        |
+| `AZURE-STORAGE-CONNECTION-STRING` | the full connection string from Phase 4.3                                                                   |
+| `AZURE-STORAGE-CONTAINER`         | `roomies-uploads`                                                                                           |
+| `EMAIL-PROVIDER`                  | `brevo`                                                                                                     |
+| `BREVO-SMTP-LOGIN`                | your Brevo SMTP login email                                                                                 |
+| `BREVO-SMTP-KEY`                  | your Brevo SMTP key (starts with `xsmtpsib-`)                                                               |
+| `BREVO-SMTP-FROM`                 | your verified sender email in Brevo                                                                         |
+| `GOOGLE-CLIENT-ID`                | your Google OAuth client ID (or skip if not ready)                                                          |
+| `GOOGLE-CLIENT-SECRET`            | your Google OAuth client secret (or skip if not ready)                                                      |
+| `ALLOWED-ORIGINS`                 | `*` for now (tighten later when frontend is deployed)                                                       |
+
+**Naming rules:** Use hyphens in secret names (Key Vault convention). App Service environment variable names use
+underscores. Azure maps `DATABASE-URL` secret → `DATABASE_URL` environment variable via Key Vault references.
+
+**CLI equivalent (faster for bulk entry):**
 
 ```bash
-az appservice plan create \
-  --resource-group roomies-rg \
-  --name roomies-plan \
-  --location centralindia \
-  --is-linux \
-  --sku B1
+# Replace values with your actual credentials
+az keyvault secret set --vault-name roomies-kv --name "DATABASE-URL" \
+  --value "postgresql://roomiesadmin:PASSWORD@roomies-db.postgres.database.azure.com:5432/roomies_db?sslmode=require"
+
+az keyvault secret set --vault-name roomies-kv --name "REDIS-URL" \
+  --value "rediss://default:PASS@ENDPOINT.upstash.io:6380"
+
+az keyvault secret set --vault-name roomies-kv --name "JWT-SECRET" \
+  --value "$(node -e "console.log(require('crypto').randomBytes(48).toString('base64'))")"
+
+az keyvault secret set --vault-name roomies-kv --name "JWT-REFRESH-SECRET" \
+  --value "$(node -e "console.log(require('crypto').randomBytes(48).toString('base64'))")"
+
+az keyvault secret set --vault-name roomies-kv --name "AZURE-STORAGE-CONNECTION-STRING" \
+  --value "DefaultEndpointsProtocol=https;AccountName=roomiesblob;AccountKey=XXXX;EndpointSuffix=core.windows.net"
+
+az keyvault secret set --vault-name roomies-kv --name "AZURE-STORAGE-CONTAINER" --value "roomies-uploads"
+az keyvault secret set --vault-name roomies-kv --name "EMAIL-PROVIDER" --value "brevo"
+az keyvault secret set --vault-name roomies-kv --name "BREVO-SMTP-LOGIN" --value "your-login@smtp-brevo.com"
+az keyvault secret set --vault-name roomies-kv --name "BREVO-SMTP-KEY" --value "xsmtpsib-xxxxx"
+az keyvault secret set --vault-name roomies-kv --name "BREVO-SMTP-FROM" --value "noreply@yourdomain.com"
+az keyvault secret set --vault-name roomies-kv --name "ALLOWED-ORIGINS" --value "*"
 ```
 
-### 10.2 Create the Web App
+---
 
-1. Search **App Services** → **+ Create** → **Web App**
+### Phase 6: App Service
+
+#### 6.1 Create App Service Plan
+
+**Portal steps:**
+
+1. Search **"App Service plans"** → **+ Create**
+2. Resource group: `roomies-rg`
+3. Name: `roomies-plan`
+4. Operating System: **Linux**
+5. Region: `Central India`
+6. Pricing plan: **Basic B1** (click "Explore pricing plans" to select it)
+7. **Review + create** → **Create**
+
+#### 6.2 Create the Web App
+
+1. Search **"App Services"** → **+ Create** → **Web App**
 2. **Basics:**
-    - Subscription: Azure for Students
     - Resource group: `roomies-rg`
-    - Name: `roomies-api` (becomes `roomies-api.azurewebsites.net`)
+    - Name: `roomies-api` → URL: `https://roomies-api.azurewebsites.net`
     - Publish: **Code**
     - Runtime stack: **Node 22 LTS**
     - Operating System: **Linux**
     - Region: `Central India`
-    - App Service Plan: Select `roomies-plan`
-3. **Deployment tab:**
-    - Continuous deployment: **Disable** (we do manual first)
-4. **Networking tab:** Leave defaults (public access enabled)
-5. **Monitoring tab:**
-    - Application Insights: **No** (we use Pino only for now)
-6. **Review + create** → **Create**
+    - App Service Plan: `roomies-plan`
+3. **Deployment tab:** Continuous deployment: **Disable** (manual first)
+4. **Monitoring tab:** Application Insights: **No**
+5. **Review + create** → **Create**
 
-**Via CLI:**
+#### 6.3 Enable Managed Identity
 
-```bash
-az webapp create \
-  --resource-group roomies-rg \
-  --plan roomies-plan \
-  --name roomies-api \
-  --runtime "NODE:22-lts"
-```
+This lets App Service talk to Key Vault without any stored credentials.
 
-### 10.3 Enable Managed Identity on the App Service
+1. App Service (`roomies-api`) → **Identity** (left menu under Settings)
+2. **System assigned** tab → Status: **On** → **Save** → confirm with **Yes**
+3. Note the **Object (principal) ID** that appears — you need it next
 
-Managed Identity lets your App Service authenticate to Key Vault **without any stored credentials**. It's the secure,
-credential-free way to access Key Vault from Azure services.
+#### 6.4 Grant App Service Access to Key Vault
 
-1. Portal → App Service (`roomies-api`) → **Identity** (left menu under Settings)
-2. **System assigned** tab → Status: **On** → Click **Save** → Click **Yes** to confirm
-3. Note the **Object (principal) ID** shown — you need it next
+1. Go to Key Vault → **Access control (IAM)** → **+ Add role assignment**
+2. Role: **Key Vault Secrets User**
+3. Assign access to: **Managed identity**
+4. Select your App Service (`roomies-api`)
+5. **Review + assign**
 
-**Via CLI:**
+Wait 2–3 minutes for Azure RBAC propagation before the next step.
 
-```bash
-az webapp identity assign \
-  --resource-group roomies-rg \
-  --name roomies-api
+#### 6.5 Configure Application Settings
 
-# This returns a principalId — note it down
-```
+App Service reads secrets via Key Vault References — a special syntax that Azure resolves at startup by fetching from
+Key Vault. Your code just reads `process.env.DATABASE_URL` normally.
 
-### 10.4 Grant App Service Access to Key Vault
+**Portal steps:**
 
-```bash
-# Via CLI (replace PRINCIPAL_ID with the Object ID from step 10.3)
-az role assignment create \
-  --role "Key Vault Secrets User" \
-  --assignee PRINCIPAL_ID \
-  --scope $(az keyvault show --name roomies-kv --query id -o tsv)
-```
+1. App Service → **Configuration** (left menu) → **Application settings** tab
+2. Click **+ New application setting** for each row below:
 
-**Via Portal:** Key Vault → **Access control (IAM)** → **+ Add role assignment**  
-Role: **Key Vault Secrets User**  
-Members: Select **Managed identity** → find `roomies-api`
+**Key Vault References (copy-paste the @Microsoft.KeyVault(...) value exactly):**
 
-### 10.5 Configure Key Vault References in App Service Settings
-
-Azure App Service supports **Key Vault References** in Application Settings. This means you set an environment variable
-to a special syntax that Azure resolves at runtime by fetching from Key Vault. Your app code reads
-`process.env.DATABASE_URL` normally — it never knows or cares about Key Vault.
-
-**Via Portal:**  
-App Service → **Configuration** (left menu under Settings) → **Application settings** tab → **+ New application
-setting**
-
-Add each of these — the syntax is exactly
-`@Microsoft.KeyVault(SecretUri=https://roomies-kv.vault.azure.net/secrets/SECRET-NAME/)`
-
-| Setting Name                      | Key Vault Reference                                                                                          |
+| Name                              | Value                                                                                                        |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `DATABASE_URL`                    | `@Microsoft.KeyVault(SecretUri=https://roomies-kv.vault.azure.net/secrets/DATABASE-URL/)`                    |
 | `REDIS_URL`                       | `@Microsoft.KeyVault(SecretUri=https://roomies-kv.vault.azure.net/secrets/REDIS-URL/)`                       |
@@ -802,101 +509,64 @@ Add each of these — the syntax is exactly
 | `BREVO_SMTP_LOGIN`                | `@Microsoft.KeyVault(SecretUri=https://roomies-kv.vault.azure.net/secrets/BREVO-SMTP-LOGIN/)`                |
 | `BREVO_SMTP_KEY`                  | `@Microsoft.KeyVault(SecretUri=https://roomies-kv.vault.azure.net/secrets/BREVO-SMTP-KEY/)`                  |
 | `BREVO_SMTP_FROM`                 | `@Microsoft.KeyVault(SecretUri=https://roomies-kv.vault.azure.net/secrets/BREVO-SMTP-FROM/)`                 |
-| `GOOGLE_CLIENT_ID`                | `@Microsoft.KeyVault(SecretUri=https://roomies-kv.vault.azure.net/secrets/GOOGLE-CLIENT-ID/)`                |
-| `GOOGLE_CLIENT_SECRET`            | `@Microsoft.KeyVault(SecretUri=https://roomies-kv.vault.azure.net/secrets/GOOGLE-CLIENT-SECRET/)`            |
 | `ALLOWED_ORIGINS`                 | `@Microsoft.KeyVault(SecretUri=https://roomies-kv.vault.azure.net/secrets/ALLOWED-ORIGINS/)`                 |
 
-Also add these plain (non-secret) settings directly:
+**Plain settings (add these directly, no Key Vault):**
 
-| Setting Name             | Value                                                                      |
-| ------------------------ | -------------------------------------------------------------------------- |
-| `NODE_ENV`               | `production`                                                               |
-| `PORT`                   | `8080`                                                                     |
-| `STORAGE_ADAPTER`        | `azure`                                                                    |
-| `JWT_EXPIRES_IN`         | `15m`                                                                      |
-| `JWT_REFRESH_EXPIRES_IN` | `7d`                                                                       |
-| `ENV_FILE`               | _(leave empty — not needed in production, app reads process.env directly)_ |
+| Name                     | Value        |
+| ------------------------ | ------------ |
+| `NODE_ENV`               | `production` |
+| `PORT`                   | `8080`       |
+| `STORAGE_ADAPTER`        | `azure`      |
+| `JWT_EXPIRES_IN`         | `15m`        |
+| `JWT_REFRESH_EXPIRES_IN` | `7d`         |
+| `TRUST_PROXY`            | `1`          |
 
-Click **Save** at the top after adding all settings.
+3. Click **Save** at the top of the page
 
-> **Note on `PORT`:** Azure App Service on Linux exposes port `8080` by default for Node.js apps. Your `config/env.js`
-> already coerces PORT to a number, so `"8080"` in the app setting works correctly.
+#### 6.6 Set Startup Command and General Settings
 
-### 10.6 Configure Startup Command
+1. App Service → **Configuration** → **General settings** tab
+2. **Startup Command:** `node src/server.js`
+3. **Always On:** **On**
+4. Click **Save**
 
-App Service needs to know how to start your Node.js app in production:
+#### 6.7 Enable HTTPS Only
 
-Portal → App Service → **Configuration** → **General settings** tab  
-**Startup Command:** `node src/server.js`
+1. App Service → **TLS/SSL settings** (left menu)
+2. **HTTPS Only:** **On**
+3. Click **Save**
 
-Or via CLI:
+#### 6.8 Configure Health Check
 
-```bash
-az webapp config set \
-  --resource-group roomies-rg \
-  --name roomies-api \
-  --startup-file "node src/server.js"
-```
-
-### 10.7 Enable "Always On"
-
-This prevents your API from sleeping between requests (B1 tier includes Always On):
-
-Portal → App Service → **Configuration** → **General settings**  
-**Always on:** **On**  
-Click **Save**
+1. App Service → **Configuration** → **General settings**
+2. **Health check path:** `/api/v1/health`
+3. Click **Save**
 
 ---
 
-## 11. Phase 6 — Email Setup (Brevo SMTP)
+### Phase 7: Brevo Email Setup
 
-### 11.1 Create / Configure Brevo SMTP Credentials
+1. Log in to [brevo.com](https://brevo.com)
+2. Go to **Settings** → **SMTP & API** → **SMTP**
+3. Copy your **SMTP login** (e.g., `12345xyz@smtp-brevo.com`) → this is `BREVO_SMTP_LOGIN`
+4. Under **SMTP Keys**, generate a new key (starts with `xsmtpsib-`) → this is `BREVO_SMTP_KEY`
+5. Go to **Senders & Domains** → add and verify your sender email → this is `BREVO_SMTP_FROM`
 
-1. Sign in to Brevo.
-2. Open **Settings → SMTP & API → SMTP**.
-3. Collect these values:
-
-- **SMTP login** (`BREVO_SMTP_LOGIN`)
-- **SMTP key** (`BREVO_SMTP_KEY`, starts with `xsmtpsib-`)
-- **Verified sender email** (`BREVO_SMTP_FROM`)
-
-4. Ensure the key you use is the SMTP key (`xsmtpsib-...`), not the API key (`xkeysib-...`).
-
-### 11.2 Verify Sender Identity
-
-1. In Brevo, open **Senders & Domains**.
-2. Add and verify the sender address you want to use as `BREVO_SMTP_FROM`.
-3. Use that same verified address in production env settings.
-
-### 11.3 Update Key Vault / App Settings
-
-Your codebase uses Nodemailer and supports Brevo directly. Production SMTP host/port are fixed in code as
-`smtp-relay.brevo.com:587`; only credentials come from environment variables.
-
-Update Key Vault secrets from Phase 9 with these values:
-
-- `EMAIL-PROVIDER` → `brevo`
-- `BREVO-SMTP-LOGIN` → your Brevo SMTP login
-- `BREVO-SMTP-KEY` → your Brevo SMTP key
-- `BREVO-SMTP-FROM` → your verified sender email
-
-> **No code changes needed.** Keep `EMAIL_PROVIDER=ethereal` for local fake SMTP and switch to `EMAIL_PROVIDER=brevo` in
-> production settings.
+Common mistake: confusing the API key (`xkeysib-`) with the SMTP key (`xsmtpsib-`). They look similar but are different
+credentials. Your app already has a startup guard that catches this mistake and exits with a clear error message.
 
 ---
 
-## 12. Phase 7 — Environment Variables & Key Vault Wiring
+### Phase 8: Create `.env.azure` for Local Testing
 
-### 12.1 Create `.env.azure` for Local Testing Against Azure Services
+This lets you test your app locally against all Azure services before deploying. Never commit this file.
 
-This file lets you run your app locally while connected to Azure resources — useful for verifying the connection strings
-before deploying.
-
-Create `.env.azure` in your project root (this file must NEVER be committed to git — add it to `.gitignore`):
+Create `project_root/.env.azure`:
 
 ```env
-# .env.azure — connects local Node.js process to Azure resources
-# DO NOT COMMIT THIS FILE
+# .env.azure — local testing against Azure services
+# ADD TO .gitignore IMMEDIATELY — never commit
 
 NODE_ENV=production
 PORT=3000
@@ -905,118 +575,77 @@ ENV_FILE=.env.azure
 # Azure PostgreSQL
 DATABASE_URL=postgresql://roomiesadmin:YOUR_PASSWORD@roomies-db.postgres.database.azure.com:5432/roomies_db?sslmode=require
 
-# Azure Redis (TLS)
-REDIS_URL=rediss://:YOUR_REDIS_KEY@roomies-redis.redis.cache.windows.net:6380
+# Upstash Redis (Fixed 250MB plan)
+REDIS_URL=rediss://default:YOUR_UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6380
 
-# JWT Secrets (use the same values you put in Key Vault)
-JWT_SECRET=YOUR_GENERATED_JWT_SECRET
-JWT_REFRESH_SECRET=YOUR_GENERATED_JWT_REFRESH_SECRET
+# JWT
+JWT_SECRET=YOUR_JWT_SECRET_FROM_KEYVAULT
+JWT_REFRESH_SECRET=YOUR_JWT_REFRESH_SECRET_FROM_KEYVAULT
 JWT_EXPIRES_IN=15m
 JWT_REFRESH_EXPIRES_IN=7d
 
 # Azure Blob Storage
 STORAGE_ADAPTER=azure
-AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=roomiesblob;AccountKey=...
+AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=roomiesblob;AccountKey=XXXX;EndpointSuffix=core.windows.net
 AZURE_STORAGE_CONTAINER=roomies-uploads
 
-# Email via Brevo SMTP
+# Email
 EMAIL_PROVIDER=brevo
-BREVO_SMTP_LOGIN=YOUR_BREVO_SMTP_LOGIN
-BREVO_SMTP_KEY=YOUR_BREVO_SMTP_KEY
-BREVO_SMTP_FROM=verified-sender@yourdomain.com
+BREVO_SMTP_LOGIN=your-login@smtp-brevo.com
+BREVO_SMTP_KEY=xsmtpsib-xxxxxx
+BREVO_SMTP_FROM=noreply@yourdomain.com
 
-# CORS — for local testing with Azure
+# CORS — allow everything for local testing
 ALLOWED_ORIGINS=http://localhost:5173
 
 # Google OAuth
-GOOGLE_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID
-GOOGLE_CLIENT_SECRET=YOUR_GOOGLE_CLIENT_SECRET
+GOOGLE_CLIENT_ID=YOUR_CLIENT_ID
+GOOGLE_CLIENT_SECRET=YOUR_CLIENT_SECRET
+
+TRUST_PROXY=false
 ```
 
-### 12.2 Verify `.gitignore` Has These Entries
-
-```gitignore
-# Environment files — never commit
-.env
-.env.local
-.env.azure
-.env.*.local
-
-# Uploads directory
-uploads/
-
-# Node modules
-node_modules/
-```
-
-### 12.3 Test Locally with Azure Resources
+Verify it works locally:
 
 ```bash
 npm run dev:azure
-# Starts server with ENV_FILE=.env.azure
-
-# In another terminal, test health:
+# In another terminal:
 curl http://localhost:3000/api/v1/health
-# Should return: {"status":"ok","services":{"database":"ok","redis":"ok"}}
+# Expected: {"status":"ok","services":{"database":"ok","redis":"ok"}}
 ```
 
-If database or Redis shows `unhealthy`, check:
+If the health check fails:
 
-1. Firewall rules — your current IP must be whitelisted in PostgreSQL networking
-2. Redis connection string format — must start with `rediss://`
-3. SSL mode on PostgreSQL — must be `sslmode=require` in the URL
+- `database: "unhealthy"` → your dev machine IP is not whitelisted in PostgreSQL firewall rules. Go to PostgreSQL →
+  Networking → Add your current IP.
+- `redis: "unhealthy"` → verify the Upstash URL format. It must start with `rediss://` (double-s).
 
 ---
 
-## 13. Phase 8 — First Manual Deployment
+## Part 4 — First Deployment
 
-### 13.1 Prepare the Codebase for Deployment
+### Step 1: Prepare the Code
 
-Before deploying, make sure these are in order:
-
-**a) Add a `.deployment` file to your project root** (tells Azure which folder to deploy from):
-
-```ini
-# .deployment
-[config]
-SCM_DO_BUILD_DURING_DEPLOYMENT=true
-```
-
-**b) Verify your `package.json` start script:**
-
-Your current `package.json` has:
-
-```json
-"start": "node src/server.js"
-```
-
-No extra `start:prod` script is required. Keep the **Startup Command** in App Service as `node src/server.js` (already
-done in Phase 10.6).
-
-**c) Add a `.gitignore` for Azure deployment:**
-
-Create `.webignore` in project root (tells Azure's Oryx build system to ignore these):
+Add a `.webignore` to your project root. This tells Azure's Oryx build system what to skip:
 
 ```
 node_modules
 .git
 .env*
 uploads/
+*.zip
 ```
 
-### 13.2 Deploy via Zip Deploy (Manual Method)
+Verify `package.json` already has (it does from your codebase):
 
-This is the simplest manual deployment approach — package your code as a ZIP and push it to Azure.
+```json
+"engines": { "node": ">=22.0.0" }
+```
 
-**Step 1: Build a ZIP of your project (excluding node_modules)**
+### Step 2: Create the Deployment ZIP
 
 ```bash
-# From your project root
-# Make sure you're on the main branch
-git checkout main
-git pull origin main
-
-# Create deployment ZIP (exclude node_modules, .git, .env files, uploads)
+# From project root
 zip -r roomies-deploy.zip . \
   -x "node_modules/*" \
   -x ".git/*" \
@@ -1025,7 +654,7 @@ zip -r roomies-deploy.zip . \
   -x "*.zip"
 ```
 
-**Step 2: Deploy to Azure using CLI**
+### Step 3: Deploy
 
 ```bash
 az webapp deploy \
@@ -1035,75 +664,55 @@ az webapp deploy \
   --type zip
 ```
 
-Azure's **Oryx** build system will:
+Or via the portal:
 
-1. Detect `package.json`
-2. Run `npm install --production` automatically (installs only `dependencies`, not `devDependencies`)
-3. Set the startup command to `node src/server.js`
+1. App Service → **Deployment Center** → **FTPS credentials** tab
+2. Use an FTP client to upload, or
+3. App Service → **Advanced Tools (Kudu)** → **Debug console** → drag-drop files to `site/wwwroot`
 
-**Alternative: Deploy via Azure Portal**
-
-Portal → App Service → **Deployment Center** → **FTPS credentials** tab → use an FTP client  
-Or: App Service → **Advanced tools (Kudu)** → **Debug console** → navigate to `site/wwwroot` and drag-drop files
-
-### 13.3 Monitor Startup Logs
-
-After deployment, watch the logs to confirm the app started correctly:
+### Step 4: Watch the Startup Logs
 
 ```bash
-# Stream live logs from App Service
-az webapp log tail \
-  --resource-group roomies-rg \
-  --name roomies-api
-
-# Or via portal: App Service → Log stream (left menu under Monitoring)
+az webapp log tail --resource-group roomies-rg --name roomies-api
 ```
 
-Expected successful startup output:
+Expected successful output:
 
 ```
 PostgreSQL connected
 Redis connected
 Media processing worker started
 Notification delivery worker started
+Email delivery worker started
+Verification event worker started
 cron:listingExpiry — registered
 cron:expiryWarning — registered
 cron:hardDeleteCleanup — registered
 Server running on port 8080 [production]
 ```
 
-If you see Key Vault reference errors (`Reference to KeyVault Secret failed`), the most common causes are:
+**If you see "Reference to KeyVault Secret failed":**
 
-- Managed Identity not enabled (Phase 10.3)
-- Role assignment not propagated yet (wait 2–5 minutes after assigning)
-- Secret name mismatch (names are case-sensitive)
+- The Managed Identity RBAC propagation takes up to 5 minutes
+- Verify Managed Identity is On in App Service → Identity
+- Verify the Key Vault Secrets User role was assigned to the App Service identity
+- Check for typos in the secret name inside the `@Microsoft.KeyVault(...)` reference
 
 ---
 
-## 14. Phase 9 — Post-Deploy Verification
+## Part 5 — Post-Deployment Verification
 
-Run these checks after the first successful deployment.
+Run these in order. Stop if any fail before moving on.
 
-### 14.1 Health Check
+### 5.1 Health Check
 
 ```bash
 curl https://roomies-api.azurewebsites.net/api/v1/health
 ```
 
-Expected:
+Expected: `{"status":"ok","services":{"database":"ok","redis":"ok"}}`
 
-```json
-{
-	"status": "ok",
-	"timestamp": "2026-04-06T...",
-	"services": {
-		"database": "ok",
-		"redis": "ok"
-	}
-}
-```
-
-### 14.2 Register a Test User
+### 5.2 Test Registration
 
 ```bash
 curl -X POST https://roomies-api.azurewebsites.net/api/v1/auth/register \
@@ -1116,56 +725,57 @@ curl -X POST https://roomies-api.azurewebsites.net/api/v1/auth/register \
   }'
 ```
 
-### 14.3 Verify Photo Upload Pipeline
+Expected: `201` with a `data.user` object and `sid`.
 
-1. Create a test listing via the API
-2. Upload a test photo using `POST /listings/:id/photos`
-3. Check that the `status: "processing"` response comes back quickly (202)
-4. Wait 5–10 seconds and call `GET /listings/:id/photos` — the photo should appear with a blob URL
-5. Open the blob URL in a browser — it should serve the WebP image directly
+### 5.3 Verify Photo Upload Pipeline
 
-### 14.4 Verify Email Sends
+1. Create a listing via API
+2. Upload a photo via `POST /listings/:id/photos` (multipart)
+3. Check the immediate response is `202` with `status: "processing"`
+4. Wait 10 seconds, call `GET /listings/:id/photos`
+5. A photo with a `blob.core.windows.net` URL should appear
+6. Open that URL in a browser — it should serve a WebP image
 
-1. Register a user with a non-institution email address
-2. Call `POST /auth/otp/send` with a valid token
-3. In Brevo dashboard → **Transactional → Logs** — you should see a send event
-4. Check the email is received (use a real email address for this test)
+### 5.4 Verify Email Delivery
 
-### 14.5 Check App Service Application Settings
+1. Register with a real email address
+2. Call `POST /api/v1/auth/otp/send` (requires auth token from registration)
+3. Check Brevo dashboard → **Transactional** → **Logs** for a delivery event
+4. Check your inbox for the OTP email
 
-Verify Key Vault references resolved correctly:  
-Portal → App Service → **Configuration** → look for **Key Vault Reference Status** column  
-All secrets should show a green checkmark and `Resolved` status.
+### 5.5 Check Key Vault Reference Status
+
+Portal → App Service → **Configuration** → look at the **Source** column for your Key Vault references. Each should show
+a green checkmark and **Key vault reference** status. If any show a red error, click on it to see the reason.
 
 ---
 
-## 15. Phase 10 — CI/CD Pipeline (GitHub Actions)
+## Part 6 — CI/CD with GitHub Actions
 
-> **Do this after Phase 9 verification confirms the manual deployment is stable.**
+Do this after manual deployment is stable.
 
-### 15.1 Get the App Service Publish Profile
+### 6.1 Get Publish Profile
 
-Portal → App Service → **Overview** → **Get publish profile** button → save the downloaded `.PublishSettings` file.
+Portal → App Service → **Overview** → **Get publish profile** button → save the file.
 
-### 15.2 Add the Publish Profile as a GitHub Secret
+### 6.2 Add to GitHub Secrets
 
-1. Go to your GitHub repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
-2. Name: `AZURE_WEBAPP_PUBLISH_PROFILE`
-3. Value: Paste the entire contents of the downloaded `.PublishSettings` file
-4. Click **Add secret**
+GitHub repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
 
-### 15.3 Create the GitHub Actions Workflow
+- Name: `AZURE_WEBAPP_PUBLISH_PROFILE`
+- Value: entire contents of the downloaded `.PublishSettings` file
 
-Create `.github/workflows/deploy.yml` in your repo:
+### 6.3 Create Workflow File
+
+Create `.github/workflows/deploy.yml`:
 
 ```yaml
-# .github/workflows/deploy.yml
 name: Deploy to Azure App Service
 
 on:
     push:
         branches:
-            - main # Triggers on every push to main
+            - main
 
 jobs:
     deploy:
@@ -1181,7 +791,7 @@ jobs:
                   node-version: "22"
                   cache: "npm"
 
-            - name: Install dependencies
+            - name: Install production dependencies
               run: npm ci --production
 
             - name: Deploy to Azure Web App
@@ -1192,286 +802,127 @@ jobs:
                   package: .
 ```
 
-### 15.4 How the Pipeline Works
-
-1. You push to `main` branch
-2. GitHub Actions checks out the code
-3. Runs `npm ci --production` (installs only production dependencies)
-4. Deploys the entire working directory to Azure App Service
-5. Azure's Oryx build system detects Node.js and runs `npm install` again server-side (this is fine — it ensures all
-   deps are present)
-6. App Service restarts with the new code
-
-### 15.5 Verify the Pipeline
-
-Make a trivial commit to `main` (e.g., add a comment in `app.js`) and push. Go to **GitHub Actions** tab in your repo
-and watch the workflow run. After it succeeds, hit your health endpoint to confirm the new version is live.
+Push to `main` → GitHub Actions tab → watch the deployment run → hit `/health` to confirm.
 
 ---
 
-## 16. Phase 11 — Frontend (Vercel) CORS Wiring
+## Part 7 — Cost Management
 
-When your React + Vite frontend is deployed on Vercel:
-
-### 16.1 Update ALLOWED_ORIGINS in Key Vault
-
-```bash
-az keyvault secret set \
-  --vault-name roomies-kv \
-  --name "ALLOWED-ORIGINS" \
-  --value "https://your-app-name.vercel.app"
-```
-
-Then restart the App Service for the new value to take effect:
-
-```bash
-az webapp restart --resource-group roomies-rg --name roomies-api
-```
-
-If you have multiple Vercel preview URLs (Vercel creates per-branch URLs), set ALLOWED_ORIGINS to a comma-separated
-list:
-
-```
-https://your-app.vercel.app,https://your-app-git-develop-username.vercel.app
-```
-
-Your `app.js` already handles comma-separated origins correctly:
-
-```javascript
-ALLOWED_ORIGINS: parsed.data.ALLOWED_ORIGINS ? parsed.data.ALLOWED_ORIGINS.split(",").map((o) => o.trim()) : [];
-```
-
-### 16.2 Frontend Environment Variable (Vite)
-
-In your Vercel project settings, add:
-
-```
-VITE_API_BASE_URL=https://roomies-api.azurewebsites.net/api/v1
-```
-
-In your React code, API calls use:
-
-```javascript
-const API_URL = import.meta.env.VITE_API_BASE_URL;
-```
-
----
-
-## 17. Phase 12 — Custom Domain (Future)
-
-When you get a domain via GitHub Education (Namecheap `.me`, or similar):
-
-### 17.1 Add Domain to App Service
-
-Portal → App Service → **Custom domains** → **+ Add custom domain**  
-Follow the wizard — you'll add a CNAME record in your domain registrar's DNS settings pointing to
-`roomies-api.azurewebsites.net`.
-
-### 17.2 Add Free SSL Certificate
-
-Portal → App Service → **Custom domains** → **Add binding** for your domain → choose **App Service Managed Certificate**
-(free, auto-renewing).
-
-### 17.3 Update ALLOWED_ORIGINS
-
-```bash
-az keyvault secret set \
-  --vault-name roomies-kv \
-  --name "ALLOWED-ORIGINS" \
-  --value "https://yourdomain.com,https://www.yourdomain.com,https://your-vercel-app.vercel.app"
-```
-
-### 17.4 Upgrade Brevo Sender Domain
-
-Once you own a domain, add and authenticate it in Brevo for professional sender addresses like `noreply@yourdomain.com`.
-Configure SPF, DKIM, and DMARC at your DNS provider, then switch `BREVO_SMTP_FROM` to the verified address.
-
----
-
-## 18. Code Changes Required Before Deployment
-
-Your codebase is already well-structured for production. These are the only changes needed:
-
-### 18.1 Remove `ENV_FILE` Dependency from Production Path
-
-In `src/config/env.js`, the top of the file does:
-
-```javascript
-const envFile = process.env.ENV_FILE;
-if (envFile) {
-	dotenv.config({ path: envFile });
-} else {
-	dotenv.config({ path: ".env.local" });
-	dotenv.config({ path: ".env" });
-}
-```
-
-In production (Azure App Service), `ENV_FILE` is not set, so dotenv tries `.env.local` and `.env`. Neither file exists
-on App Service (and that's correct — all config comes from Application Settings/Key Vault). `dotenv.config` simply does
-nothing when the file doesn't exist (no error). **No change needed** — this already works correctly in production.
-
-### 18.2 Startup File
-
-Confirmed: `src/server.js` is the entry point. No changes needed. The startup command `node src/server.js` is set
-directly in App Service Configuration.
-
-### 18.3 `package.json` — `engines` Field
-
-Add an `engines` field so Azure's Oryx build system uses the correct Node.js version:
-
-```json
-{
-	"engines": {
-		"node": ">=22.0.0"
-	}
-}
-```
-
-### 18.4 Health Check Endpoint Path
-
-Azure App Service health checks can be configured. Your health endpoint is at `/api/v1/health`. Configure it:
-
-Portal → App Service → **Configuration** → **General settings** → **Health check path** → `/api/v1/health`
-
-This tells Azure to consider the app unhealthy and restart it if the health endpoint returns non-2xx for a set number of
-consecutive checks.
-
-### 18.5 Static File Serving — Only in Dev
-
-In `app.js`:
-
-```javascript
-if (config.STORAGE_ADAPTER === "local") {
-	app.use("/uploads", express.static("uploads"));
-}
-```
-
-This is already guarded correctly — `STORAGE_ADAPTER=azure` in production means the static middleware is never
-registered. **No change needed.**
-
----
-
-## 19. Security Checklist
-
-Review each item before go-live:
-
-- [ ] **No `.env` files committed to git** — verify with `git log --all -- '.env*'`
-- [ ] **PostgreSQL firewall rules** — only your dev IP + Azure Services access. Remove `0.0.0.0` if added during
-      testing.
-- [ ] **Blob container is `blob` public access** (not `container`) — only individual blob URLs are public, not container
-      listing
-- [ ] **HTTPS enforced on App Service** — Portal → App Service → **TLS/SSL settings** → **HTTPS Only: On**
-- [ ] **Key Vault soft-delete enabled** — enabled by default since 2020, but verify
-- [ ] **Managed Identity is the only credential** — App Service accesses Key Vault via Managed Identity, not stored keys
-- [ ] **`DUMMY_HASH` never removed from `auth.service.js`** — timing equalization on unknown email login
-- [ ] **`NODE_ENV=production` set** — this activates secure cookie flags
-      (`httpOnly: true, secure: true, sameSite: 'strict'`)
-- [ ] **`ALLOWED_ORIGINS` set to your Vercel domain only** — not `*`
-- [ ] **Redis TLS enabled** — your connection string starts with `rediss://` (double s)
-- [ ] **PostgreSQL SSL required** — `sslmode=require` in connection string
-- [ ] **App Service Always On: enabled** — prevents cold starts from token expiry
-
----
-
-## 20. Cost Monitoring
-
-### Set Up Budget Alerts
-
-Prevent surprise credit depletion:
+### 7.1 Set Budget Alert
 
 1. Portal → **Cost Management + Billing** → **Budgets** → **+ Add**
-2. Scope: Your subscription
-3. Amount: ₹1,500 (slightly above your ₹1,350 ceiling)
-4. Alert conditions: 80% spent (₹1,200) and 100% spent (₹1,500)
-5. Alert recipients: Your email
+2. Scope: Azure for Students subscription
+3. Amount: ₹3,500
+4. Alert at 80% (₹2,800) and 100% (₹3,500)
+5. Email: your address
 
-### View Current Spend
+### 7.2 Stop PostgreSQL When Not Needed
 
-Portal → **Cost Management** → **Cost analysis** → filter by resource group `roomies-rg`  
-This shows you exactly which service is spending most of your credits.
+When you are not actively working on the project for more than a day:
 
-### Stop DB When Not Needed (Dev Cycle)
+```bash
+az postgres flexible-server stop --resource-group roomies-rg --name roomies-db
+```
 
-Azure PostgreSQL Flexible Server has a **Stop** feature. When stopped, you pay only for storage (not compute). During
-active development gaps or holidays:
+When you resume:
 
-Portal → PostgreSQL server → **Overview** → **Stop**
+```bash
+az postgres flexible-server start --resource-group roomies-rg --name roomies-db
+```
 
-> **Warning:** The server auto-restarts after 7 days if not manually started. When stopped, your App Service will still
-> be running and health checks will fail — set health check notifications to avoid alarm.
+When stopped, you only pay for storage (~₹280/month), not compute (~₹1,043). Over a week-long break, this saves ~₹240.
 
----
+**Warning:** Azure auto-restarts the server after 7 days regardless of your stop command. Set a reminder if you are
+taking a longer break.
 
-## 21. Scaling Path (When Traffic Grows)
+### 7.3 Monitor Spend
 
-When Roomies grows beyond 100 users/day, upgrade in this order:
+```bash
+az resource list --resource-group roomies-rg --output table
+```
 
-| Trigger                                  | Upgrade                                                  | Cost Impact         |
-| ---------------------------------------- | -------------------------------------------------------- | ------------------- |
-| DB CPU consistently > 70%                | PostgreSQL B1ms → B2ms                                   | +₹1,050/month       |
-| Redis OOM errors or high latency         | Redis C0 → C1 (1GB)                                      | +₹1,050/month       |
-| App Service CPU > 80% or memory pressure | B1 → B2 or S1                                            | +₹630–₹1,260/month  |
-| Redis uptime required (SLA needed)       | Redis Basic → Standard                                   | +₹1,050/month       |
-| Multiple backend instances needed        | App Service B1 → S1 (enables deployment slots + scaling) | +₹630/month         |
-| Photo serving is slow globally           | Add Azure CDN in front of Blob Storage                   | ~₹50/month          |
-| Real-time WebSocket (Phase 6)            | Sticky sessions on App Service S2+                       | Tier upgrade needed |
-
-**Note:** You can scale up PostgreSQL and Redis without any downtime (Flexible Server applies SKU changes in-place). App
-Service plan changes are also live with a brief restart.
+Portal → **Cost Management** → **Cost analysis** → filter by `roomies-rg` to see a per-service breakdown.
 
 ---
 
-## Appendix A — All Azure Resource Names Summary
+## Part 8 — Common Issues and Fixes
+
+| Symptom                                        | Cause                              | Fix                                                                                                                   |
+| ---------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `redis: "unhealthy"` on health check           | Wrong REDIS_URL format             | Must start with `rediss://` (not `redis://`)                                                                          |
+| App starts then crashes in < 30s               | Key Vault references not resolving | Check RBAC propagation, wait 5 min, restart app                                                                       |
+| `TypeError: config.GOOGLE_CLIENT_ID undefined` | Missing optional env var           | Add `GOOGLE_CLIENT_ID` to Key Vault if you want OAuth; if not using OAuth yet, the app handles `undefined` gracefully |
+| Photos not processing                          | BullMQ media worker not starting   | Check logs for `Media processing worker started`; verify Redis URL                                                    |
+| `BullMQ BZPOPMIN timeout` errors in logs       | Normal Redis round-trip variance   | Increase `commandTimeout` in ioredis config or ignore — it self-recovers                                              |
+| OTP emails not arriving                        | Brevo sender not verified          | Verify the `BREVO_SMTP_FROM` email address in Brevo → Senders & Domains                                               |
+| `ECONNREFUSED` from PostgreSQL                 | Your dev IP not in firewall        | Portal → PostgreSQL → Networking → Add current client IP                                                              |
+| App works locally but fails on Azure           | `NODE_ENV=production` not set      | Verify `NODE_ENV=production` in App Service settings                                                                  |
+
+---
+
+## Part 9 — All Resource Names Summary
 
 | Resource            | Name              | URL/Endpoint                                                 |
 | ------------------- | ----------------- | ------------------------------------------------------------ |
 | Resource Group      | `roomies-rg`      | —                                                            |
 | PostgreSQL Server   | `roomies-db`      | `roomies-db.postgres.database.azure.com`                     |
 | PostgreSQL Database | `roomies_db`      | —                                                            |
-| Redis Cache         | `roomies-redis`   | `roomies-redis.redis.cache.windows.net:6380`                 |
+| Upstash Redis       | `roomies-redis`   | `YOUR-ENDPOINT.upstash.io:6380`                              |
 | Storage Account     | `roomiesblob`     | `roomiesblob.blob.core.windows.net`                          |
 | Blob Container      | `roomies-uploads` | `https://roomiesblob.blob.core.windows.net/roomies-uploads/` |
 | Key Vault           | `roomies-kv`      | `https://roomies-kv.vault.azure.net/`                        |
 | App Service Plan    | `roomies-plan`    | —                                                            |
 | App Service         | `roomies-api`     | `https://roomies-api.azurewebsites.net`                      |
-| Email Provider      | `Brevo SMTP`      | `smtp-relay.brevo.com:587`                                   |
+| Email Provider      | Brevo SMTP        | `smtp-relay.brevo.com:587`                                   |
 
 ---
 
-## Appendix B — Quick Reference: Useful CLI Commands
+## Part 10 — Quick Reference CLI Commands
 
 ```bash
-# View all resources in the group
-az resource list --resource-group roomies-rg --output table
-
-# Check App Service logs
+# Stream live logs
 az webapp log tail --resource-group roomies-rg --name roomies-api
 
 # Restart App Service
 az webapp restart --resource-group roomies-rg --name roomies-api
 
-# Stop PostgreSQL (save credits during breaks)
-az postgres flexible-server stop --resource-group roomies-rg --name roomies-db
-
-# Start PostgreSQL
+# Stop/start PostgreSQL (saves compute cost during breaks)
+az postgres flexible-server stop  --resource-group roomies-rg --name roomies-db
 az postgres flexible-server start --resource-group roomies-rg --name roomies-db
 
-# Update a Key Vault secret
-az keyvault secret set --vault-name roomies-kv --name "SECRET-NAME" --value "new-value"
+# Update a secret
+az keyvault secret set --vault-name roomies-kv --name "ALLOWED-ORIGINS" \
+  --value "https://your-frontend.vercel.app"
 
-# List Key Vault secrets
-az keyvault secret list --vault-name roomies-kv --output table
+# List all resources
+az resource list --resource-group roomies-rg --output table
 
-# Show current monthly cost estimate
-az consumption usage list --billing-period-name $(date +%Y%m) --output table
+# Redeploy (full cycle)
+zip -r roomies-deploy.zip . -x "node_modules/*" ".git/*" ".env*" "uploads/*" "*.zip"
+az webapp deploy --resource-group roomies-rg --name roomies-api \
+  --src-path roomies-deploy.zip --type zip
 
-# Deploy latest code (zip deploy)
-zip -r roomies-deploy.zip . -x "node_modules/*" -x ".git/*" -x ".env*" -x "uploads/*" -x "*.zip"
-az webapp deploy --resource-group roomies-rg --name roomies-api --src-path roomies-deploy.zip --type zip
+# Run migrations against Azure DB
+ENV_FILE=.env.azure node src/db/migrate.js
+
+# Run amenity seed against Azure DB
+ENV_FILE=.env.azure node src/db/seeds/amenities.js
 ```
 
 ---
 
-_Last updated: April 6, 2026_  
-_Architecture: Central India region, Azure for Students subscription_  
-_Stack version: Node.js 22 LTS, PostgreSQL 16, Redis 6, PostGIS 3.5.2_
+## Appendix — What the Old Deployment.md Got Wrong
+
+| Old plan                                       | Problem                                     | This plan                                     |
+| ---------------------------------------------- | ------------------------------------------- | --------------------------------------------- |
+| Azure Cache for Redis Basic C0 (~₹1,050/month) | Expensive, adds ₹210/month vs better option | Upstash Redis Fixed 250MB ($10 = ~₹840/month) |
+| Upstash free tier                              | BullMQ exhausts 500K commands in <10 days   | Upstash Fixed plan designed for BullMQ        |
+| Total budget ~₹2,875/month                     | Underestimated storage cost                 | ~₹3,302/month (includes P4 SSD storage)       |
+| Docker mention as potential option             | Unnecessary complexity for a Node.js app    | No Docker, direct code deploy via zip         |
+| No mention of migration runner                 | Schema setup unclear                        | Explicit `migrate.js` usage documented        |
+| Missing Upstash setup entirely                 | Redis section only covered Azure            | Full Upstash walkthrough                      |
+
+---
+
+_Guide version: April 2026. Architecture: Central India Azure + Upstash Mumbai. Node.js 22 LTS, PostgreSQL 16 + PostGIS,
+Upstash Fixed Redis._
