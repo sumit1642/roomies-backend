@@ -14,7 +14,6 @@ import { ratingRouter } from "./rating.js";
 import { preferencesRouter } from "./preferences.js";
 import { testUtilsRouter } from "./testUtils.js";
 import { config } from "../config/env.js";
-import { adminRouter } from "./admin.js";
 
 // All feature routers are imported and mounted here as phases are built.
 // Pattern: import → router.use('/path', featureRouter)
@@ -25,7 +24,6 @@ rootRouter.use("/health", healthRouter);
 rootRouter.use("/auth", authRouter);
 rootRouter.use("/students", studentRouter);
 rootRouter.use("/pg-owners", pgOwnerRouter);
-rootRouter.use("/admin", adminRouter);
 rootRouter.use("/properties", propertyRouter);
 rootRouter.use("/listings", listingRouter);
 rootRouter.use("/interests", interestRouter);
