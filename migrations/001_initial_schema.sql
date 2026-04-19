@@ -1,96 +1,60 @@
--- migrations/001_initial_schema.sql
---
--- Initial Roomies schema — canonical first migration.
--- This file is the renamed, versioned form of the original roomies_db_setup.sql.
--- All content is preserved exactly. New schema changes go in subsequent
--- numbered migration files (002_, 003_, ...) rather than modifying this file.
---
--- Idempotent: every statement uses IF NOT EXISTS / CREATE OR REPLACE so it
--- is safe to run again without producing errors or duplicate objects.
---
--- How to run (fresh install):
---   psql "$DATABASE_URL" -f migrations/001_initial_schema.sql
---
--- How to run (migration runner, once implemented):
---   node src/db/migrate.js
-
--- =============================================================================
--- SECTION 1 — EXTENSIONS
--- =============================================================================
-
+-- Active: 1774765370673@@127.0.0.1@5432@roomies_db
 CREATE EXTENSION IF NOT EXISTS postgis;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- =============================================================================
--- SECTION 2 — ENUMS
--- =============================================================================
+DO $$ BEGIN CREATE TYPE account_status_enum AS ENUM ('active', 'suspended', 'banned', 'deactivated');
 
-CREATE TYPE IF NOT EXISTS account_status_enum AS ENUM (
-    'active', 'suspended', 'banned', 'deactivated'
-);
+EXCEPTION WHEN duplicate_object THEN NULL;
 
-CREATE TYPE IF NOT EXISTS role_enum AS ENUM (
-    'student', 'pg_owner', 'admin'
-);
+END $$;
 
-CREATE TYPE IF NOT EXISTS gender_enum AS ENUM (
-    'male', 'female', 'other', 'prefer_not_to_say'
-);
+DO $$ BEGIN CREATE TYPE role_enum AS ENUM ('student', 'pg_owner', 'admin');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS verification_status_enum AS ENUM (
-    'unverified', 'pending', 'verified', 'rejected'
-);
+DO $$ BEGIN CREATE TYPE gender_enum AS ENUM ('male', 'female', 'other', 'prefer_not_to_say');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS listing_type_enum AS ENUM (
-    'student_room', 'pg_room', 'hostel_bed'
-);
+DO $$ BEGIN CREATE TYPE verification_status_enum AS ENUM ('unverified', 'pending', 'verified', 'rejected');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS room_type_enum AS ENUM (
-    'single', 'double', 'triple', 'entire_flat'
-);
+DO $$ BEGIN CREATE TYPE listing_type_enum AS ENUM ('student_room', 'pg_room', 'hostel_bed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS bed_type_enum AS ENUM (
-    'single_bed', 'double_bed', 'bunk_bed'
-);
+DO $$ BEGIN CREATE TYPE room_type_enum AS ENUM ('single', 'double', 'triple', 'entire_flat');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS listing_status_enum AS ENUM (
-    'active', 'filled', 'expired', 'deactivated'
-);
+DO $$ BEGIN CREATE TYPE bed_type_enum AS ENUM ('single_bed', 'double_bed', 'bunk_bed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS property_type_enum AS ENUM (
-    'pg', 'hostel', 'shared_apartment'
-);
+DO $$ BEGIN CREATE TYPE listing_status_enum AS ENUM ('active', 'filled', 'expired', 'deactivated');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS property_status_enum AS ENUM (
-    'active', 'inactive', 'under_review'
-);
+DO $$ BEGIN CREATE TYPE property_type_enum AS ENUM ('pg', 'hostel', 'shared_apartment');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS request_status_enum AS ENUM (
-    'pending', 'accepted', 'declined', 'withdrawn', 'expired'
-);
+DO $$ BEGIN CREATE TYPE property_status_enum AS ENUM ('active', 'inactive', 'under_review');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS confirmation_status_enum AS ENUM (
-    'pending', 'confirmed', 'denied', 'expired'
-);
+DO $$ BEGIN CREATE TYPE request_status_enum AS ENUM ('pending', 'accepted', 'declined', 'withdrawn', 'expired');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS connection_type_enum AS ENUM (
-    'student_roommate', 'pg_stay', 'hostel_stay', 'visit_only'
-);
+DO $$ BEGIN CREATE TYPE confirmation_status_enum AS ENUM ('pending', 'confirmed', 'denied', 'expired');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS reviewee_type_enum AS ENUM (
-    'user', 'property'
-);
+DO $$ BEGIN CREATE TYPE connection_type_enum AS ENUM ('student_roommate', 'pg_stay', 'hostel_stay', 'visit_only');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS report_reason_enum AS ENUM (
-    'fake', 'abusive', 'conflict_of_interest', 'other'
-);
+DO $$ BEGIN CREATE TYPE reviewee_type_enum AS ENUM ('user', 'property');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS report_status_enum AS ENUM (
-    'open', 'resolved_removed', 'resolved_kept'
-);
+DO $$ BEGIN CREATE TYPE report_reason_enum AS ENUM ('fake', 'abusive', 'conflict_of_interest', 'other');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS notification_type_enum AS ENUM (
+DO $$ BEGIN CREATE TYPE report_status_enum AS ENUM ('open', 'resolved_removed', 'resolved_kept');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TYPE notification_type_enum AS ENUM (
     'interest_request_received',
     'interest_request_accepted',
     'interest_request_declined',
@@ -104,19 +68,13 @@ CREATE TYPE IF NOT EXISTS notification_type_enum AS ENUM (
     'verification_approved',
     'verification_rejected',
     'new_message'
-);
+); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS document_type_enum AS ENUM (
-    'property_document', 'rental_agreement', 'owner_id', 'trade_license'
-);
+DO $$ BEGIN CREATE TYPE document_type_enum AS ENUM ('property_document', 'rental_agreement', 'owner_id', 'trade_license');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE TYPE IF NOT EXISTS amenity_category_enum AS ENUM (
-    'utility', 'safety', 'comfort'
-);
-
--- =============================================================================
--- SECTION 3 — SHARED TRIGGER FUNCTIONS
--- =============================================================================
+DO $$ BEGIN CREATE TYPE amenity_category_enum AS ENUM ('utility', 'safety', 'comfort');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE OR REPLACE FUNCTION set_updated_at()
     RETURNS TRIGGER AS $$
@@ -138,10 +96,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- =============================================================================
--- ZONE 1 — IDENTITY ZONE
--- =============================================================================
-
 CREATE TABLE IF NOT EXISTS institutions (
     institution_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
     name VARCHAR(255) NOT NULL,
@@ -161,8 +115,6 @@ WHERE
 CREATE OR REPLACE TRIGGER trg_institutions_updated_at
     BEFORE UPDATE ON institutions
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
--- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS users (
     user_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
@@ -203,8 +155,6 @@ CREATE OR REPLACE TRIGGER trg_users_updated_at
     BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- ─────────────────────────────────────────────────────────────────────────────
-
 CREATE TABLE IF NOT EXISTS user_roles (
     user_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
     role_name role_enum NOT NULL,
@@ -213,8 +163,6 @@ CREATE TABLE IF NOT EXISTS user_roles (
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_roles_role_name ON user_roles (role_name);
-
--- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS student_profiles (
     profile_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
@@ -246,8 +194,6 @@ CREATE OR REPLACE TRIGGER trg_student_profiles_updated_at
     BEFORE UPDATE ON student_profiles
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- ─────────────────────────────────────────────────────────────────────────────
-
 CREATE TABLE IF NOT EXISTS pg_owner_profiles (
     profile_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
     user_id UUID NOT NULL UNIQUE REFERENCES users (user_id) ON DELETE RESTRICT,
@@ -277,8 +223,6 @@ CREATE OR REPLACE TRIGGER trg_pg_owner_profiles_updated_at
     BEFORE UPDATE ON pg_owner_profiles
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- ─────────────────────────────────────────────────────────────────────────────
-
 CREATE TABLE IF NOT EXISTS user_preferences (
     preference_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
     user_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
@@ -299,8 +243,6 @@ CREATE INDEX IF NOT EXISTS idx_user_preferences_key_value ON user_preferences (
 CREATE OR REPLACE TRIGGER trg_user_preferences_updated_at
     BEFORE UPDATE ON user_preferences
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
--- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS verification_requests (
     request_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
@@ -328,10 +270,6 @@ WHERE
     deleted_at IS NULL
     AND status = 'pending';
 
--- =============================================================================
--- ZONE 2 — LISTINGS ZONE
--- =============================================================================
-
 CREATE TABLE IF NOT EXISTS amenities (
     amenity_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
     name VARCHAR(100) NOT NULL UNIQUE,
@@ -344,8 +282,6 @@ CREATE TABLE IF NOT EXISTS amenities (
 CREATE OR REPLACE TRIGGER trg_amenities_updated_at
     BEFORE UPDATE ON amenities
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
--- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS properties (
     property_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
@@ -396,8 +332,6 @@ CREATE OR REPLACE TRIGGER trg_properties_updated_at
     BEFORE UPDATE ON properties
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- ─────────────────────────────────────────────────────────────────────────────
-
 CREATE TABLE IF NOT EXISTS property_amenities (
     property_id UUID NOT NULL REFERENCES properties (property_id) ON DELETE CASCADE,
     amenity_id UUID NOT NULL REFERENCES amenities (amenity_id) ON DELETE RESTRICT,
@@ -405,8 +339,6 @@ CREATE TABLE IF NOT EXISTS property_amenities (
 );
 
 CREATE INDEX IF NOT EXISTS idx_property_amenities_amenity_id ON property_amenities (amenity_id);
-
--- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS listings (
     listing_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
@@ -486,8 +418,6 @@ CREATE OR REPLACE TRIGGER trg_listings_updated_at
     BEFORE UPDATE ON listings
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- ─────────────────────────────────────────────────────────────────────────────
-
 CREATE TABLE IF NOT EXISTS listing_photos (
     photo_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
     listing_id UUID NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
@@ -506,8 +436,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_photos_one_cover ON listing_photos
 WHERE
     is_cover = TRUE
     AND deleted_at IS NULL;
-
--- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS listing_preferences (
     preference_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
@@ -530,8 +458,6 @@ CREATE OR REPLACE TRIGGER trg_listing_preferences_updated_at
     BEFORE UPDATE ON listing_preferences
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- ─────────────────────────────────────────────────────────────────────────────
-
 CREATE TABLE IF NOT EXISTS listing_amenities (
     listing_id UUID NOT NULL REFERENCES listings (listing_id) ON DELETE CASCADE,
     amenity_id UUID NOT NULL REFERENCES amenities (amenity_id) ON DELETE RESTRICT,
@@ -539,8 +465,6 @@ CREATE TABLE IF NOT EXISTS listing_amenities (
 );
 
 CREATE INDEX IF NOT EXISTS idx_listing_amenities_amenity_id ON listing_amenities (amenity_id);
-
--- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS saved_listings (
     user_id UUID NOT NULL REFERENCES users (user_id) ON DELETE RESTRICT,
@@ -557,10 +481,6 @@ WHERE
 CREATE INDEX IF NOT EXISTS idx_saved_listings_listing_id ON saved_listings (listing_id)
 WHERE
     deleted_at IS NULL;
-
--- =============================================================================
--- ZONE 3 — INTERACTION ZONE
--- =============================================================================
 
 CREATE TABLE IF NOT EXISTS interest_requests (
     request_id UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid (),
@@ -589,8 +509,6 @@ WHERE
 CREATE OR REPLACE TRIGGER trg_interest_requests_updated_at
     BEFORE UPDATE ON interest_requests
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
--- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS connections (
     connection_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
@@ -637,8 +555,6 @@ CREATE OR REPLACE TRIGGER trg_connections_updated_at
     BEFORE UPDATE ON connections
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- ─────────────────────────────────────────────────────────────────────────────
-
 CREATE TABLE IF NOT EXISTS notifications (
     notification_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
     actor_id UUID REFERENCES users (user_id) ON DELETE SET NULL,
@@ -661,10 +577,6 @@ WHERE
 CREATE INDEX IF NOT EXISTS idx_notifications_recipient_all ON notifications (recipient_id, created_at DESC)
 WHERE
     deleted_at IS NULL;
-
--- =============================================================================
--- ZONE 4 — REPUTATION ZONE
--- =============================================================================
 
 CREATE TABLE IF NOT EXISTS ratings (
     rating_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
@@ -714,12 +626,10 @@ CREATE OR REPLACE TRIGGER trg_ratings_updated_at
     BEFORE UPDATE ON ratings
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- ─────────────────────────────────────────────────────────────────────────────
-
 CREATE OR REPLACE FUNCTION update_rating_aggregates()
     RETURNS TRIGGER AS $$
 DECLARE
-    v_avg   NUMERIC(3, 2);
+    v_avg NUMERIC(3, 2);
     v_count INTEGER;
 BEGIN
     IF NEW.reviewee_type = 'user' THEN
@@ -758,8 +668,6 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE TRIGGER trg_ratings_update_aggregates
     AFTER INSERT OR UPDATE OF overall_score, is_visible, deleted_at ON ratings
     FOR EACH ROW EXECUTE FUNCTION update_rating_aggregates();
-
--- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS rating_reports (
     report_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
