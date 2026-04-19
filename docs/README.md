@@ -18,7 +18,8 @@ Feature-level API documentation lives in `docs/api/`.
 - `api/auth.md` — registration, login, refresh, OTP, sessions, logout, and Google OAuth flows
 - `api/profiles-and-contact.md` — student and PG owner profiles, contact reveal, and verification document submission
 - `api/properties.md` — property CRUD and ownership rules
-- `api/listings.md` — listing search, CRUD, lifecycle changes, saved listings, preferences, and photo flows
+- `api/listings.api.md` — listing search, CRUD, lifecycle changes, saved listings, preferences, photo flows, and
+  listing-scoped interests
 - `api/interests.md` — interest request creation, dashboards, and transition state machine
 - `api/connections.md` — connection dashboard, detail, and two-sided confirmation
 - `api/notifications.md` — notification feed, unread count, and mark-read modes

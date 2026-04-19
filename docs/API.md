@@ -168,13 +168,15 @@ If there is no next page, `nextCursor` is `null`.
 
 ## Background Jobs That Affect API Behavior
 
-The API process also runs cron jobs. These are not called directly by frontend clients, but they can change what API endpoints return.
+The API process also runs cron jobs. These are not called directly by frontend clients, but they can change what API
+endpoints return.
 
 - Listing expiry cron marks aged listings unavailable/expired.
 - Expiry-warning cron enqueues warning notifications before listing expiry.
 - Hard-delete cleanup cron permanently removes aged soft-deleted rows.
 
-Frontend clients should expect list/detail endpoints to reflect these lifecycle updates between two reads, even when no user action occurred.
+Frontend clients should expect list/detail endpoints to reflect these lifecycle updates between two reads, even when no
+user action occurred.
 
 ## How To Read The Feature Docs
 
@@ -192,7 +194,7 @@ Each feature doc includes:
 - [Auth](./api/auth.md)
 - [Profiles and Contact Reveal](./api/profiles-and-contact.md)
 - [Properties](./api/properties.md)
-- [Listings](./api/listings.md)
+- [Listings](./api/listings.api.md)
 - [Interests](./api/interests.md)
 - [Connections](./api/connections.md)
 - [Notifications](./api/notifications.md)
