@@ -557,3 +557,125 @@ export const sendVerificationRejectedEmail = async (to, ownerName, rejectionReas
 		throw new AppError("Failed to send verification rejected email — try again shortly", 502);
 	}
 };
+
+// ─── Verification pending / received email ────────────────────────────────────
+//
+// Sent to a PG owner immediately after they submit a verification document and
+// the status transitions to 'pending'. The purpose is a simple acknowledgement:
+// "We got your documents, an admin will review them shortly." This prevents
+// the owner from thinking their submission was lost and spamming resubmissions.
+export const sendVerificationPendingEmail = async (to, ownerName, businessName) => {
+	if (!to || typeof to !== "string" || !to.includes("@")) {
+		throw new AppError("Invalid recipient email address", 400);
+	}
+	if (!ownerName || typeof ownerName !== "string") {
+		throw new AppError("ownerName is required for verification pending email", 400);
+	}
+
+	const maskedTo = maskEmail(to);
+	const fromAddress = getSenderAddress();
+	const displayBusiness = businessName ?? "your business";
+
+	logger.info({ to: maskedTo, provider: activeEmailProvider }, "Preparing verification pending email");
+
+	try {
+		const info = await transport.sendMail({
+			from: fromAddress,
+			to,
+			subject: "We received your Roomies verification documents",
+			text:
+				`Hi ${ownerName},\n\n` +
+				`Thank you for submitting verification documents for ${displayBusiness} on Roomies.\n\n` +
+				`Our team has received your submission and will review it within 2–3 business days. ` +
+				`We will email you as soon as a decision has been made.\n\n` +
+				`If you have any questions in the meantime, please contact our support team.\n\n` +
+				`— The Roomies Team`,
+			html: `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Documents Received — Roomies</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f4f4f5; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background-color:#f4f4f5; padding:40px 16px;">
+    <tr>
+      <td align="center">
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:480px; background-color:#ffffff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.08); overflow:hidden;">
+ 
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#18181b; padding:28px 40px 24px;">
+              <p style="margin:0; font-size:22px; font-weight:700; color:#ffffff; letter-spacing:-0.3px;">Roomies</p>
+              <p style="margin:6px 0 0; font-size:13px; color:#a1a1aa;">Find your perfect PG or roommate</p>
+            </td>
+          </tr>
+ 
+          <!-- Body -->
+          <tr>
+            <td style="padding:36px 40px 32px;">
+              <p style="margin:0 0 8px; font-size:22px;">📋</p>
+              <p style="margin:0 0 8px; font-size:16px; font-weight:600; color:#18181b;">Documents received</p>
+              <p style="margin:0 0 20px; font-size:14px; line-height:1.6; color:#52525b;">
+                Hi ${ownerName}, we've received the verification documents for
+                <strong>${displayBusiness}</strong>.
+              </p>
+ 
+              <!-- Status box -->
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:24px;">
+                <tr>
+                  <td style="background-color:#fefce8; border-left:3px solid #eab308; border-radius:4px; padding:16px 20px;">
+                    <p style="margin:0 0 4px; font-size:11px; font-weight:600; letter-spacing:1px; text-transform:uppercase; color:#a16207;">Status</p>
+                    <p style="margin:0; font-size:14px; color:#18181b; font-weight:600;">Under review</p>
+                    <p style="margin:4px 0 0; font-size:13px; color:#71717a; line-height:1.5;">
+                      Our team will review your submission within 2–3 business days.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+ 
+              <p style="margin:0 0 8px; font-size:14px; line-height:1.6; color:#52525b;">
+                You will receive another email as soon as a decision has been made.
+                No further action is required from you at this time.
+              </p>
+            </td>
+          </tr>
+ 
+          <!-- Footer -->
+          <tr>
+            <td style="background-color:#fafafa; border-top:1px solid #f0f0f0; padding:20px 40px;">
+              <p style="margin:0; font-size:12px; color:#a1a1aa; line-height:1.5;">
+                This is an automated message from Roomies. Please do not reply to this email.
+              </p>
+            </td>
+          </tr>
+ 
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+            `,
+		});
+
+		const previewUrl = nodemailer.getTestMessageUrl(info);
+		if (previewUrl) {
+			logger.info({ to: maskedTo, previewUrl }, "Verification pending email sent (Ethereal preview)");
+		} else {
+			logger.info(
+				{ to: maskedTo, messageId: info.messageId, provider: config.EMAIL_PROVIDER },
+				"Verification pending email sent",
+			);
+		}
+
+		return info.messageId;
+	} catch (err) {
+		logger.error(
+			{ to: maskedTo, provider: config.EMAIL_PROVIDER, errCode: err.code, errMessage: err.message },
+			"Failed to send verification pending email",
+		);
+		throw new AppError("Failed to send verification pending email — try again shortly", 502);
+	}
+};

@@ -9,6 +9,11 @@
 		"start": "node src/server.js",
 		"start:azure": "ENV_FILE=.env.azure node src/server.js",
 		"seed:amenities": "ENV_FILE=.env.local node src/db/seeds/amenities.js",
+		"migrate": "node src/db/migrate.js",
+		"migrate:azure": "ENV_FILE=.env.azure node src/db/migrate.js",
+		"migrate:status": "node src/db/migrate.js --status",
+		"migrate:status:azure": "ENV_FILE=.env.azure node src/db/migrate.js --status",
+		"migrate:dry-run": "node src/db/migrate.js --dry-run",
 		"test": "node --experimental-vm-modules node_modules/.bin/jest"
 	},
 	"keywords": [],

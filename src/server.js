@@ -1,6 +1,7 @@
 // src/server.js
-// Bootstrap: connects PostgreSQL, Redis, the media worker, and the notification
-// worker, registers cron maintenance jobs, starts the HTTP server, and tears
+//
+// Bootstrap: connects PostgreSQL, Redis, all BullMQ workers, the CDC outbox
+// drainer, and cron maintenance jobs, then starts the HTTP server. Tears
 // everything down cleanly in dependency-reverse order on SIGINT/SIGTERM.
 
 import "./config/env.js";
@@ -12,12 +13,13 @@ import { logger } from "./logger/index.js";
 import { config } from "./config/env.js";
 import { startMediaWorker } from "./workers/mediaProcessor.js";
 import { startNotificationWorker } from "./workers/notificationWorker.js";
+import { startEmailWorker } from "./workers/emailWorker.js";
+import { startVerificationEventWorker } from "./workers/verificationEventWorker.js";
 import { closeAllQueues } from "./workers/queue.js";
 import { closeRateLimitRedisClient } from "./middleware/rateLimiter.js";
 import { registerListingExpiryCron } from "./cron/listingExpiry.js";
 import { registerExpiryWarningCron } from "./cron/expiryWarning.js";
 import { registerHardDeleteCleanupCron } from "./cron/hardDeleteCleanup.js";
-import { startEmailWorker } from "./workers/emailWorker.js";
 
 const start = async () => {
 	try {
@@ -27,35 +29,49 @@ const start = async () => {
 		await connectRedis();
 		logger.info("Redis connected");
 
-		// Both workers must start after Redis is ready — BullMQ uses Redis as its
-		// backing store. Store both instances so shutdown can call .close() on each
-		// before Redis disconnects.
+		// ── BullMQ workers ────────────────────────────────────────────────────
+		// All workers start after Redis is ready — BullMQ uses Redis as its
+		// backing store. Each returns a handle used for clean shutdown.
 		const mediaWorker = startMediaWorker();
 		const notificationWorker = startNotificationWorker();
 		const emailWorker = startEmailWorker();
 
-		// ── Cron jobs ─────────────────────────────────────────────────────────────
-		// Cron jobs are registered after Redis and the DB are confirmed healthy.
-		// Each register* function returns a node-cron ScheduledTask so we can call
-		// task.stop() during graceful shutdown.
+		// ── CDC outbox drainer ────────────────────────────────────────────────
+		// The verification event worker polls the verification_event_outbox table
+		// (written by the Postgres trigger trg_verification_status_changed) and
+		// dispatches in-app notifications + emails for verification status changes.
+		// Crucially, this worker fires regardless of whether the DB change came
+		// from the API or from a direct SQL script — the trigger doesn't care.
+		const verificationEventWorker = startVerificationEventWorker();
+
+		// ── Cron jobs ─────────────────────────────────────────────────────────
+		// Registered after Redis and DB are confirmed healthy. Each register*
+		// function returns a node-cron ScheduledTask for clean task.stop() on
+		// shutdown.
 		const cronTasks = [registerListingExpiryCron(), registerExpiryWarningCron(), registerHardDeleteCleanupCron()];
 
 		const server = app.listen(config.PORT, () => {
 			logger.info(`Server running on port ${config.PORT} [${config.NODE_ENV}]`);
 		});
 
-		// ─── Re-entrancy guard ────────────────────────────────────────────────────
+		// ── Re-entrancy guard ─────────────────────────────────────────────────
 		let isShuttingDown = false;
 
-		// Shutdown order: HTTP (start drain) → cron → workers → queues →
-		//                 rate-limit Redis → PostgreSQL → Redis → exit.
+		// Shutdown order:
+		//   1. Stop accepting new HTTP connections (server.close)
+		//   2. Stop cron so no new maintenance work starts
+		//   3. Await HTTP drain completion
+		//   4. Close BullMQ workers (drain in-flight jobs)
+		//   5. Stop the CDC outbox drainer (polling loop)
+		//   6. Close BullMQ queue registry (Redis connections)
+		//   7. Close rate-limit Redis client
+		//   8. Close PostgreSQL pool
+		//   9. Close main Redis connection
+		//   10. Exit
 		//
-		// Cron tasks are stopped IMMEDIATELY after initiating server.close() but
-		// BEFORE awaiting the server drain to complete. This is important: a cron
-		// job that fires while we are waiting for in-flight HTTP requests to drain
-		// could enqueue new BullMQ jobs AFTER the workers have started closing.
-		// Stopping cron first closes that window. The server.close() drain proceeds
-		// concurrently — HTTP handlers still finish, but no new cron work starts.
+		// Cron is stopped before awaiting HTTP drain (step 2 before step 3) to
+		// close the window where a cron job could fire and enqueue new BullMQ
+		// jobs after the workers have already started closing.
 		const shutdown = (signal) => async () => {
 			if (isShuttingDown) {
 				logger.warn(`${signal} received again during shutdown — ignoring duplicate signal`);
@@ -66,26 +82,18 @@ const start = async () => {
 			logger.info(`${signal} received — shutting down gracefully`);
 			let serverCloseFailed = false;
 
+			// Force exit if graceful shutdown takes longer than 10 seconds.
 			setTimeout(() => {
 				logger.fatal("Shutdown timeout exceeded — forcing exit");
 				process.exit(1);
 			}, 10_000).unref();
 
-			// Step 1: Begin draining HTTP connections. server.close() stops accepting
-			// new connections but lets in-flight requests finish. We do NOT await it
-			// yet — we stop cron first (see rationale above).
+			// Step 1: begin draining HTTP connections.
 			const serverClosePromise = new Promise((resolve, reject) => {
-				server.close((err) => {
-					if (err) reject(err);
-					else resolve();
-				});
+				server.close((err) => (err ? reject(err) : resolve()));
 			});
 
-			// Step 2: Stop cron jobs immediately so no new maintenance work starts
-			// while the rest of the shutdown is in progress. node-cron.stop() is
-			// synchronous — it cancels future ticks but does not interrupt a job
-			// that is currently executing. Those will complete or be abandoned when
-			// the process exits via the 10-second timeout above.
+			// Step 2: stop cron jobs immediately.
 			for (const task of cronTasks) {
 				try {
 					task.stop();
@@ -95,7 +103,7 @@ const start = async () => {
 			}
 			logger.info("Cron jobs stopped");
 
-			// Step 3: Await the HTTP server drain now that cron is stopped.
+			// Step 3: await HTTP drain.
 			try {
 				await serverClosePromise;
 				logger.info("HTTP server closed");
@@ -104,59 +112,58 @@ const start = async () => {
 				logger.error({ err }, "Error closing HTTP server — continuing shutdown cleanup");
 			}
 
-			// Step 4: Close BullMQ workers (drain in-flight jobs, then disconnect).
-			try {
-				await mediaWorker.close();
-				logger.info("Media worker closed");
-			} catch (workerErr) {
-				logger.error({ err: workerErr }, "Error closing media worker");
+			// Step 4: close BullMQ workers.
+			for (const [name, worker] of [
+				["Media", mediaWorker],
+				["Notification", notificationWorker],
+				["Email", emailWorker],
+			]) {
+				try {
+					await worker.close();
+					logger.info(`${name} worker closed`);
+				} catch (err) {
+					logger.error({ err }, `Error closing ${name} worker`);
+				}
 			}
 
+			// Step 5: stop the CDC outbox drainer (synchronous — just clears the interval).
 			try {
-				await notificationWorker.close();
-				logger.info("Notification worker closed");
-			} catch (workerErr) {
-				logger.error({ err: workerErr }, "Error closing notification worker");
+				verificationEventWorker.close();
+				logger.info("Verification event worker stopped");
+			} catch (err) {
+				logger.error({ err }, "Error stopping verification event worker");
 			}
 
-			try {
-				await emailWorker.close();
-				logger.info("Email worker closed");
-			} catch (workerErr) {
-				logger.error({ err: workerErr }, "Error closing email worker");
-			}
-
-			// Step 5: Close BullMQ queues (Redis connections used by the queue registry).
+			// Step 6: close BullMQ queue registry.
 			try {
 				await closeAllQueues();
 				logger.info("BullMQ queues closed");
-			} catch (queueErr) {
-				logger.error({ err: queueErr }, "Error closing BullMQ queues");
+			} catch (err) {
+				logger.error({ err }, "Error closing BullMQ queues");
 			}
 
-			// Step 6: Close the dedicated rate-limit Redis client. Without this the
-			// socket stays open and Node will not exit cleanly.
+			// Step 7: close rate-limit Redis client.
 			try {
 				await closeRateLimitRedisClient();
 				logger.info("Rate-limit Redis client closed");
-			} catch (rateLimitRedisErr) {
-				logger.error({ err: rateLimitRedisErr }, "Error closing rate-limit Redis client");
+			} catch (err) {
+				logger.error({ err }, "Error closing rate-limit Redis client");
 			}
 
-			// Step 7: Close the PostgreSQL pool.
+			// Step 8: close PostgreSQL pool.
 			try {
 				await pool.end();
 				logger.info("PostgreSQL pool closed");
-			} catch (poolErr) {
-				logger.error({ err: poolErr }, "Error closing PostgreSQL pool");
+			} catch (err) {
+				logger.error({ err }, "Error closing PostgreSQL pool");
 			}
 
-			// Step 8: Close the main Redis connection (used by sessions, BullMQ store).
+			// Step 9: close main Redis connection.
 			try {
 				await redis.close();
 				logger.info("Redis connection closed");
-			} catch (redisErr) {
-				logger.error({ err: redisErr }, "Error closing Redis connection");
+			} catch (err) {
+				logger.error({ err }, "Error closing Redis connection");
 			}
 
 			logger.info("Shutdown complete");
