@@ -1,6 +1,7 @@
 # Auth API
 
-This document covers account creation, login, token refresh, OTP verification, session management, logout, and Google OAuth.
+This document covers account creation, login, token refresh, OTP verification, session management, logout, and Google
+OAuth.
 
 Shared response and error conventions live in [conventions.md](./conventions.md).
 
@@ -20,15 +21,15 @@ Creates a new student or PG owner account and immediately starts a signed-in ses
 - Auth required: No
 - Rate limited: Yes, via the auth limiter
 - Headers:
-  - Optional: `X-Client-Transport: bearer`
+    - Optional: `X-Client-Transport: bearer`
 - Body:
 
 ```json
 {
-  "email": "priya@iitb.ac.in",
-  "password": "Pass1234",
-  "role": "student",
-  "fullName": "Priya Sharma"
+	"email": "priya@iitb.ac.in",
+	"password": "Pass1234",
+	"role": "student",
+	"fullName": "Priya Sharma"
 }
 ```
 
@@ -36,11 +37,11 @@ PG owner registration adds `businessName`:
 
 ```json
 {
-  "email": "owner@sunrisepg.in",
-  "password": "Owner1234",
-  "role": "pg_owner",
-  "fullName": "Rohan Mehta",
-  "businessName": "Sunrise PG"
+	"email": "owner@sunrisepg.in",
+	"password": "Owner1234",
+	"role": "pg_owner",
+	"fullName": "Rohan Mehta",
+	"businessName": "Sunrise PG"
 }
 ```
 
@@ -50,10 +51,10 @@ Request:
 
 ```json
 {
-  "email": "priya@iitb.ac.in",
-  "password": "Pass1234",
-  "role": "student",
-  "fullName": "Priya Sharma"
+	"email": "priya@iitb.ac.in",
+	"password": "Pass1234",
+	"role": "student",
+	"fullName": "Priya Sharma"
 }
 ```
 
@@ -63,20 +64,21 @@ Cookie-mode response body:
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "user": {
-      "userId": "11111111-1111-4111-8111-111111111111",
-      "email": "priya@iitb.ac.in",
-      "roles": ["student"],
-      "isEmailVerified": true
-    },
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-  }
+	"status": "success",
+	"data": {
+		"user": {
+			"userId": "11111111-1111-4111-8111-111111111111",
+			"email": "priya@iitb.ac.in",
+			"roles": ["student"],
+			"isEmailVerified": true
+		},
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	}
 }
 ```
 
-Explanation: the service matches the email domain to a known institution and marks the user verified inside the registration transaction.
+Explanation: the service matches the email domain to a known institution and marks the user verified inside the
+registration transaction.
 
 ### Scenario: Student registers with non-institution email and must verify later
 
@@ -84,10 +86,10 @@ Request:
 
 ```json
 {
-  "email": "arjun@roomies-test.in",
-  "password": "Pass1234",
-  "role": "student",
-  "fullName": "Arjun Rao"
+	"email": "arjun@roomies-test.in",
+	"password": "Pass1234",
+	"role": "student",
+	"fullName": "Arjun Rao"
 }
 ```
 
@@ -97,18 +99,18 @@ Bearer-mode response body:
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.access",
-    "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh",
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    "user": {
-      "userId": "11111111-1111-4111-8111-111111111111",
-      "email": "arjun@roomies-test.in",
-      "roles": ["student"],
-      "isEmailVerified": false
-    }
-  }
+	"status": "success",
+	"data": {
+		"accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.access",
+		"refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh",
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"user": {
+			"userId": "11111111-1111-4111-8111-111111111111",
+			"email": "arjun@roomies-test.in",
+			"roles": ["student"],
+			"isEmailVerified": false
+		}
+	}
 }
 ```
 
@@ -120,11 +122,11 @@ Request:
 
 ```json
 {
-  "email": "owner@sunrisepg.in",
-  "password": "Owner1234",
-  "role": "pg_owner",
-  "fullName": "Rohan Mehta",
-  "businessName": "Sunrise PG"
+	"email": "owner@sunrisepg.in",
+	"password": "Owner1234",
+	"role": "pg_owner",
+	"fullName": "Rohan Mehta",
+	"businessName": "Sunrise PG"
 }
 ```
 
@@ -132,16 +134,16 @@ Status: `201`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "user": {
-      "userId": "22222222-2222-4222-8222-222222222222",
-      "email": "owner@sunrisepg.in",
-      "roles": ["pg_owner"],
-      "isEmailVerified": false
-    },
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-  }
+	"status": "success",
+	"data": {
+		"user": {
+			"userId": "22222222-2222-4222-8222-222222222222",
+			"email": "owner@sunrisepg.in",
+			"roles": ["pg_owner"],
+			"isEmailVerified": false
+		},
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	}
 }
 ```
 
@@ -151,8 +153,8 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Business name is required for PG owner registration"
+	"status": "error",
+	"message": "Business name is required for PG owner registration"
 }
 ```
 
@@ -162,10 +164,10 @@ Request:
 
 ```json
 {
-  "email": "not-an-email",
-  "password": "short",
-  "role": "student",
-  "fullName": "P"
+	"email": "not-an-email",
+	"password": "short",
+	"role": "student",
+	"fullName": "P"
 }
 ```
 
@@ -173,22 +175,22 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Validation failed",
-  "errors": [
-    {
-      "field": "body.email",
-      "message": "Must be a valid email address"
-    },
-    {
-      "field": "body.password",
-      "message": "Password must be at least 8 characters"
-    },
-    {
-      "field": "body.fullName",
-      "message": "Full name must be at least 2 characters"
-    }
-  ]
+	"status": "error",
+	"message": "Validation failed",
+	"errors": [
+		{
+			"field": "body.email",
+			"message": "Must be a valid email address"
+		},
+		{
+			"field": "body.password",
+			"message": "Password must be at least 8 characters"
+		},
+		{
+			"field": "body.fullName",
+			"message": "Full name must be at least 2 characters"
+		}
+	]
 }
 ```
 
@@ -198,8 +200,8 @@ Status: `409`
 
 ```json
 {
-  "status": "error",
-  "message": "An account with this email already exists"
+	"status": "error",
+	"message": "An account with this email already exists"
 }
 ```
 
@@ -211,8 +213,8 @@ Authenticates an existing email/password account and creates a new session.
 
 ```json
 {
-  "email": "priya@iitb.ac.in",
-  "password": "Pass1234"
+	"email": "priya@iitb.ac.in",
+	"password": "Pass1234"
 }
 ```
 
@@ -222,16 +224,16 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "user": {
-      "userId": "11111111-1111-4111-8111-111111111111",
-      "email": "priya@iitb.ac.in",
-      "roles": ["student"],
-      "isEmailVerified": true
-    },
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-  }
+	"status": "success",
+	"data": {
+		"user": {
+			"userId": "11111111-1111-4111-8111-111111111111",
+			"email": "priya@iitb.ac.in",
+			"roles": ["student"],
+			"isEmailVerified": true
+		},
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	}
 }
 ```
 
@@ -249,18 +251,18 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.access",
-    "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh",
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    "user": {
-      "userId": "11111111-1111-4111-8111-111111111111",
-      "email": "priya@iitb.ac.in",
-      "roles": ["student"],
-      "isEmailVerified": true
-    }
-  }
+	"status": "success",
+	"data": {
+		"accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.access",
+		"refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh",
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"user": {
+			"userId": "11111111-1111-4111-8111-111111111111",
+			"email": "priya@iitb.ac.in",
+			"roles": ["student"],
+			"isEmailVerified": true
+		}
+	}
 }
 ```
 
@@ -270,8 +272,8 @@ Status: `401`
 
 ```json
 {
-  "status": "error",
-  "message": "Invalid credentials"
+	"status": "error",
+	"message": "Invalid credentials"
 }
 ```
 
@@ -281,8 +283,8 @@ Status: `401`
 
 ```json
 {
-  "status": "error",
-  "message": "Account is suspended"
+	"status": "error",
+	"message": "Account is suspended"
 }
 ```
 
@@ -302,7 +304,7 @@ Bearer/mobile request example:
 
 ```json
 {
-  "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh"
+	"refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh"
 }
 ```
 
@@ -312,16 +314,16 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "user": {
-      "userId": "11111111-1111-4111-8111-111111111111",
-      "email": "priya@iitb.ac.in",
-      "roles": ["student"],
-      "isEmailVerified": true
-    },
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-  }
+	"status": "success",
+	"data": {
+		"user": {
+			"userId": "11111111-1111-4111-8111-111111111111",
+			"email": "priya@iitb.ac.in",
+			"roles": ["student"],
+			"isEmailVerified": true
+		},
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	}
 }
 ```
 
@@ -339,7 +341,7 @@ Request:
 
 ```json
 {
-  "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh"
+	"refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh"
 }
 ```
 
@@ -347,18 +349,18 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.new-access",
-    "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.new-refresh",
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    "user": {
-      "userId": "11111111-1111-4111-8111-111111111111",
-      "email": "priya@iitb.ac.in",
-      "roles": ["student"],
-      "isEmailVerified": true
-    }
-  }
+	"status": "success",
+	"data": {
+		"accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.new-access",
+		"refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.new-refresh",
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"user": {
+			"userId": "11111111-1111-4111-8111-111111111111",
+			"email": "priya@iitb.ac.in",
+			"roles": ["student"],
+			"isEmailVerified": true
+		}
+	}
 }
 ```
 
@@ -368,8 +370,8 @@ Status: `401`
 
 ```json
 {
-  "status": "error",
-  "message": "Refresh token is required"
+	"status": "error",
+	"message": "Refresh token is required"
 }
 ```
 
@@ -379,8 +381,8 @@ Status: `401`
 
 ```json
 {
-  "status": "error",
-  "message": "Refresh token is invalid or has been revoked"
+	"status": "error",
+	"message": "Refresh token is invalid or has been revoked"
 }
 ```
 
@@ -390,8 +392,8 @@ Status: `401`
 
 ```json
 {
-  "status": "error",
-  "message": "Account inactive"
+	"status": "error",
+	"message": "Account inactive"
 }
 ```
 
@@ -407,7 +409,7 @@ Bearer/mobile request example:
 
 ```json
 {
-  "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh"
+	"refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh"
 }
 ```
 
@@ -417,8 +419,8 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "message": "Logged out"
+	"status": "success",
+	"message": "Logged out"
 }
 ```
 
@@ -428,8 +430,8 @@ Status: `401`
 
 ```json
 {
-  "status": "error",
-  "message": "Refresh token is required"
+	"status": "error",
+	"message": "Refresh token is required"
 }
 ```
 
@@ -439,8 +441,8 @@ Status: `401`
 
 ```json
 {
-  "status": "error",
-  "message": "Session not found or already revoked"
+	"status": "error",
+	"message": "Session not found or already revoked"
 }
 ```
 
@@ -454,8 +456,8 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "message": "Logged out"
+	"status": "success",
+	"message": "Logged out"
 }
 ```
 
@@ -465,8 +467,8 @@ Status: `403`
 
 ```json
 {
-  "status": "error",
-  "message": "Refresh token does not belong to current user"
+	"status": "error",
+	"message": "Refresh token does not belong to current user"
 }
 ```
 
@@ -476,8 +478,8 @@ Status: `403`
 
 ```json
 {
-  "status": "error",
-  "message": "Refresh token session does not match the authenticated session"
+	"status": "error",
+	"message": "Refresh token session does not match the authenticated session"
 }
 ```
 
@@ -491,8 +493,8 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "message": "Logged out from all sessions"
+	"status": "success",
+	"message": "Logged out from all sessions"
 }
 ```
 
@@ -506,21 +508,21 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": [
-    {
-      "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      "isCurrent": true,
-      "expiresAt": "2026-04-18T09:45:00.000Z",
-      "issuedAt": "2026-04-11T09:45:00.000Z"
-    },
-    {
-      "sid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-      "isCurrent": false,
-      "expiresAt": "2026-04-17T18:00:00.000Z",
-      "issuedAt": "2026-04-10T18:00:00.000Z"
-    }
-  ]
+	"status": "success",
+	"data": [
+		{
+			"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			"isCurrent": true,
+			"expiresAt": "2026-04-18T09:45:00.000Z",
+			"issuedAt": "2026-04-11T09:45:00.000Z"
+		},
+		{
+			"sid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+			"isCurrent": false,
+			"expiresAt": "2026-04-17T18:00:00.000Z",
+			"issuedAt": "2026-04-10T18:00:00.000Z"
+		}
+	]
 }
 ```
 
@@ -532,7 +534,7 @@ Revokes a specific session ID.
 
 - Auth required: Yes
 - Path param:
-  - `sid` must be a UUID
+    - `sid` must be a UUID
 
 ### Scenario: revoke another device session
 
@@ -540,8 +542,8 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "message": "Session revoked"
+	"status": "success",
+	"message": "Session revoked"
 }
 ```
 
@@ -551,8 +553,8 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "message": "Session revoked"
+	"status": "success",
+	"message": "Session revoked"
 }
 ```
 
@@ -564,14 +566,14 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Validation failed",
-  "errors": [
-    {
-      "field": "params.sid",
-      "message": "sid must be a valid UUID"
-    }
-  ]
+	"status": "error",
+	"message": "Validation failed",
+	"errors": [
+		{
+			"field": "params.sid",
+			"message": "sid must be a valid UUID"
+		}
+	]
 }
 ```
 
@@ -581,8 +583,8 @@ Status: `404`
 
 ```json
 {
-  "status": "error",
-  "message": "Session not found"
+	"status": "error",
+	"message": "Session not found"
 }
 ```
 
@@ -602,8 +604,8 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "message": "OTP sent to your email"
+	"status": "success",
+	"message": "OTP sent to your email"
 }
 ```
 
@@ -613,8 +615,8 @@ Status: `409`
 
 ```json
 {
-  "status": "error",
-  "message": "Email is already verified"
+	"status": "error",
+	"message": "Email is already verified"
 }
 ```
 
@@ -624,8 +626,8 @@ Status: `502`
 
 ```json
 {
-  "status": "error",
-  "message": "Failed to send OTP email — try again shortly"
+	"status": "error",
+	"message": "Failed to send OTP email — try again shortly"
 }
 ```
 
@@ -637,7 +639,7 @@ Verifies the latest OTP for the authenticated user and marks the account email a
 
 ```json
 {
-  "otp": "123456"
+	"otp": "123456"
 }
 ```
 
@@ -647,8 +649,8 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "message": "Email verified successfully"
+	"status": "success",
+	"message": "Email verified successfully"
 }
 ```
 
@@ -658,8 +660,8 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Incorrect OTP — 4 attempts remaining"
+	"status": "error",
+	"message": "Incorrect OTP — 4 attempts remaining"
 }
 ```
 
@@ -669,8 +671,8 @@ Status: `429`
 
 ```json
 {
-  "status": "error",
-  "message": "Too many incorrect attempts — request a new OTP"
+	"status": "error",
+	"message": "Too many incorrect attempts — request a new OTP"
 }
 ```
 
@@ -680,8 +682,8 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "OTP has expired or was never sent — request a new one"
+	"status": "error",
+	"message": "OTP has expired or was never sent — request a new one"
 }
 ```
 
@@ -691,8 +693,8 @@ Status: `429`
 
 ```json
 {
-  "status": "error",
-  "message": "Too many OTP verification attempts from this IP — please wait 15 minutes"
+	"status": "error",
+	"message": "Too many OTP verification attempts from this IP — please wait 15 minutes"
 }
 ```
 
@@ -702,8 +704,8 @@ Status: `429`
 
 ```json
 {
-  "status": "error",
-  "message": "OTP verification is temporarily unavailable"
+	"status": "error",
+	"message": "OTP verification is temporarily unavailable"
 }
 ```
 
@@ -717,20 +719,21 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "userId": "11111111-1111-4111-8111-111111111111",
-    "email": "priya@iitb.ac.in",
-    "roles": ["student"],
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    "isEmailVerified": true
-  }
+	"status": "success",
+	"data": {
+		"userId": "11111111-1111-4111-8111-111111111111",
+		"email": "priya@iitb.ac.in",
+		"roles": ["student"],
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"isEmailVerified": true
+	}
 }
 ```
 
 ## `POST /auth/google/callback`
 
-Accepts a Google ID token issued on the client, verifies it server-side, then either signs in an existing user, links an existing email/password account, or creates a new account.
+Accepts a Google ID token issued on the client, verifies it server-side, then either signs in an existing user, links an
+existing email/password account, or creates a new account.
 
 ### Request Contract
 
@@ -740,10 +743,10 @@ Accepts a Google ID token issued on the client, verifies it server-side, then ei
 
 ```json
 {
-  "idToken": "google-id-token-from-client",
-  "role": "student",
-  "fullName": "Priya Sharma",
-  "businessName": "Sunrise PG"
+	"idToken": "google-id-token-from-client",
+	"role": "student",
+	"fullName": "Priya Sharma",
+	"businessName": "Sunrise PG"
 }
 ```
 
@@ -755,16 +758,16 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "user": {
-      "userId": "11111111-1111-4111-8111-111111111111",
-      "email": "priya@iitb.ac.in",
-      "roles": ["student"],
-      "isEmailVerified": true
-    },
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-  }
+	"status": "success",
+	"data": {
+		"user": {
+			"userId": "11111111-1111-4111-8111-111111111111",
+			"email": "priya@iitb.ac.in",
+			"roles": ["student"],
+			"isEmailVerified": true
+		},
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	}
 }
 ```
 
@@ -774,16 +777,16 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "user": {
-      "userId": "11111111-1111-4111-8111-111111111111",
-      "email": "priya@iitb.ac.in",
-      "roles": ["student"],
-      "isEmailVerified": true
-    },
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-  }
+	"status": "success",
+	"data": {
+		"user": {
+			"userId": "11111111-1111-4111-8111-111111111111",
+			"email": "priya@iitb.ac.in",
+			"roles": ["student"],
+			"isEmailVerified": true
+		},
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	}
 }
 ```
 
@@ -795,9 +798,9 @@ Request:
 
 ```json
 {
-  "idToken": "google-id-token-from-client",
-  "role": "student",
-  "fullName": "Priya Sharma"
+	"idToken": "google-id-token-from-client",
+	"role": "student",
+	"fullName": "Priya Sharma"
 }
 ```
 
@@ -805,16 +808,16 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "user": {
-      "userId": "11111111-1111-4111-8111-111111111111",
-      "email": "priya@iitb.ac.in",
-      "roles": ["student"],
-      "isEmailVerified": true
-    },
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-  }
+	"status": "success",
+	"data": {
+		"user": {
+			"userId": "11111111-1111-4111-8111-111111111111",
+			"email": "priya@iitb.ac.in",
+			"roles": ["student"],
+			"isEmailVerified": true
+		},
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	}
 }
 ```
 
@@ -824,10 +827,10 @@ Request:
 
 ```json
 {
-  "idToken": "google-id-token-from-client",
-  "role": "pg_owner",
-  "fullName": "Rohan Mehta",
-  "businessName": "Sunrise PG"
+	"idToken": "google-id-token-from-client",
+	"role": "pg_owner",
+	"fullName": "Rohan Mehta",
+	"businessName": "Sunrise PG"
 }
 ```
 
@@ -835,16 +838,16 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "user": {
-      "userId": "22222222-2222-4222-8222-222222222222",
-      "email": "owner@sunrisepg.in",
-      "roles": ["pg_owner"],
-      "isEmailVerified": true
-    },
-    "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-  }
+	"status": "success",
+	"data": {
+		"user": {
+			"userId": "22222222-2222-4222-8222-222222222222",
+			"email": "owner@sunrisepg.in",
+			"roles": ["pg_owner"],
+			"isEmailVerified": true
+		},
+		"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	}
 }
 ```
 
@@ -854,8 +857,8 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Role is required for new account registration via Google"
+	"status": "error",
+	"message": "Role is required for new account registration via Google"
 }
 ```
 
@@ -865,8 +868,8 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Full name is required for new account registration"
+	"status": "error",
+	"message": "Full name is required for new account registration"
 }
 ```
 
@@ -876,8 +879,8 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Business name is required for PG owner registration"
+	"status": "error",
+	"message": "Business name is required for PG owner registration"
 }
 ```
 
@@ -887,8 +890,8 @@ Status: `503`
 
 ```json
 {
-  "status": "error",
-  "message": "Google OAuth is not configured on this server"
+	"status": "error",
+	"message": "Google OAuth is not configured on this server"
 }
 ```
 
@@ -898,8 +901,8 @@ Status: `401`
 
 ```json
 {
-  "status": "error",
-  "message": "Invalid or expired Google token"
+	"status": "error",
+	"message": "Invalid or expired Google token"
 }
 ```
 
@@ -909,8 +912,8 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Google account does not have a verified email address"
+	"status": "error",
+	"message": "Google account does not have a verified email address"
 }
 ```
 
@@ -920,8 +923,8 @@ Status: `409`
 
 ```json
 {
-  "status": "error",
-  "message": "This Google account is already linked to another user"
+	"status": "error",
+	"message": "This Google account is already linked to another user"
 }
 ```
 
@@ -931,25 +934,25 @@ Status: `409`
 
 ```json
 {
-  "status": "error",
-  "message": "This account is already linked to a different Google account"
+	"status": "error",
+	"message": "This account is already linked to a different Google account"
 }
 ```
 
 ## Auth Scenario Matrix
 
-| Scenario | Client sends | Service branch | Status | Response pattern |
-| --- | --- | --- | --- | --- |
-| Student institution signup | register body | institution domain match | `201` | session created, `isEmailVerified: true` |
-| Student non-institution signup | register body | no institution match | `201` | session created, `isEmailVerified: false` |
-| PG owner signup missing business name | register body | service cross-field rule | `400` | operational error |
-| Browser login | login body | cookie mode | `200` | safe body + cookies |
-| Mobile login | login body + bearer transport header | bearer mode | `200` | raw tokens in body |
-| Refresh missing token | no body and no cookie | controller guard | `401` | operational error |
-| OTP wrong but not exhausted | `otp` body | compare fails | `400` | attempts remaining message |
-| OTP exhausted | repeated wrong OTP | attempt ceiling hit | `429` | request new OTP |
-| Google return user | `idToken` only | find by `google_id` | `200` | session created |
-| Google first-time user | `idToken` plus onboarding fields | new account path | `200` | session created |
+| Scenario                              | Client sends                         | Service branch           | Status | Response pattern                          |
+| ------------------------------------- | ------------------------------------ | ------------------------ | ------ | ----------------------------------------- |
+| Student institution signup            | register body                        | institution domain match | `201`  | session created, `isEmailVerified: true`  |
+| Student non-institution signup        | register body                        | no institution match     | `201`  | session created, `isEmailVerified: false` |
+| PG owner signup missing business name | register body                        | service cross-field rule | `400`  | operational error                         |
+| Browser login                         | login body                           | cookie mode              | `200`  | safe body + cookies                       |
+| Mobile login                          | login body + bearer transport header | bearer mode              | `200`  | raw tokens in body                        |
+| Refresh missing token                 | no body and no cookie                | controller guard         | `401`  | operational error                         |
+| OTP wrong but not exhausted           | `otp` body                           | compare fails            | `400`  | attempts remaining message                |
+| OTP exhausted                         | repeated wrong OTP                   | attempt ceiling hit      | `429`  | request new OTP                           |
+| Google return user                    | `idToken` only                       | find by `google_id`      | `200`  | session created                           |
+| Google first-time user                | `idToken` plus onboarding fields     | new account path         | `200`  | session created                           |
 
 ## Integrator Notes
 
@@ -957,3 +960,6 @@ Status: `409`
 - Do not expect silent refresh for bearer tokens.
 - Logout is refresh-token based; it is intentionally available even when the access token is already expired.
 - Google callback is not an OAuth redirect endpoint. The client obtains the Google ID token and POSTs it here.
+- JWT TTL env values accept both duration strings (`15m`, `7d`) and numeric seconds (`900`, `604800`).
+- Legacy refresh tokens that predate per-session `sid` are migrated transparently on first successful refresh; callers
+  do not need any migration logic.

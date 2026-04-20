@@ -1,5 +1,7 @@
 # Listings API
 
+Shared conventions: [conventions.md](./conventions.md)
+
 This document covers listing discovery, CRUD, lifecycle transitions, preferences, saved listings, and photo processing.
 
 Listings are role-sensitive:

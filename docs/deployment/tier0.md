@@ -6,6 +6,13 @@
 > someone who has never used any of these services before. **Backend URL:** `https://api.roomies.sumitly.app` **Last
 > verified:** April 2026.
 
+> **Live API base URL:** `https://roomies-api.onrender.com/api/v1`
+>
+> **Live health check:** `https://roomies-api.onrender.com/api/v1/health`
+
+> **Operational note:** the checked-in `.env.render` currently mirrors deployed values and includes `TRUST_PROXY=false`.
+> For Render this is a misconfiguration. Set `TRUST_PROXY=1` in the Render dashboard.
+
 ---
 
 ## Read This First — What You're Actually Doing
@@ -357,13 +364,13 @@ On your database overview page, find the **REST API** section. But you don't wan
 for the standard Redis protocol. Look for:
 
 - **Endpoint:** something like `definite-robin-12345.upstash.io`
-- **Port:** `6380` (always 6380 for TLS connections)
+- **Port:** `6379` (TLS connection with `rediss://`)
 - **Password:** a long random string
 
 Construct your `REDIS_URL` like this:
 
 ```
-rediss://default:YOUR_UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6380
+rediss://default:YOUR_UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6379
 ```
 
 Note the double `s` in `rediss://` — this signals TLS. The username is always `default` for Upstash.
@@ -484,7 +491,7 @@ ENV_FILE=.env.render
 DATABASE_URL=postgresql://neondb_owner:YOUR_PASSWORD@ep-YOUR-ENDPOINT.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
 
 # ─── Upstash Redis (TLS required — note the double-s in rediss://) ─────────────
-REDIS_URL=rediss://default:YOUR_UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6380
+REDIS_URL=rediss://default:YOUR_UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6379
 
 # ─── JWT ──────────────────────────────────────────────────────────────────────
 JWT_SECRET=YOUR_GENERATED_64_CHAR_SECRET
@@ -509,9 +516,16 @@ ALLOWED_ORIGINS=http://localhost:5173
 GOOGLE_CLIENT_ID=xxxxxxxxxxxxxxxxxxxx
 GOOGLE_CLIENT_SECRET=xxxxxxxxxxxxxxxx
 
-# ─── Trust Proxy (false for local, 1 for Render) ─────────────────────────────
-TRUST_PROXY=false
+# ─── Trust Proxy (Render must use 1 for real client IP extraction) ───────────
+TRUST_PROXY=1
 ```
+
+**About `.env.render` vs Render dashboard values:**
+
+- `NODE_ENV` should be `production` in both places.
+- If you keep a personal local override file, use something like `.env.render.local` (never commit it).
+- The currently committed `.env.render` may still show historical values (`TRUST_PROXY=false`, localhost-only
+  `ALLOWED_ORIGINS`) that must be corrected in the Render dashboard for production behavior.
 
 Generate fresh JWT secrets (run this command twice to get two different secrets):
 
@@ -543,7 +557,7 @@ Server running on port 3000 [production]
 If PostgreSQL shows `unhealthy`, the most common cause is a wrong `DATABASE_URL`. Double-check that you copied the full
 Neon connection string without cutting any characters.
 
-If Redis shows `unhealthy`, check that your `REDIS_URL` starts with `rediss://` (double s) and ends with `:6380`.
+If Redis shows `unhealthy`, check that your `REDIS_URL` starts with `rediss://` (double s) and ends with `:6379`.
 
 Test the health endpoint:
 
@@ -605,7 +619,7 @@ Add these variables:
 | `NODE_ENV`                        | `production`                                         | No      |
 | `PORT`                            | `10000`                                              | No      |
 | `DATABASE_URL`                    | your Neon connection string                          | **Yes** |
-| `REDIS_URL`                       | `rediss://default:PASSWORD@ENDPOINT.upstash.io:6380` | **Yes** |
+| `REDIS_URL`                       | `rediss://default:PASSWORD@ENDPOINT.upstash.io:6379` | **Yes** |
 | `JWT_SECRET`                      | your 64-char secret                                  | **Yes** |
 | `JWT_REFRESH_SECRET`              | your other 64-char secret                            | **Yes** |
 | `JWT_EXPIRES_IN`                  | `15m`                                                | No      |
@@ -618,8 +632,16 @@ Add these variables:
 | `BREVO_SMTP_FROM`                 | your verified sender email                           | No      |
 | `GOOGLE_CLIENT_ID`                | your Google client ID                                | No      |
 | `GOOGLE_CLIENT_SECRET`            | your Google client secret                            | **Yes** |
-| `ALLOWED_ORIGINS`                 | `https://roomies.sumitly.app`                        | No      |
+| `ALLOWED_ORIGINS`                 | `http://localhost:5173` (initial)                    | No      |
 | `TRUST_PROXY`                     | `1`                                                  | No      |
+
+`TRUST_PROXY=1` is security-relevant on Render. Without it, Express sees the proxy IP instead of the real client IP,
+which breaks OTP IP throttling, guest fingerprinting in `contactRevealGate`, and Redis-backed auth rate limits.
+
+`ALLOWED_ORIGINS` starts as `http://localhost:5173` during backend-only rollout. After frontend deployment, update it to
+production domains (comma-separated), for example:
+
+`https://roomies.vercel.app,https://www.roomies.in`
 
 **Important note about `PORT`:** Render injects its own PORT environment variable (usually 10000) into the process. Your
 `config/env.js` reads `PORT` and coerces it to a number. Setting `PORT=10000` here ensures the fallback is correct. In
@@ -880,7 +902,7 @@ requires Render Starter tier or Azure App Service.
 | Symptom                            | Most Likely Cause                             | Fix                                                                                 |
 | ---------------------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------- |
 | `database: "unhealthy"` on health  | Wrong DATABASE_URL or Neon compute cold start | Check the Neon console — is compute active? Wait 30s and retry                      |
-| `redis: "unhealthy"` on health     | Wrong REDIS_URL format                        | Must be `rediss://` (double-s), port `6380`                                         |
+| `redis: "unhealthy"` on health     | Wrong REDIS_URL format                        | Must be `rediss://` (double-s), port `6379`                                         |
 | Emails not arriving                | Wrong BREVO_API_KEY or unverified sender      | Check Brevo → Transactional → Logs for errors                                       |
 | Photos stuck at `processing:`      | BullMQ media worker not started               | Check Render logs for `Media processing worker started`                             |
 | HTTPS not working on custom domain | DNS not yet propagated or SSL not yet issued  | Run `dig CNAME api.roomies.sumitly.app` and check Render's Custom Domains panel     |

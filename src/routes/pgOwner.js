@@ -33,12 +33,12 @@ pgOwnerRouter.post(
 	"/:userId/contact/reveal",
 	optionalAuthenticate,
 	validate(getPgOwnerParamsSchema),
-	contactRevealGate,
 	(req, res, next) => {
 		// Prevent any caching of the PII response by browsers, CDNs, or proxies.
 		res.setHeader("Cache-Control", "no-store");
 		next();
 	},
+	contactRevealGate,
 	pgOwnerController.revealContact,
 );
 

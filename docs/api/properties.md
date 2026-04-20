@@ -1,6 +1,9 @@
 # Properties API
 
-Properties are the building-level records used by verified PG owners. Students cannot create or manage properties, but authenticated students can fetch property detail when viewing PG or hostel listings.
+Shared conventions: [conventions.md](./conventions.md)
+
+Properties are the building-level records used by verified PG owners. Students cannot create or manage properties, but
+authenticated students can fetch property detail when viewing PG or hostel listings.
 
 ## `GET /properties`
 
@@ -11,9 +14,9 @@ Lists properties owned by the authenticated PG owner.
 - Auth required: Yes
 - Role required: `pg_owner`
 - Query params:
-  - `limit`
-  - `cursorTime`
-  - `cursorId`
+    - `limit`
+    - `cursorTime`
+    - `cursorId`
 
 ### Scenario: list own properties
 
@@ -21,26 +24,26 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "items": [
-      {
-        "property_id": "44444444-4444-4444-8444-444444444444",
-        "property_name": "Sunrise PG Viman Nagar",
-        "property_type": "pg",
-        "city": "Pune",
-        "locality": "Viman Nagar",
-        "status": "active",
-        "average_rating": 4.5,
-        "rating_count": 12,
-        "created_at": "2026-04-01T08:00:00.000Z",
-        "updated_at": "2026-04-05T08:00:00.000Z",
-        "amenity_count": 8,
-        "active_listing_count": 3
-      }
-    ],
-    "nextCursor": null
-  }
+	"status": "success",
+	"data": {
+		"items": [
+			{
+				"property_id": "44444444-4444-4444-8444-444444444444",
+				"property_name": "Sunrise PG Viman Nagar",
+				"property_type": "pg",
+				"city": "Pune",
+				"locality": "Viman Nagar",
+				"status": "active",
+				"average_rating": 4.5,
+				"rating_count": 12,
+				"created_at": "2026-04-01T08:00:00.000Z",
+				"updated_at": "2026-04-05T08:00:00.000Z",
+				"amenity_count": 8,
+				"active_listing_count": 3
+			}
+		],
+		"nextCursor": null
+	}
 }
 ```
 
@@ -50,8 +53,8 @@ Status: `403`
 
 ```json
 {
-  "status": "error",
-  "message": "Forbidden"
+	"status": "error",
+	"message": "Forbidden"
 }
 ```
 
@@ -63,22 +66,19 @@ Creates a property for a verified PG owner.
 
 ```json
 {
-  "propertyName": "Sunrise PG Viman Nagar",
-  "description": "Walking distance from Symbiosis and nearby tech parks.",
-  "propertyType": "pg",
-  "addressLine": "Lane 5, Viman Nagar",
-  "city": "Pune",
-  "locality": "Viman Nagar",
-  "landmark": "Near Phoenix Marketcity",
-  "pincode": "411014",
-  "latitude": 18.5679,
-  "longitude": 73.9143,
-  "houseRules": "No smoking inside rooms.",
-  "totalRooms": 22,
-  "amenityIds": [
-    "2db2f8fc-d90c-47a1-aebb-c6fa9ea4450a",
-    "eec6f390-2906-4d50-bf26-4f937833c6f8"
-  ]
+	"propertyName": "Sunrise PG Viman Nagar",
+	"description": "Walking distance from Symbiosis and nearby tech parks.",
+	"propertyType": "pg",
+	"addressLine": "Lane 5, Viman Nagar",
+	"city": "Pune",
+	"locality": "Viman Nagar",
+	"landmark": "Near Phoenix Marketcity",
+	"pincode": "411014",
+	"latitude": 18.5679,
+	"longitude": 73.9143,
+	"houseRules": "No smoking inside rooms.",
+	"totalRooms": 22,
+	"amenityIds": ["2db2f8fc-d90c-47a1-aebb-c6fa9ea4450a", "eec6f390-2906-4d50-bf26-4f937833c6f8"]
 }
 ```
 
@@ -88,34 +88,34 @@ Status: `201`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "property_id": "44444444-4444-4444-8444-444444444444",
-    "owner_id": "22222222-2222-4222-8222-222222222222",
-    "property_name": "Sunrise PG Viman Nagar",
-    "description": "Walking distance from Symbiosis and nearby tech parks.",
-    "property_type": "pg",
-    "address_line": "Lane 5, Viman Nagar",
-    "city": "Pune",
-    "locality": "Viman Nagar",
-    "landmark": "Near Phoenix Marketcity",
-    "pincode": "411014",
-    "latitude": 18.5679,
-    "longitude": 73.9143,
-    "house_rules": "No smoking inside rooms.",
-    "total_rooms": 22,
-    "status": "active",
-    "average_rating": 0,
-    "rating_count": 0,
-    "amenities": [
-      {
-        "amenityId": "2db2f8fc-d90c-47a1-aebb-c6fa9ea4450a",
-        "name": "Wi-Fi",
-        "category": "connectivity",
-        "iconName": "wifi"
-      }
-    ]
-  }
+	"status": "success",
+	"data": {
+		"property_id": "44444444-4444-4444-8444-444444444444",
+		"owner_id": "22222222-2222-4222-8222-222222222222",
+		"property_name": "Sunrise PG Viman Nagar",
+		"description": "Walking distance from Symbiosis and nearby tech parks.",
+		"property_type": "pg",
+		"address_line": "Lane 5, Viman Nagar",
+		"city": "Pune",
+		"locality": "Viman Nagar",
+		"landmark": "Near Phoenix Marketcity",
+		"pincode": "411014",
+		"latitude": 18.5679,
+		"longitude": 73.9143,
+		"house_rules": "No smoking inside rooms.",
+		"total_rooms": 22,
+		"status": "active",
+		"average_rating": 0,
+		"rating_count": 0,
+		"amenities": [
+			{
+				"amenityId": "2db2f8fc-d90c-47a1-aebb-c6fa9ea4450a",
+				"name": "Wi-Fi",
+				"category": "connectivity",
+				"iconName": "wifi"
+			}
+		]
+	}
 }
 ```
 
@@ -125,8 +125,8 @@ Status: `403`
 
 ```json
 {
-  "status": "error",
-  "message": "Forbidden"
+	"status": "error",
+	"message": "Forbidden"
 }
 ```
 
@@ -136,8 +136,8 @@ Status: `403`
 
 ```json
 {
-  "status": "error",
-  "message": "PG owner must be verified to perform this action"
+	"status": "error",
+	"message": "PG owner must be verified to perform this action"
 }
 ```
 
@@ -147,18 +147,18 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "Validation failed",
-  "errors": [
-    {
-      "field": "body.propertyName",
-      "message": "Property name must be at least 2 characters"
-    },
-    {
-      "field": "body.city",
-      "message": "City is required"
-    }
-  ]
+	"status": "error",
+	"message": "Validation failed",
+	"errors": [
+		{
+			"field": "body.propertyName",
+			"message": "Property name must be at least 2 characters"
+		},
+		{
+			"field": "body.city",
+			"message": "City is required"
+		}
+	]
 }
 ```
 
@@ -172,36 +172,36 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "property_id": "44444444-4444-4444-8444-444444444444",
-    "owner_id": "22222222-2222-4222-8222-222222222222",
-    "property_name": "Sunrise PG Viman Nagar",
-    "description": "Walking distance from Symbiosis and nearby tech parks.",
-    "property_type": "pg",
-    "address_line": "Lane 5, Viman Nagar",
-    "city": "Pune",
-    "locality": "Viman Nagar",
-    "landmark": "Near Phoenix Marketcity",
-    "pincode": "411014",
-    "latitude": 18.5679,
-    "longitude": 73.9143,
-    "house_rules": "No smoking inside rooms.",
-    "total_rooms": 22,
-    "status": "active",
-    "average_rating": 4.5,
-    "rating_count": 12,
-    "created_at": "2026-04-01T08:00:00.000Z",
-    "updated_at": "2026-04-05T08:00:00.000Z",
-    "amenities": [
-      {
-        "amenityId": "2db2f8fc-d90c-47a1-aebb-c6fa9ea4450a",
-        "name": "Wi-Fi",
-        "category": "connectivity",
-        "iconName": "wifi"
-      }
-    ]
-  }
+	"status": "success",
+	"data": {
+		"property_id": "44444444-4444-4444-8444-444444444444",
+		"owner_id": "22222222-2222-4222-8222-222222222222",
+		"property_name": "Sunrise PG Viman Nagar",
+		"description": "Walking distance from Symbiosis and nearby tech parks.",
+		"property_type": "pg",
+		"address_line": "Lane 5, Viman Nagar",
+		"city": "Pune",
+		"locality": "Viman Nagar",
+		"landmark": "Near Phoenix Marketcity",
+		"pincode": "411014",
+		"latitude": 18.5679,
+		"longitude": 73.9143,
+		"house_rules": "No smoking inside rooms.",
+		"total_rooms": 22,
+		"status": "active",
+		"average_rating": 4.5,
+		"rating_count": 12,
+		"created_at": "2026-04-01T08:00:00.000Z",
+		"updated_at": "2026-04-05T08:00:00.000Z",
+		"amenities": [
+			{
+				"amenityId": "2db2f8fc-d90c-47a1-aebb-c6fa9ea4450a",
+				"name": "Wi-Fi",
+				"category": "connectivity",
+				"iconName": "wifi"
+			}
+		]
+	}
 }
 ```
 
@@ -211,8 +211,8 @@ Status: `404`
 
 ```json
 {
-  "status": "error",
-  "message": "Property not found"
+	"status": "error",
+	"message": "Property not found"
 }
 ```
 
@@ -224,11 +224,9 @@ Updates a property owned by the authenticated PG owner.
 
 ```json
 {
-  "description": "Now includes weekly room cleaning and breakfast.",
-  "landmark": "Near Phoenix Marketcity main gate",
-  "amenityIds": [
-    "2db2f8fc-d90c-47a1-aebb-c6fa9ea4450a"
-  ]
+	"description": "Now includes weekly room cleaning and breakfast.",
+	"landmark": "Near Phoenix Marketcity main gate",
+	"amenityIds": ["2db2f8fc-d90c-47a1-aebb-c6fa9ea4450a"]
 }
 ```
 
@@ -238,12 +236,12 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "property_id": "44444444-4444-4444-8444-444444444444",
-    "description": "Now includes weekly room cleaning and breakfast.",
-    "landmark": "Near Phoenix Marketcity main gate"
-  }
+	"status": "success",
+	"data": {
+		"property_id": "44444444-4444-4444-8444-444444444444",
+		"description": "Now includes weekly room cleaning and breakfast.",
+		"landmark": "Near Phoenix Marketcity main gate"
+	}
 }
 ```
 
@@ -253,8 +251,8 @@ Status: `400`
 
 ```json
 {
-  "status": "error",
-  "message": "No valid fields provided for update"
+	"status": "error",
+	"message": "No valid fields provided for update"
 }
 ```
 
@@ -264,8 +262,8 @@ Status: `404`
 
 ```json
 {
-  "status": "error",
-  "message": "Property not found"
+	"status": "error",
+	"message": "Property not found"
 }
 ```
 
@@ -279,11 +277,11 @@ Status: `200`
 
 ```json
 {
-  "status": "success",
-  "data": {
-    "propertyId": "44444444-4444-4444-8444-444444444444",
-    "deleted": true
-  }
+	"status": "success",
+	"data": {
+		"propertyId": "44444444-4444-4444-8444-444444444444",
+		"deleted": true
+	}
 }
 ```
 
@@ -293,8 +291,8 @@ Status: `409`
 
 ```json
 {
-  "status": "error",
-  "message": "Deactivate or remove all active listings before deleting this property"
+	"status": "error",
+	"message": "Deactivate or remove all active listings before deleting this property"
 }
 ```
 
@@ -304,13 +302,14 @@ Status: `404`
 
 ```json
 {
-  "status": "error",
-  "message": "Property not found"
+	"status": "error",
+	"message": "Property not found"
 }
 ```
 
 ## Integrator Notes
 
 - The service requires the PG owner to be verified before create, update, or delete operations.
-- If address or coordinate fields are changed on the property, the service cascades those location updates to linked `pg_room` and `hostel_bed` listings in the same transaction.
+- If address or coordinate fields are changed on the property, the service cascades those location updates to linked
+  `pg_room` and `hostel_bed` listings in the same transaction.
 - Property reads are broader than writes: any authenticated user can fetch a property by ID.

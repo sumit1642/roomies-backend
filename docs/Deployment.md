@@ -1,15 +1,16 @@
 # Roomies — Deployment Guide (April 2026 Edition)
 
-> **Status:** Complete replacement of the previous `docs/Deployment.md`.
-> **Philosophy:** Free providers first, Azure student credits as the last resort.
-> **Written for:** ≤50 users/day, API-only backend, idle-on-no-traffic is acceptable.
-> **Last researched:** April 2026.
+> **Status:** Complete replacement of the previous `docs/Deployment.md`. **Philosophy:** Free providers first, Azure
+> student credits as the last resort. **Written for:** ≤50 users/day, API-only backend, idle-on-no-traffic is
+> acceptable. **Last researched:** April 2026.
 
 ---
 
 ## The Core Strategy
 
-Azure student credits are a finite resource (₹9,480 total). The goal is to stretch them as far as possible by exhausting truly free external providers first. Azure is not avoided — it is reserved for cases where no free alternative exists or when free limits are hit.
+Azure student credits are a finite resource (₹9,480 total). The goal is to stretch them as far as possible by exhausting
+truly free external providers first. Azure is not avoided — it is reserved for cases where no free alternative exists or
+when free limits are hit.
 
 ```
 Tier 0 — Completely Free (start here)
@@ -31,12 +32,15 @@ Tier 2 — Azure student credits (last resort, or when external paid cost
   └── (Storage and email stay on free providers indefinitely)
 ```
 
-**Why Render free instead of Azure App Service F1?**
-Azure's free F1 tier has no Always On, killing BullMQ workers on idle. Render's free tier is also a sleeping process — but that is explicitly acceptable here since idle means no users, which means no jobs are needed either. Render's 750 free hours per month equals a full calendar month of runtime.
+**Why Render free instead of Azure App Service F1?** Azure's free F1 tier has no Always On, killing BullMQ workers on
+idle. Render's free tier is also a sleeping process — but that is explicitly acceptable here since idle means no users,
+which means no jobs are needed either. Render's 750 free hours per month equals a full calendar month of runtime.
 
 **Why idle is actually fine for this app:**
+
 - BullMQ workers sleep with the process → zero Redis polling → Upstash free tier lasts much longer.
-- node-cron (listing expiry, etc.) is idempotent — a missed midnight run at 2 AM is caught the next time the server wakes.
+- node-cron (listing expiry, etc.) is idempotent — a missed midnight run at 2 AM is caught the next time the server
+  wakes.
 - Cold starts are ~1–2 seconds on Render free tier. Acceptable for ≤50 users/day.
 
 ---
@@ -45,11 +49,13 @@ Azure's free F1 tier has no Always On, killing BullMQ workers on idle. Render's 
 
 ### Decision 1: No Docker Required
 
-Render detects Node.js automatically. Connect your GitHub repo, set a start command, and you're done. No Dockerfile needed.
+Render detects Node.js automatically. Connect your GitHub repo, set a start command, and you're done. No Dockerfile
+needed.
 
 ### Decision 2: Upstash Free Tier Works If Idle Is Allowed
 
-The previous Deployment.md concluded BullMQ exhausts the 500K free commands in ~10 days. That calculation assumed 24/7 uptime. With Render's free tier sleeping after 15 minutes of inactivity:
+The previous Deployment.md concluded BullMQ exhausts the 500K free commands in ~10 days. That calculation assumed 24/7
+uptime. With Render's free tier sleeping after 15 minutes of inactivity:
 
 ```
 Estimate for a low-traffic app (server awake ~3 hours/day):
@@ -61,24 +67,28 @@ Estimate for a low-traffic app (server awake ~3 hours/day):
 
 ### Decision 3: Single Process (No Worker Separation)
 
-Express + BullMQ workers + node-cron all run in one Render web service. This is the same single-process architecture described in the previous guide — it is correct for this scale.
+Express + BullMQ workers + node-cron all run in one Render web service. This is the same single-process architecture
+described in the previous guide — it is correct for this scale.
 
 ### Decision 4: Azure Blob Storage Stays
 
-The existing `AzureBlobAdapter` is already written and tested. Azure Blob's 5 GB always-free tier does not consume student credits. Keep it. Writing a new Cloudflare R2 adapter would add code complexity for no real benefit at this stage.
+The existing `AzureBlobAdapter` is already written and tested. Azure Blob's 5 GB always-free tier does not consume
+student credits. Keep it. Writing a new Cloudflare R2 adapter would add code complexity for no real benefit at this
+stage.
 
 ### Decision 5: No Key Vault on Render
 
-Render has built-in environment variable management with secret values. No Key Vault needed for Tier 0 or Tier 1. Key Vault only comes into play if you migrate to Azure App Service (Tier 2).
+Render has built-in environment variable management with secret values. No Key Vault needed for Tier 0 or Tier 1. Key
+Vault only comes into play if you migrate to Azure App Service (Tier 2).
 
 ### Decision 6: Revised Realistic Budget
 
-| Tier | Monthly Cost | Credits Spent | Est. Runway |
-|---|---|---|---|
-| Tier 0 (all free) | ₹0 | ₹0 | Indefinite |
-| Tier 1 (Upstash Fixed added) | ~₹840 | ₹0 | Indefinite |
-| Tier 2 partial (Azure DB added) | ~₹1,923 | ~₹1,923/month | ~5 months |
-| Tier 2 full (all Azure) | ~₹3,302 | ~₹3,302/month | ~2.9 months |
+| Tier                            | Monthly Cost | Credits Spent | Est. Runway |
+| ------------------------------- | ------------ | ------------- | ----------- |
+| Tier 0 (all free)               | ₹0           | ₹0            | Indefinite  |
+| Tier 1 (Upstash Fixed added)    | ~₹840        | ₹0            | Indefinite  |
+| Tier 2 partial (Azure DB added) | ~₹1,923      | ~₹1,923/month | ~5 months   |
+| Tier 2 full (all Azure)         | ~₹3,302      | ~₹3,302/month | ~2.9 months |
 
 ---
 
@@ -145,9 +155,9 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
 1. Go to [console.neon.tech](https://console.neon.tech)
 2. Click **Create Project**
 3. Fill in:
-   - Name: `roomies`
-   - PostgreSQL version: **16**
-   - Region: **AWS Asia Pacific (Singapore)** — closest to India
+    - Name: `roomies`
+    - PostgreSQL version: **16**
+    - Region: **AWS Asia Pacific (Singapore)** — closest to India
 4. Click **Create Project**
 
 Neon creates a default `neondb` database. Note the connection string from the dashboard — it looks like:
@@ -192,7 +202,9 @@ After configuring `.env.neon` (see Phase 5):
 npm run seed:amenities
 ```
 
-**Neon cold-start note:** The first query after Neon compute scales to zero takes ~300–500ms. Your BullMQ workers connecting every few seconds during active use will keep Neon warm during those sessions. When idle, both Neon and Render sleep — and wake together on the next request.
+**Neon cold-start note:** The first query after Neon compute scales to zero takes ~300–500ms. Your BullMQ workers
+connecting every few seconds during active use will keep Neon warm during those sessions. When idle, both Neon and
+Render sleep — and wake together on the next request.
 
 ---
 
@@ -203,11 +215,11 @@ npm run seed:amenities
 1. Go to [console.upstash.com](https://console.upstash.com)
 2. Click **Create database**
 3. Fill in:
-   - Name: `roomies-redis`
-   - Type: **Regional**
-   - Region: **AWS ap-southeast-1 (Singapore)**
-   - Plan: **Free** ← start here; upgrade to Fixed $10/month if you exceed 500K commands
-   - TLS: **Enabled** (leave on)
+    - Name: `roomies-redis`
+    - Type: **Regional**
+    - Region: **AWS ap-southeast-1 (Singapore)**
+    - Plan: **Free** ← start here; upgrade to Fixed $10/month if you exceed 500K commands
+    - TLS: **Enabled** (leave on)
 4. Click **Create**
 
 #### 2.2 Get the Connection String
@@ -220,16 +232,19 @@ From the database overview, copy:
 Your `REDIS_URL`:
 
 ```
-rediss://default:YOUR_PASSWORD@SOMETHING.upstash.io:6380
+rediss://default:YOUR_PASSWORD@SOMETHING.upstash.io:6379
 ```
 
-Format: `rediss://default:PASSWORD@ENDPOINT:6380`
+Format: `rediss://default:PASSWORD@ENDPOINT:6379`
 
-The existing `bullConnection.js` and `cache/client.js` both handle `rediss://` TLS URLs correctly. **No code changes needed.**
+The existing `bullConnection.js` and `cache/client.js` both handle `rediss://` TLS URLs correctly. **No code changes
+needed.**
 
 #### 2.3 Monitor Command Usage
 
-Upstash dashboard shows real-time command usage. Check it weekly for the first month. If you approach 400K commands, switch to the **Fixed 250MB plan ($10/month)** before hitting the cap — a hard rate-limit at 500K will cause BullMQ to stop processing jobs.
+Upstash dashboard shows real-time command usage. Check it weekly for the first month. If you approach 400K commands,
+switch to the **Fixed 250MB plan ($10/month)** before hitting the cap — a hard rate-limit at 500K will cause BullMQ to
+stop processing jobs.
 
 Migration trigger: Upstash dashboard shows > 400K commands used in a month.
 
@@ -237,21 +252,22 @@ Migration trigger: Upstash dashboard shows > 400K commands used in a month.
 
 ### Phase 3: Azure Blob Storage (Always-Free, Existing Adapter)
 
-This is unchanged from the previous Deployment.md. You need to do this once even for Tier 0 because it is the only storage option with an existing adapter in the codebase.
+This is unchanged from the previous Deployment.md. You need to do this once even for Tier 0 because it is the only
+storage option with an existing adapter in the codebase.
 
 #### 3.1 Create Storage Account (if not already done)
 
 1. Go to [portal.azure.com](https://portal.azure.com)
 2. Search **Storage accounts** → **+ Create**
 3. **Basics:**
-   - Resource group: `roomies-rg` (create if it doesn't exist)
-   - Storage account name: `roomiesblob` (must be globally unique, lowercase)
-   - Region: **Central India**
-   - Performance: **Standard**
-   - Redundancy: **Locally redundant storage (LRS)**
+    - Resource group: `roomies-rg` (create if it doesn't exist)
+    - Storage account name: `roomiesblob` (must be globally unique, lowercase)
+    - Region: **Central India**
+    - Performance: **Standard**
+    - Redundancy: **Locally redundant storage (LRS)**
 4. **Advanced tab:**
-   - Allow blob anonymous access: **Enabled**
-   - Minimum TLS: **TLS 1.2**
+    - Allow blob anonymous access: **Enabled**
+    - Minimum TLS: **TLS 1.2**
 5. **Review + create** → **Create**
 
 #### 3.2 Create the Blob Container
@@ -299,7 +315,7 @@ ENV_FILE=.env.render
 DATABASE_URL=postgresql://neondb_owner:PASSWORD@ep-ENDPOINT.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
 
 # Upstash Redis
-REDIS_URL=rediss://default:YOUR_UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6380
+REDIS_URL=rediss://default:YOUR_UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6379
 
 # JWT
 JWT_SECRET=YOUR_GENERATED_JWT_SECRET
@@ -349,13 +365,13 @@ curl http://localhost:3000/api/v1/health
 2. Click **New** → **Web Service**
 3. Connect your GitHub account and select your repo
 4. Fill in:
-   - **Name:** `roomies-api`
-   - **Region:** `Singapore` (closest to India)
-   - **Branch:** `main`
-   - **Runtime:** `Node`
-   - **Build Command:** `npm install`
-   - **Start Command:** `node src/server.js`
-   - **Plan:** `Free`
+    - **Name:** `roomies-api`
+    - **Region:** `Singapore` (closest to India)
+    - **Branch:** `main`
+    - **Runtime:** `Node`
+    - **Build Command:** `npm install`
+    - **Start Command:** `node src/server.js`
+    - **Plan:** `Free`
 
 5. Click **Create Web Service**
 
@@ -365,27 +381,28 @@ Render assigns a URL like `https://roomies-api.onrender.com`.
 
 In the Render dashboard → your web service → **Environment** tab → **Add Environment Variable** for each:
 
-| Key | Value |
-|---|---|
-| `NODE_ENV` | `production` |
-| `PORT` | `10000` (Render injects its own PORT; set this as fallback) |
-| `DATABASE_URL` | your Neon connection string |
-| `REDIS_URL` | `rediss://default:PASSWORD@ENDPOINT.upstash.io:6380` |
-| `JWT_SECRET` | your generated secret |
-| `JWT_REFRESH_SECRET` | your second generated secret |
-| `JWT_EXPIRES_IN` | `15m` |
-| `JWT_REFRESH_EXPIRES_IN` | `7d` |
-| `STORAGE_ADAPTER` | `azure` |
-| `AZURE_STORAGE_CONNECTION_STRING` | your full connection string |
-| `AZURE_STORAGE_CONTAINER` | `roomies-uploads` |
-| `EMAIL_PROVIDER` | `brevo` |
-| `BREVO_SMTP_LOGIN` | your Brevo SMTP login |
-| `BREVO_SMTP_KEY` | your `xsmtpsib-...` key |
-| `BREVO_SMTP_FROM` | your verified sender address |
-| `ALLOWED_ORIGINS` | `*` (tighten when frontend is deployed) |
-| `TRUST_PROXY` | `1` |
+| Key                               | Value                                                       |
+| --------------------------------- | ----------------------------------------------------------- |
+| `NODE_ENV`                        | `production`                                                |
+| `PORT`                            | `10000` (Render injects its own PORT; set this as fallback) |
+| `DATABASE_URL`                    | your Neon connection string                                 |
+| `REDIS_URL`                       | `rediss://default:PASSWORD@ENDPOINT.upstash.io:6379`        |
+| `JWT_SECRET`                      | your generated secret                                       |
+| `JWT_REFRESH_SECRET`              | your second generated secret                                |
+| `JWT_EXPIRES_IN`                  | `15m`                                                       |
+| `JWT_REFRESH_EXPIRES_IN`          | `7d`                                                        |
+| `STORAGE_ADAPTER`                 | `azure`                                                     |
+| `AZURE_STORAGE_CONNECTION_STRING` | your full connection string                                 |
+| `AZURE_STORAGE_CONTAINER`         | `roomies-uploads`                                           |
+| `EMAIL_PROVIDER`                  | `brevo`                                                     |
+| `BREVO_SMTP_LOGIN`                | your Brevo SMTP login                                       |
+| `BREVO_SMTP_KEY`                  | your `xsmtpsib-...` key                                     |
+| `BREVO_SMTP_FROM`                 | your verified sender address                                |
+| `ALLOWED_ORIGINS`                 | `*` (tighten when frontend is deployed)                     |
+| `TRUST_PROXY`                     | `1`                                                         |
 
-**Render tip:** Use the **Secret** checkbox on any sensitive value (JWT secrets, SMTP keys, DB password). These are stored encrypted and never shown in logs.
+**Render tip:** Use the **Secret** checkbox on any sensitive value (JWT secrets, SMTP keys, DB password). These are
+stored encrypted and never shown in logs.
 
 #### 6.3 Deploy
 
@@ -422,7 +439,8 @@ curl https://roomies-api.onrender.com/api/v1/health
 # Expected: {"status":"ok","services":{"database":"ok","redis":"ok"}}
 ```
 
-Note: the first request after the service spins down will take 5–10 seconds (cold start + Neon compute cold start). Subsequent requests within the same session are fast.
+Note: the first request after the service spins down will take 5–10 seconds (cold start + Neon compute cold start).
+Subsequent requests within the same session are fast.
 
 ### 4.2 Test Registration
 
@@ -460,13 +478,13 @@ Expected: `201` with a `data.user` object and `sid`.
 
 ### 5.1 What to Monitor
 
-| Metric | Where to Check | Migration Trigger |
-|---|---|---|
-| Redis commands/month | Upstash Console → Usage | > 400K → upgrade to Upstash Fixed $10/mo |
-| Neon storage | Neon Console → Project → Storage | > 0.4 GB → plan migration to Azure PostgreSQL |
-| Render free hours | Render Dashboard → Billing | Near 750h → evaluate paid Render or Azure App Service |
-| Blob storage | Azure Portal → Storage Account | > 4 GB → still cheap at ~₹1.5/GB |
-| Brevo sends | Brevo Dashboard → Statistics | > 200/day avg → consider higher Brevo plan |
+| Metric               | Where to Check                   | Migration Trigger                                     |
+| -------------------- | -------------------------------- | ----------------------------------------------------- |
+| Redis commands/month | Upstash Console → Usage          | > 400K → upgrade to Upstash Fixed $10/mo              |
+| Neon storage         | Neon Console → Project → Storage | > 0.4 GB → plan migration to Azure PostgreSQL         |
+| Render free hours    | Render Dashboard → Billing       | Near 750h → evaluate paid Render or Azure App Service |
+| Blob storage         | Azure Portal → Storage Account   | > 4 GB → still cheap at ~₹1.5/GB                      |
+| Brevo sends          | Brevo Dashboard → Statistics     | > 200/day avg → consider higher Brevo plan            |
 
 ### 5.2 Migration Checklist — Redis
 
@@ -525,24 +543,26 @@ Render auto-deploys on push to `main` once the repo is connected. No extra setup
 name: Deploy to Render
 
 on:
-  push:
-    branches: [main]
+    push:
+        branches: [main]
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger Render Deploy
-        run: curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
+    deploy:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Trigger Render Deploy
+              run: curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
 ```
 
 ---
 
 ## Part 7 — Tier 2: Full Azure Deployment (Last Resort)
 
-Use this section only when free/cheap external providers are no longer sufficient. The Azure infrastructure below is fully production-ready and has been tested.
+Use this section only when free/cheap external providers are no longer sufficient. The Azure infrastructure below is
+fully production-ready and has been tested.
 
-> **When to migrate here:** Student credits are available and monthly spend on external providers (Upstash + Neon paid) exceeds ~₹1,500/month, OR you need features not available on free tiers (always-on, larger RAM, SLAs).
+> **When to migrate here:** Student credits are available and monthly spend on external providers (Upstash + Neon paid)
+> exceeds ~₹1,500/month, OR you need features not available on free tiers (always-on, larger RAM, SLAs).
 
 ### Resource Group
 
@@ -559,11 +579,11 @@ az group create --name roomies-rg --location centralindia
 
 1. Search **"Azure Database for PostgreSQL flexible server"** → **+ Create** → **Flexible server**
 2. **Basics:**
-   - Resource group: `roomies-rg`
-   - Server name: `roomies-db`
-   - Region: `Central India`
-   - PostgreSQL version: **16**
-   - Workload: **Development** → Compute: **Standard_B1ms**, Storage: **32 GiB**
+    - Resource group: `roomies-rg`
+    - Server name: `roomies-db`
+    - Region: `Central India`
+    - PostgreSQL version: **16**
+    - Workload: **Development** → Compute: **Standard_B1ms**, Storage: **32 GiB**
 3. **Authentication:** PostgreSQL only. Admin: `roomiesadmin`. Strong password.
 4. **Networking:** Public access. Add your IP. Allow Azure services: **Yes**.
 5. **Backups:** 7 days, locally redundant.
@@ -601,7 +621,9 @@ az postgres flexible-server start --resource-group roomies-rg --name roomies-db
 
 ### Upstash Redis Fixed 250MB (Still Cheaper Than Azure Redis)
 
-Azure Cache for Redis C0 costs ~₹1,050/month. Upstash Fixed 250MB is $10/month (~₹840). **Even at Tier 2, prefer Upstash Fixed over Azure Redis unless you have a specific reason to switch.** Only migrate to Azure Redis if Upstash causes operational issues.
+Azure Cache for Redis C0 costs ~₹1,050/month. Upstash Fixed 250MB is $10/month (~₹840). **Even at Tier 2, prefer Upstash
+Fixed over Azure Redis unless you have a specific reason to switch.** Only migrate to Azure Redis if Upstash causes
+operational issues.
 
 If you do want Azure Redis:
 
@@ -623,14 +645,14 @@ If you do want Azure Redis:
 
 **Application settings to add directly (not via Key Vault):**
 
-| Name | Value |
-|---|---|
-| `NODE_ENV` | `production` |
-| `PORT` | `8080` |
-| `STORAGE_ADAPTER` | `azure` |
-| `JWT_EXPIRES_IN` | `15m` |
-| `JWT_REFRESH_EXPIRES_IN` | `7d` |
-| `TRUST_PROXY` | `1` |
+| Name                     | Value        |
+| ------------------------ | ------------ |
+| `NODE_ENV`               | `production` |
+| `PORT`                   | `8080`       |
+| `STORAGE_ADAPTER`        | `azure`      |
+| `JWT_EXPIRES_IN`         | `15m`        |
+| `JWT_REFRESH_EXPIRES_IN` | `7d`         |
+| `TRUST_PROXY`            | `1`          |
 
 **General settings:**
 
@@ -641,19 +663,19 @@ If you do want Azure Redis:
 
 **Key Vault secret names to create:**
 
-| Secret Name | Value |
-|---|---|
-| `DATABASE-URL` | `postgresql://roomiesadmin:PASSWORD@roomies-db.postgres.database.azure.com:5432/roomies_db?sslmode=require` |
-| `REDIS-URL` | `rediss://default:PASSWORD@ENDPOINT.upstash.io:6380` (or Azure Redis URL) |
-| `JWT-SECRET` | your generated secret |
-| `JWT-REFRESH-SECRET` | your second generated secret |
-| `AZURE-STORAGE-CONNECTION-STRING` | your blob connection string |
-| `AZURE-STORAGE-CONTAINER` | `roomies-uploads` |
-| `EMAIL-PROVIDER` | `brevo` |
-| `BREVO-SMTP-LOGIN` | your login |
-| `BREVO-SMTP-KEY` | your `xsmtpsib-` key |
-| `BREVO-SMTP-FROM` | your verified sender |
-| `ALLOWED-ORIGINS` | `https://your-frontend.vercel.app` |
+| Secret Name                       | Value                                                                                                       |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `DATABASE-URL`                    | `postgresql://roomiesadmin:PASSWORD@roomies-db.postgres.database.azure.com:5432/roomies_db?sslmode=require` |
+| `REDIS-URL`                       | `rediss://default:PASSWORD@ENDPOINT.upstash.io:6379` (or Azure Redis URL)                                   |
+| `JWT-SECRET`                      | your generated secret                                                                                       |
+| `JWT-REFRESH-SECRET`              | your second generated secret                                                                                |
+| `AZURE-STORAGE-CONNECTION-STRING` | your blob connection string                                                                                 |
+| `AZURE-STORAGE-CONTAINER`         | `roomies-uploads`                                                                                           |
+| `EMAIL-PROVIDER`                  | `brevo`                                                                                                     |
+| `BREVO-SMTP-LOGIN`                | your login                                                                                                  |
+| `BREVO-SMTP-KEY`                  | your `xsmtpsib-` key                                                                                        |
+| `BREVO-SMTP-FROM`                 | your verified sender                                                                                        |
+| `ALLOWED-ORIGINS`                 | `https://your-frontend.vercel.app`                                                                          |
 
 ### Deploy to Azure App Service (from Render)
 
@@ -677,15 +699,15 @@ Update your frontend's API base URL from `https://roomies-api.onrender.com` to `
 
 ### Tier 2 Budget
 
-| Service | Tier | Cost/month |
-|---|---|---|
-| Azure App Service B1 | Basic | ~₹1,092 |
-| Azure PostgreSQL Flexible B1ms | Burstable | ~₹1,043 + storage |
-| PostgreSQL storage (32 GB) | Provisioned SSD | ~₹280 |
-| Upstash Redis Fixed 250MB | Fixed | ~₹840 |
-| Azure Blob Storage | Always-free 5 GB | ₹0 |
-| Brevo Email | Free 300/day | ₹0 |
-| **Total** | | **~₹3,255/month** |
+| Service                        | Tier             | Cost/month        |
+| ------------------------------ | ---------------- | ----------------- |
+| Azure App Service B1           | Basic            | ~₹1,092           |
+| Azure PostgreSQL Flexible B1ms | Burstable        | ~₹1,043 + storage |
+| PostgreSQL storage (32 GB)     | Provisioned SSD  | ~₹280             |
+| Upstash Redis Fixed 250MB      | Fixed            | ~₹840             |
+| Azure Blob Storage             | Always-free 5 GB | ₹0                |
+| Brevo Email                    | Free 300/day     | ₹0                |
+| **Total**                      |                  | **~₹3,255/month** |
 
 With ₹9,480 credits: **~2.9 months** at full Tier 2. By then the project should have real users.
 
@@ -693,30 +715,30 @@ With ₹9,480 credits: **~2.9 months** at full Tier 2. By then the project shoul
 
 ## Part 8 — Troubleshooting
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| First request takes 10+ seconds | Render cold start + Neon cold start | Expected; subsequent requests fast |
-| `redis: "unhealthy"` on health | Wrong `REDIS_URL` format | Must be `rediss://` (double-s), port 6380 |
-| `database: "unhealthy"` | Neon compute cold start or wrong URL | Check Neon Console for endpoint status |
-| Photos stuck on `processing:` | BullMQ media worker not started | Check logs for `Media processing worker started` |
-| OTP emails not arriving | Brevo sender not verified | Verify `BREVO_SMTP_FROM` in Brevo → Senders |
-| Cron jobs missed | Server was sleeping at cron time | Expected; crons are idempotent — next wake catches up |
-| 500K Upstash commands hit | Server kept awake (UptimeRobot?) | Remove keep-alive pings; or upgrade to Fixed plan |
-| Build fails on Render | Node version mismatch | Ensure `package.json` has `"engines": {"node": ">=22.0.0"}` |
-| `ENV_FILE` not found locally | Missing `.env.render` file | Create from the template in Part 3, Phase 5 |
+| Symptom                         | Cause                                | Fix                                                         |
+| ------------------------------- | ------------------------------------ | ----------------------------------------------------------- |
+| First request takes 10+ seconds | Render cold start + Neon cold start  | Expected; subsequent requests fast                          |
+| `redis: "unhealthy"` on health  | Wrong `REDIS_URL` format             | Must be `rediss://` (double-s), port 6379                   |
+| `database: "unhealthy"`         | Neon compute cold start or wrong URL | Check Neon Console for endpoint status                      |
+| Photos stuck on `processing:`   | BullMQ media worker not started      | Check logs for `Media processing worker started`            |
+| OTP emails not arriving         | Brevo sender not verified            | Verify `BREVO_SMTP_FROM` in Brevo → Senders                 |
+| Cron jobs missed                | Server was sleeping at cron time     | Expected; crons are idempotent — next wake catches up       |
+| 500K Upstash commands hit       | Server kept awake (UptimeRobot?)     | Remove keep-alive pings; or upgrade to Fixed plan           |
+| Build fails on Render           | Node version mismatch                | Ensure `package.json` has `"engines": {"node": ">=22.0.0"}` |
+| `ENV_FILE` not found locally    | Missing `.env.render` file           | Create from the template in Part 3, Phase 5                 |
 
 ---
 
 ## Part 9 — All Resource Names (Tier 0)
 
-| Resource | Name | URL/Endpoint |
-|---|---|---|
-| Render Web Service | `roomies-api` | `https://roomies-api.onrender.com` |
-| Neon Project | `roomies` | `ep-XXXXX.ap-southeast-1.aws.neon.tech` |
-| Upstash Redis | `roomies-redis` | `XXXXX.upstash.io:6380` |
-| Azure Storage Account | `roomiesblob` | `roomiesblob.blob.core.windows.net` |
-| Blob Container | `roomies-uploads` | `https://roomiesblob.blob.core.windows.net/roomies-uploads/` |
-| Email Provider | Brevo SMTP | `smtp-relay.brevo.com:587` |
+| Resource              | Name              | URL/Endpoint                                                 |
+| --------------------- | ----------------- | ------------------------------------------------------------ |
+| Render Web Service    | `roomies-api`     | `https://roomies-api.onrender.com`                           |
+| Neon Project          | `roomies`         | `ep-XXXXX.ap-southeast-1.aws.neon.tech`                      |
+| Upstash Redis         | `roomies-redis`   | `XXXXX.upstash.io:6379`                                      |
+| Azure Storage Account | `roomiesblob`     | `roomiesblob.blob.core.windows.net`                          |
+| Blob Container        | `roomies-uploads` | `https://roomiesblob.blob.core.windows.net/roomies-uploads/` |
+| Email Provider        | Brevo SMTP        | `smtp-relay.brevo.com:587`                                   |
 
 ---
 
@@ -746,29 +768,30 @@ curl https://roomies-api.onrender.com/api/v1/health
 
 ## Appendix — Provider Comparison
 
-| Dimension | Render Free | Azure App Service F1 | Azure App Service B1 |
-|---|---|---|---|
-| Always-on | No (sleeps 15 min idle) | No (no Always On) | Yes |
-| RAM | 512 MB | 1 GB | 1.75 GB |
+| Dimension      | Render Free             | Azure App Service F1    | Azure App Service B1 |
+| -------------- | ----------------------- | ----------------------- | -------------------- |
+| Always-on      | No (sleeps 15 min idle) | No (no Always On)       | Yes                  |
+| RAM            | 512 MB                  | 1 GB                    | 1.75 GB              |
 | BullMQ workers | Yes (sleep with server) | Yes (sleep with server) | Yes (always running) |
-| Monthly cost | Free | Free | ~₹1,092 |
-| Best for | Tier 0 (free, idle OK) | Not usable | Tier 2 (production) |
+| Monthly cost   | Free                    | Free                    | ~₹1,092              |
+| Best for       | Tier 0 (free, idle OK)  | Not usable              | Tier 2 (production)  |
 
-| Dimension | Neon Free | Azure PostgreSQL B1ms |
-|---|---|---|
-| Storage | 0.5 GB | 32 GB provisioned |
-| PostGIS | Yes | Yes |
-| Scale-to-zero | Yes (cold starts) | No (always running) |
-| Monthly cost | Free | ~₹1,323 |
-| Best for | Tier 0 and Tier 1 | Tier 2 |
+| Dimension     | Neon Free         | Azure PostgreSQL B1ms |
+| ------------- | ----------------- | --------------------- |
+| Storage       | 0.5 GB            | 32 GB provisioned     |
+| PostGIS       | Yes               | Yes                   |
+| Scale-to-zero | Yes (cold starts) | No (always running)   |
+| Monthly cost  | Free              | ~₹1,323               |
+| Best for      | Tier 0 and Tier 1 | Tier 2                |
 
-| Dimension | Upstash Free | Upstash Fixed | Azure Redis C0 |
-|---|---|---|---|
-| Commands | 500K/month | Unlimited | Unlimited |
-| RAM | 256 MB | 250 MB | 250 MB |
-| Monthly cost | Free | $10 (~₹840) | ~₹1,050 |
-| Best for | Tier 0 (monitor usage) | Tier 1 | Tier 2 (only if needed) |
+| Dimension    | Upstash Free           | Upstash Fixed | Azure Redis C0          |
+| ------------ | ---------------------- | ------------- | ----------------------- |
+| Commands     | 500K/month             | Unlimited     | Unlimited               |
+| RAM          | 256 MB                 | 250 MB        | 250 MB                  |
+| Monthly cost | Free                   | $10 (~₹840)   | ~₹1,050                 |
+| Best for     | Tier 0 (monitor usage) | Tier 1        | Tier 2 (only if needed) |
 
 ---
 
-_Guide version: April 2026. Tier 0: Render Singapore + Neon Singapore + Upstash Singapore + Azure Blob Central India. Node.js 22 LTS, PostgreSQL 16 + PostGIS._
+_Guide version: April 2026. Tier 0: Render Singapore + Neon Singapore + Upstash Singapore + Azure Blob Central India.
+Node.js 22 LTS, PostgreSQL 16 + PostGIS._

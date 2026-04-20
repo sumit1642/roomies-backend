@@ -1,5 +1,7 @@
 # Health API
 
+Shared conventions: [conventions.md](./conventions.md)
+
 ## Endpoint
 
 ### `GET /health`
@@ -19,89 +21,104 @@ Healthy response:
 
 ```json
 {
-  "status": "ok",
-  "timestamp": "2026-04-11T09:40:00.000Z",
-  "services": {
-    "database": "ok",
-    "redis": "ok"
-  }
+	"status": "ok",
+	"timestamp": "2026-04-11T09:40:00.000Z",
+	"services": {
+		"database": "ok",
+		"redis": "ok"
+	}
 }
 ```
 
 ## Scenarios
 
-### All services healthy
+### Scenario: all services healthy
 
 Status: `200`
 
 ```json
 {
-  "status": "ok",
-  "timestamp": "2026-04-11T09:40:00.000Z",
-  "services": {
-    "database": "ok",
-    "redis": "ok"
-  }
+	"status": "ok",
+	"timestamp": "2026-04-11T09:40:00.000Z",
+	"services": {
+		"database": "ok",
+		"redis": "ok"
+	}
 }
 ```
 
-### Database degraded
+### Scenario: database degraded
 
 Status: `503`
 
 ```json
 {
-  "status": "degraded",
-  "timestamp": "2026-04-11T09:40:00.000Z",
-  "services": {
-    "database": "unhealthy",
-    "redis": "ok"
-  }
+	"status": "degraded",
+	"timestamp": "2026-04-11T09:40:00.000Z",
+	"services": {
+		"database": "unhealthy",
+		"redis": "ok"
+	}
 }
 ```
 
-### Database timed out
+### Scenario: database timed out
 
 Status: `503`
 
 ```json
 {
-  "status": "degraded",
-  "timestamp": "2026-04-11T09:40:00.000Z",
-  "services": {
-    "database": "timeout",
-    "redis": "ok"
-  }
+	"status": "degraded",
+	"timestamp": "2026-04-11T09:40:00.000Z",
+	"services": {
+		"database": "timeout",
+		"redis": "ok"
+	}
 }
 ```
 
-### Redis degraded
+### Scenario: redis degraded
 
 Status: `503`
 
 ```json
 {
-  "status": "degraded",
-  "timestamp": "2026-04-11T09:40:00.000Z",
-  "services": {
-    "database": "ok",
-    "redis": "unhealthy"
-  }
+	"status": "degraded",
+	"timestamp": "2026-04-11T09:40:00.000Z",
+	"services": {
+		"database": "ok",
+		"redis": "unhealthy"
+	}
 }
 ```
 
-### Both dependencies degraded
+### Scenario: redis timed out
 
 Status: `503`
 
 ```json
 {
-  "status": "degraded",
-  "timestamp": "2026-04-11T09:40:00.000Z",
-  "services": {
-    "database": "timeout",
-    "redis": "unhealthy"
-  }
+	"status": "degraded",
+	"timestamp": "2026-04-11T09:40:00.000Z",
+	"services": {
+		"database": "ok",
+		"redis": "timeout"
+	}
+}
+```
+
+### Scenario: both dependencies degraded
+
+Status: `503`
+
+```json
+{
+	"status": "degraded",
+	"timestamp": "2026-04-11T09:40:00.000Z",
+	"services": {
+		"database": "timeout",
+		"redis": "unhealthy"
+	}
 }
 ```
 

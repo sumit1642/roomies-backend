@@ -18,7 +18,7 @@
 | Queue            | `bullmq`              | ^5.71.0  | Job queues backed by Redis                                                 |
 | File upload      | `multer`              | ^2.1.1   | Multipart parsing, MIME type + extension cross-check, 10MB limit           |
 | Image processing | `sharp`               | ^0.34.5  | Resize to 1200px max, WebP quality 80, strip EXIF                          |
-| Email            | `nodemailer`          | ^8.0.3   | SMTP transport — Ethereal in local dev, Brevo relay in production          |
+| Email            | `nodemailer`          | ^8.0.3   | Email transport layer for Ethereal/Brevo SMTP + Brevo API-backed sends     |
 | Scheduling       | `node-cron`           | ^4.2.1   | Time-triggered cron jobs within the main Express process                   |
 | Logging          | `pino`                | ^10.3.1  | Structured async JSON logging                                              |
 | Logging          | `pino-http`           | ^11.0.0  | Request/response logging middleware                                        |
@@ -129,6 +129,7 @@ is the normal case for most deployments.
 | ----------------------- | ----------------------- | ------------- | --------------------------------------------------------------------- |
 | `media-processing`      | `mediaProcessor.js`     | 1 (CPU-bound) | Sharp image compression, storage write, DB URL update, cover election |
 | `notification-delivery` | `notificationWorker.js` | 10 (pure I/O) | Notification INSERT with idempotency_key ON CONFLICT DO NOTHING       |
+| `email-delivery`        | `emailWorker.js`        | 3 (I/O-bound) | OTP + verification lifecycle emails via async queue delivery          |
 
 **Job options (notification jobs):** `attempts: 5`, `backoff: { type: 'exponential', delay: 2000 }`,
 `removeOnComplete: 100`, `removeOnFail: 200`.
@@ -137,9 +138,24 @@ is the normal case for most deployments.
 is a fire-and-forget wrapper — it catches Redis errors and logs them without throwing, so a notification queue failure
 never crashes a service call.
 
-**Startup/shutdown:** Both workers are started in `server.js` after Redis connects. On shutdown, `mediaWorker.close()`
-and `notificationWorker.close()` are called before `closeAllQueues()` — workers drain in-flight jobs before the queue
-connections are torn down.
+**Startup/shutdown:** Workers are started in `server.js` after Redis connects. On shutdown, `mediaWorker.close()`,
+`notificationWorker.close()`, and `emailWorker.close()` are called before `closeAllQueues()` — workers drain in-flight
+jobs before queue connections are torn down.
+
+### Verification CDC outbox worker (non-BullMQ)
+
+`src/workers/verificationEventWorker.js` is a `setInterval` polling loop (5s), not a BullMQ worker.
+
+- Reads from `verification_event_outbox` (written by Postgres trigger `trg_verification_status_changed` from migration
+  `002_verification_event_outbox.sql`).
+- Uses `SELECT ... FOR UPDATE SKIP LOCKED` for safe multi-instance concurrent processing without double-processing.
+- On each event, enforces profile consistency (`pg_owner_profiles.verification_status`), then enqueues:
+    - in-app notification (`notification-delivery`)
+    - transactional email (`email-delivery`)
+- Retries failures up to `MAX_ATTEMPTS = 5`.
+- On permanent failure, stores `error_message`, sets `processed_at`, and stops retrying that row.
+- Started in `server.js` after DB/Redis health checks and stopped on graceful shutdown via
+  `verificationEventWorker.close()`.
 
 ---
 
@@ -268,15 +284,26 @@ enqueues BullMQ job → response sent → worker picks up job → Sharp processe
 
 ---
 
-## Infrastructure — Microsoft Azure (Production)
+## Infrastructure — Current Production Stack
 
-| Service                                       | Usage                                                                                                              |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Azure App Service                             | Node.js hosting — potentially multi-instance (requires Redis pub/sub for Phase 6 WebSocket)                        |
-| Azure Database for PostgreSQL Flexible Server | Managed PostgreSQL 16 with native PostGIS support                                                                  |
-| Azure Cache for Redis                         | Managed Redis — connection via `rediss://` (TLS), parsed from `REDIS_URL`                                          |
-| Azure Blob Storage                            | Photo storage — `AZURE_STORAGE_CONNECTION_STRING` + `AZURE_STORAGE_CONTAINER`                                      |
-| Brevo SMTP Relay                              | Production OTP email delivery — `EMAIL_PROVIDER=brevo` + `BREVO_SMTP_LOGIN` + `BREVO_SMTP_KEY` + `BREVO_SMTP_FROM` |
+| Service            | Usage                                                                         |
+| ------------------ | ----------------------------------------------------------------------------- |
+| Render             | Live API host (`https://roomies-api.onrender.com`)                            |
+| Neon PostgreSQL    | Managed PostgreSQL 16 (+ PostGIS), pooler endpoint used in `DATABASE_URL`     |
+| Upstash Redis      | Managed Redis over TLS (`rediss://...:6379`) for app cache + BullMQ           |
+| Azure Blob Storage | Photo storage (`AZURE_STORAGE_CONNECTION_STRING` + `AZURE_STORAGE_CONTAINER`) |
+| Brevo API / SMTP   | Email delivery with provider switch via `EMAIL_PROVIDER`                      |
+
+### `EMAIL_PROVIDER` modes
+
+- `ethereal`: local fake SMTP testing (`SMTP_*` + `SMTP_FROM`)
+- `brevo`: Brevo SMTP relay (`BREVO_SMTP_LOGIN`, `BREVO_SMTP_KEY`, `BREVO_SMTP_FROM`)
+- `brevo-api`: Brevo REST API (`BREVO_API_KEY`, `BREVO_SMTP_FROM`) — used on Render free tier where SMTP is blocked
+
+Credential prefix reminder:
+
+- SMTP key: starts with `xsmtpsib-` (for `EMAIL_PROVIDER=brevo`)
+- API key: starts with `xkeysib-` (for `EMAIL_PROVIDER=brevo-api`)
 
 ---
 
@@ -288,4 +315,4 @@ enqueues BullMQ job → response sent → worker picks up job → Sharp processe
 | Redis                   | Host-installed — no Docker                                                                     |
 | SMTP                    | Ethereal Mail (fake SMTP, `EMAIL_PROVIDER=ethereal`) — preview URL logged to console           |
 | Storage                 | Local disk (`STORAGE_ADAPTER=local`) — files written to `uploads/listings/`, served by Express |
-| Email                   | Nodemailer with provider switch: Ethereal for testing, Brevo for real delivery                 |
+| Email                   | Provider switch: Ethereal (dev), Brevo SMTP, or Brevo API                                      |

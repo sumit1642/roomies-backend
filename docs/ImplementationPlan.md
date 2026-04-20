@@ -24,10 +24,11 @@ is stable and every endpoint is manually verified with real HTTP requests.**
 - Detailed request, response, and scenario documentation is split by feature under `docs/api/`.
 - When route behavior changes, update the corresponding feature doc instead of expanding `docs/API.md` back into a
   single monolithic reference.
-- Changes in `student`, `report`, gate middleware, or cron jobs must be reflected in docs during the same delivery cycle:
-  - student/report endpoint contract changes → update feature docs in `docs/api/`
-  - gate short-circuit behavior or shared error envelopes → update `docs/api/conventions.md`
-  - cron behavior that impacts user-visible API states → update `docs/API.md` and operational docs
+- Changes in `student`, `report`, gate middleware, or cron jobs must be reflected in docs during the same delivery
+  cycle:
+    - student/report endpoint contract changes → update feature docs in `docs/api/`
+    - gate short-circuit behavior or shared error envelopes → update `docs/api/conventions.md`
+    - cron behavior that impacts user-visible API states → update `docs/API.md` and operational docs
 
 ---
 
@@ -150,7 +151,8 @@ Conversion happens only in `src/services/listing.service.js` — never in valida
 
 ```
 src/
-  server.js                         ✅ Starts media + notification workers; registers cron jobs; graceful shutdown
+  server.js                         ✅ Starts media + notification + email workers + verificationEvent worker;
+                                       registers cron jobs; graceful shutdown
   app.js                            ✅ Middleware order fixed, CORS guard at startup
   config/
     env.js                          ✅ Zod env validation — add new vars here before use
@@ -172,10 +174,17 @@ src/
     authorize.js                    ✅ Call-time role validation throws Error at route registration
     optionalAuthenticate.js         ✅ Tries to resolve user context if valid token exists; never blocks
     contactRevealGate.js            ✅ Two-tier quota enforcement: verified=unlimited, guest=10 email-only reveals
+    guestListingGate.js             ✅ Guest cap for listing browse (`limit` silently capped at 20)
     errorHandler.js                 ✅ AppError + ZodError + PG constraint codes + JWT errors
     rateLimiter.js                  ✅ authLimiter (10/15min), otpLimiter (5/15min) — Redis-backed
     validate.js                     ✅ Writes result.data back to req
     upload.js                       ✅ Multer — MIME type + extension cross-check, 10MB limit
+  workers/
+    mediaProcessor.js               ✅ BullMQ worker: image compression + storage upload + DB URL update
+    notificationWorker.js           ✅ BullMQ worker (`notification-delivery`), concurrency 10
+    emailWorker.js                  ✅ BullMQ worker (`email-delivery`), concurrency 3; handles otp + verification emails
+    emailQueue.js                   ✅ Enqueue helper for `email-delivery` queue
+    verificationEventWorker.js      ✅ CDC outbox drainer (5s polling, FOR UPDATE SKIP LOCKED, retries up to 5)
   services/
     auth.service.js                 ✅ register, login, logout (current + all), refresh, sendOtp, verifyOtp,
                                        googleOAuth, listSessions, revokeSession — all paths end at buildTokenResponse
@@ -229,9 +238,7 @@ src/
     health.js                       ✅ GET /health — 3s timeout probes, sanitised error responses
     auth.js                         ✅ 10 auth endpoints including google/callback, sessions
     student.js                      ✅ GET + PUT /:userId/profile; GET /:userId/contact/reveal
-    pgOwner.js                      ✅ GET + PUT /:userId/profile; GET /:userId/contact/reveal; POST /:userId/documents
-    admin.js                        ✅ authenticate + authorize('admin') at router level;
-                                       verification queue + report queue management
+    pgOwner.js                      ✅ GET + PUT /:userId/profile; POST /:userId/contact/reveal; POST /:userId/documents
     property.js                     ✅ Full CRUD — pg_owner only for writes
     listing.js                      ✅ Full CRUD + status + preferences + save/unsave + photos + interest sub-routes
     interest.js                     ✅ /me + /:interestId + /:interestId/status
@@ -526,8 +533,8 @@ context and resolves reports, optionally hiding the rating and triggering automa
 ### `phase4/moderation` ✅
 
 **Files:** `src/validators/report.validators.js`, `src/services/report.service.js`,
-`src/controllers/report.controller.js`. Modifications to `src/routes/rating.js` (added `POST /:ratingId/report`) and
-`src/routes/admin.js` (added report queue + resolve routes).
+`src/controllers/report.controller.js`. Modifications to `src/routes/rating.js` (added `POST /:ratingId/report`). Admin
+queue/resolve controller + service paths exist, but the admin router is not yet mounted in `src/routes/index.js`.
 
 `submitReport`: atomic `INSERT ... SELECT ... FROM ratings JOIN connections WHERE (reporter is a party)`. If sub-query
 returns nothing, INSERT produces zero rows → 404. Partial unique index `WHERE status = 'open'` prevents duplicate open
@@ -545,8 +552,8 @@ equivalent. `adminNotes` required when `resolution = 'resolved_removed'` (enforc
 
 ```
 POST   /api/v1/ratings/:ratingId/report
-GET    /api/v1/admin/report-queue
-PATCH  /api/v1/admin/reports/:reportId/resolve
+GET    /api/v1/admin/report-queue          (planned route mount)
+PATCH  /api/v1/admin/reports/:reportId/resolve (planned route mount)
 ```
 
 ---
@@ -576,13 +583,10 @@ intended without any warning.
 
 ### `phase5/admin` ⏳ NOT STARTED
 
-Files to create: extensions to `src/routes/admin.js` and new service/controller files for user management, rating
-visibility management, email worker, and analytics.
+Files to create: `src/routes/admin.js` and route wiring in `src/routes/index.js` for admin-only endpoints.
 
 **What needs building:**
 
-- `email-queue` BullMQ worker (`startEmailWorker()`) — same factory pattern as notification worker, 5-attempt
-  exponential backoff
 - `GET /admin/users` — paginated list filterable by role + status
 - `GET /admin/users/:userId` — full profile + roles + status detail
 - `PATCH /admin/users/:userId/status` — suspend | ban | reactivate
@@ -590,6 +594,12 @@ visibility management, email worker, and analytics.
 - `PATCH /admin/ratings/:ratingId/visibility` — direct visibility toggle
 - `GET /admin/analytics/platform` — DAU, new signups, active listings count, connections formed (computed fresh, no
   caching)
+
+**Already completed and present in source:**
+
+- `src/workers/emailWorker.js`
+- `src/workers/emailQueue.js`
+- `src/workers/verificationEventWorker.js`
 
 ---
 
@@ -605,11 +615,12 @@ for cross-instance fanout — required for Azure App Service multi-instance depl
 
 ## DB Trigger Reference
 
-| Trigger                    | Table                        | Fires on                                                         | Action                                                                                                   |
-| -------------------------- | ---------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `update_rating_aggregates` | `ratings`                    | INSERT, or UPDATE of `overall_score`, `is_visible`, `deleted_at` | Recalculates `average_rating` + `rating_count` on `users` or `properties` for the affected `reviewee_id` |
-| `set_updated_at`           | All tables with `updated_at` | BEFORE UPDATE                                                    | Sets `NEW.updated_at = NOW()`                                                                            |
-| `sync_location_geometry`   | `properties`, `listings`     | BEFORE INSERT OR UPDATE OF `latitude`, `longitude`               | Computes PostGIS `GEOMETRY(POINT, 4326)` from lat/lng decimals                                           |
+| Trigger                           | Table                        | Fires on                                                         | Action                                                                                                                      |
+| --------------------------------- | ---------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `update_rating_aggregates`        | `ratings`                    | INSERT, or UPDATE of `overall_score`, `is_visible`, `deleted_at` | Recalculates `average_rating` + `rating_count` on `users` or `properties` for the affected `reviewee_id`                    |
+| `set_updated_at`                  | All tables with `updated_at` | BEFORE UPDATE                                                    | Sets `NEW.updated_at = NOW()`                                                                                               |
+| `sync_location_geometry`          | `properties`, `listings`     | BEFORE INSERT OR UPDATE OF `latitude`, `longitude`               | Computes PostGIS `GEOMETRY(POINT, 4326)` from lat/lng decimals                                                              |
+| `trg_verification_status_changed` | `verification_requests`      | AFTER UPDATE OF `status`                                         | Inserts verification lifecycle rows into `verification_event_outbox` (`verified`, `rejected`, `pending`) for CDC processing |
 
 Application code never manually updates `average_rating`, `rating_count`, `location`, or `updated_at`.
 

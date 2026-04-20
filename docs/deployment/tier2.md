@@ -400,7 +400,7 @@ az keyvault secret set $KV --name "DATABASE-URL" \
   --value "postgresql://roomiesadmin:YOUR_PASSWORD@roomies-db.postgres.database.azure.com:5432/roomies_db?sslmode=require"
 
 az keyvault secret set $KV --name "REDIS-URL" \
-  --value "rediss://default:YOUR_UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6380"
+  --value "rediss://default:YOUR_UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6379"
 # (or Azure Redis URL if you chose that in Phase 3)
 
 # Generate new JWT secrets — use fresh ones for Azure, not the same as Render
@@ -829,5 +829,5 @@ az postgres flexible-server start --resource-group roomies-rg --name roomies-db
 | Key Vault             | `roomies-kv`      | `https://roomies-kv.vault.azure.net`                         |
 | Storage Account       | `roomiesblob`     | `roomiesblob.blob.core.windows.net`                          |
 | Blob Container        | `roomies-uploads` | `https://roomiesblob.blob.core.windows.net/roomies-uploads/` |
-| Redis (Upstash)       | `roomies-redis`   | `YOUR-ENDPOINT.upstash.io:6380`                              |
+| Redis (Upstash)       | `roomies-redis`   | `YOUR-ENDPOINT.upstash.io:6379`                              |
 | Custom Domain         | —                 | `api.roomies.sumitly.app`                                    |
