@@ -21,6 +21,8 @@ Feature-level API documentation lives in `docs/api/`.
 - [api/conventions.md](./api/conventions.md) — shared response envelopes, auth failures, pagination, and example
   conventions
 - [api/authz-matrix.md](./api/authz-matrix.md) — route-level + service-level authentication and authorization matrix
+- [api/frontend-type-guide.md](./api/frontend-type-guide.md) — TypeScript/Zod-focused guidance for stable DTO and enum
+  modeling
 - [api/auth.md](./api/auth.md) — registration, login, refresh, OTP, sessions, logout, and Google OAuth flows
 - [api/profiles-and-contact.md](./api/profiles-and-contact.md) — student and PG owner profiles, contact reveal, and
   verification document submission
@@ -38,7 +40,8 @@ Feature-level API documentation lives in `docs/api/`.
 
 ## Service Contracts
 
-- [services/README.md](./services/README.md) — service-by-service ownership map linking routes, validators, service logic, and workers
+- [services/README.md](./services/README.md) — service-by-service ownership map linking routes, validators, service
+  logic, and workers
 
 ## Maintenance Rules
 

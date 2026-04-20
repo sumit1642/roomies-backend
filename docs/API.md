@@ -12,6 +12,7 @@ This file is the API front door. Endpoint-by-endpoint contracts live in `docs/ap
 
 - [Shared conventions](./api/conventions.md)
 - [Auth/Authz matrix](./api/authz-matrix.md)
+- [Frontend TS/Zod type guide](./api/frontend-type-guide.md)
 - [Auth](./api/auth.md)
 - [Profiles and contact reveal](./api/profiles-and-contact.md)
 - [Properties](./api/properties.md)

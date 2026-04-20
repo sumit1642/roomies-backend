@@ -134,7 +134,6 @@ Some auth flows return a slightly different message:
 
 That difference is service-specific and documented in the auth feature doc.
 
-
 ## Auth Transport Header Convention
 
 Auth endpoints support two client transport modes:
@@ -229,7 +228,8 @@ Guest contact reveal quota exhausted:
 
 Use these values for client retry behavior and UX copy:
 
-- `authLimiter`: **10 requests / 15 minutes** (`/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout/all`, Google auth endpoints).
+- `authLimiter`: **10 requests / 15 minutes** (`/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout/all`,
+  Google auth endpoints).
 - `otpLimiter`: **5 requests / 15 minutes** (`/auth/otp/send`).
 - OTP verify IP throttle: **20 attempts / 15 minutes per IP** (`/auth/otp/verify`).
 - `publicRatingsLimiter`: **120 requests / 15 minutes** (public ratings reads).

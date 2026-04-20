@@ -399,7 +399,8 @@ Status: `401`
 
 ## `POST /auth/logout`
 
-Revokes a session using the refresh token from the body or cookie. This endpoint intentionally does **not** require `authenticate`, so clients with expired access tokens can still revoke refresh-token sessions.
+Revokes a session using the refresh token from the body or cookie. This endpoint intentionally does **not** require
+`authenticate`, so clients with expired access tokens can still revoke refresh-token sessions.
 
 ### Request
 
@@ -448,7 +449,8 @@ Status: `401`
 
 ## `POST /auth/logout/current`
 
-Revokes the currently authenticated session only. This endpoint **does** require `authenticate` and is session-scoped: the refresh token must belong to the same authenticated user/session context.
+Revokes the currently authenticated session only. This endpoint **does** require `authenticate` and is session-scoped:
+the refresh token must belong to the same authenticated user/session context.
 
 ### Scenario: current-session logout succeeds
 
