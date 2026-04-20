@@ -656,6 +656,531 @@
 								}
 							},
 							"response": []
+						},
+						{
+							"name": "[1.14] Register Student 3",
+							"event": [
+								{
+									"listen": "test",
+									"script": {
+										"exec": [
+											"pm.test(\"Status 201\", () => pm.response.to.have.status(201));",
+											"pm.test(\"Returns access token\", () => {",
+											"    const body = pm.response.json();",
+											"    pm.expect(body.data.accessToken).to.be.a(\"string\");",
+											"});",
+											"pm.test(\"Email is NOT auto-verified (gmail domain)\", () => {",
+											"    const body = pm.response.json();",
+											"    pm.expect(body.data.user.isEmailVerified).to.eql(false);",
+											"});",
+											"",
+											"const body = pm.response.json();",
+											"pm.environment.set(\"student3AccessToken\", body.data.accessToken);",
+											"pm.environment.set(\"student3RefreshToken\", body.data.refreshToken);",
+											"pm.environment.set(\"student3Id\", body.data.user.userId);",
+											"",
+											"console.log(\"student3Id:\", body.data.user.userId);",
+											"console.log(\"student3 isEmailVerified:\", body.data.user.isEmailVerified, \"— OTP flow will be needed\");"
+										],
+										"type": "text/javascript",
+										"packages": {},
+										"requests": {}
+									}
+								},
+								{
+									"listen": "prerequest",
+									"script": {
+										"exec": [],
+										"type": "text/javascript"
+									}
+								}
+							],
+							"request": {
+								"method": "POST",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n\t\"email\": \"rohit.verma@gmail.com\",\n\t\"password\": \"Test1234\",\n\t\"role\": \"student\",\n\t\"fullName\": \"Rohit Verma\"\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/auth/register",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"auth",
+										"register"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "[1.15] Register Student 4",
+							"event": [
+								{
+									"listen": "test",
+									"script": {
+										"exec": [
+											"pm.test(\"Status 201\", () => pm.response.to.have.status(201));",
+											"pm.test(\"Returns access token\", () => {",
+											"\tconst body = pm.response.json();",
+											"\tpm.expect(body.data.accessToken).to.be.a(\"string\");",
+											"});",
+											"pm.test(\"Email is NOT auto-verified (gmail domain)\", () => {",
+											"\tconst body = pm.response.json();",
+											"\tpm.expect(body.data.user.isEmailVerified).to.eql(false);",
+											"});",
+											"",
+											"const body = pm.response.json();",
+											"pm.environment.set(\"student4AccessToken\", body.data.accessToken);",
+											"pm.environment.set(\"student4RefreshToken\", body.data.refreshToken);",
+											"pm.environment.set(\"student4Id\", body.data.user.userId);",
+											"",
+											"console.log(\"student4Id:\", body.data.user.userId);",
+											"console.log(\"student4 isEmailVerified:\", body.data.user.isEmailVerified, \"— OTP flow will be needed\");"
+										],
+										"type": "text/javascript",
+										"packages": {},
+										"requests": {}
+									}
+								},
+								{
+									"listen": "prerequest",
+									"script": {
+										"exec": [],
+										"type": "text/javascript"
+									}
+								}
+							],
+							"request": {
+								"method": "POST",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n\t\"email\": \"sumity1642@gmail.com\",\n\t\"password\": \"Test1234\",\n\t\"role\": \"student\",\n\t\"fullName\": \"Sumit Yadav\"\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/auth/register",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"auth",
+										"register"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "[1.16] Register Pg Owner 4",
+							"event": [
+								{
+									"listen": "test",
+									"script": {
+										"exec": [
+											"pm.test(\"Status 201\", () => pm.response.to.have.status(201));",
+											"pm.test(\"Business name in response\", () => {",
+											"\t// Registration response returns user object, not profile — no business_name here.",
+											"\t// We confirm the pg_owner role is present instead.",
+											"\tpm.expect(body.data.user.roles).to.include(\"pg_owner\");",
+											"});",
+											"",
+											"const body = pm.response.json();",
+											"pm.environment.set(\"pgOwner4AccessToken\", body.data.accessToken);",
+											"pm.environment.set(\"pgOwner4RefreshToken\", body.data.refreshToken);",
+											"pm.environment.set(\"pgOwner4Id\", body.data.user.userId);",
+											"",
+											"console.log(\"pgOwner4Id:\", body.data.user.userId);"
+										],
+										"type": "text/javascript",
+										"packages": {},
+										"requests": {}
+									}
+								},
+								{
+									"listen": "prerequest",
+									"script": {
+										"exec": [],
+										"type": "text/javascript"
+									}
+								}
+							],
+							"request": {
+								"method": "POST",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n\t\"email\": \"gameking43221@gmail.com\",\n\t\"password\": \"Test1234\",\n\t\"role\": \"pg_owner\",\n\t\"fullName\": \"Game King\",\n\t\"businessName\": \"Game King Residency\"\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/auth/register",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"auth",
+										"register"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "[1.17] Login Student 4",
+							"event": [
+								{
+									"listen": "test",
+									"script": {
+										"exec": [
+											"pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+											"",
+											"const body = pm.response.json();",
+											"pm.environment.set(\"student4AccessToken\", body.data.accessToken);",
+											"pm.environment.set(\"student4RefreshToken\", body.data.refreshToken);",
+											"",
+											"console.log(\"Student 4 token refreshed via login\");"
+										],
+										"type": "text/javascript",
+										"packages": {},
+										"requests": {}
+									}
+								},
+								{
+									"listen": "prerequest",
+									"script": {
+										"exec": [],
+										"type": "text/javascript"
+									}
+								}
+							],
+							"request": {
+								"method": "POST",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n\t\"email\": \"sumity1642@gmail.com\",\n\t\"password\": \"Test1234\"\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/auth/login",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"auth",
+										"login"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "[1.18] Send OTP — Student 4 (Brevo live test)",
+							"event": [
+								{
+									"listen": "test",
+									"script": {
+										"exec": [
+											"pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+											"pm.test(\"OTP sent message present\", () => {",
+											"    pm.expect(pm.response.json().message).to.include(\"OTP\");",
+											"});",
+											"",
+											"console.log(\"=== BREVO TEST ===\");",
+											"console.log(\"If you used your own email: check your inbox for the OTP.\");",
+											"console.log(\"If you used rohit.verma@gmail.com: open Brevo dashboard → Transactional → Logs.\");",
+											"console.log(\"A successful send event confirms Brevo is wired correctly.\");",
+											"console.log(\"messageId should appear in your server terminal log at info level.\");"
+										],
+										"type": "text/javascript",
+										"packages": {},
+										"requests": {}
+									}
+								},
+								{
+									"listen": "prerequest",
+									"script": {
+										"exec": [],
+										"type": "text/javascript"
+									}
+								}
+							],
+							"request": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Authorization",
+										"value": "Bearer {{student4AccessToken}}",
+										"type": "text"
+									}
+								],
+								"url": {
+									"raw": "{{baseUrl}}/auth/otp/send",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"auth",
+										"otp",
+										"send"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "[1.19] Verify OTP Student 4",
+							"event": [
+								{
+									"listen": "test",
+									"script": {
+										"exec": [
+											"pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+											"pm.test(\"Email verified message\", () => {",
+											"\tpm.expect(pm.response.json().message).to.include(\"verified\");",
+											"});",
+											"",
+											"console.log(\"Student 3 email is now verified — Brevo round-trip confirmed end-to-end.\");"
+										],
+										"type": "text/javascript",
+										"packages": {},
+										"requests": {}
+									}
+								},
+								{
+									"listen": "prerequest",
+									"script": {
+										"exec": [],
+										"type": "text/javascript"
+									}
+								}
+							],
+							"request": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Authorization",
+										"value": "Bearer {{student4RefreshToken}}",
+										"type": "text"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n\t\"otp\": \"749828\"\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/auth/otp/verify",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"auth",
+										"otp",
+										"verify"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "[1.20] Login Student 3",
+							"event": [
+								{
+									"listen": "test",
+									"script": {
+										"exec": [
+											"pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+											"",
+											"const body = pm.response.json();",
+											"pm.environment.set(\"student3AccessToken\", body.data.accessToken);",
+											"pm.environment.set(\"student3RefreshToken\", body.data.refreshToken);",
+											"",
+											"console.log(\"Student 3 token refreshed via login\");"
+										],
+										"type": "text/javascript",
+										"packages": {},
+										"requests": {}
+									}
+								},
+								{
+									"listen": "prerequest",
+									"script": {
+										"exec": [
+											""
+										],
+										"type": "text/javascript",
+										"packages": {},
+										"requests": {}
+									}
+								}
+							],
+							"request": {
+								"method": "POST",
+								"header": [],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n\t\"email\": \"rohit.verma@gmail.com\",\n\t\"password\": \"Test1234\"\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/auth/login",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"auth",
+										"login"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "[1.21] Send OTP Student 3",
+							"event": [
+								{
+									"listen": "test",
+									"script": {
+										"exec": [
+											"pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+											"pm.test(\"OTP sent message present\", () => {",
+											"    pm.expect(pm.response.json().message).to.include(\"OTP\");",
+											"});",
+											"",
+											"console.log(\"=== BREVO TEST ===\");",
+											"console.log(\"If you used your own email: check your inbox for the OTP.\");",
+											"console.log(\"If you used rohit.verma@gmail.com: open Brevo dashboard → Transactional → Logs.\");",
+											"console.log(\"A successful send event confirms Brevo is wired correctly.\");",
+											"console.log(\"messageId should appear in your server terminal log at info level.\");"
+										],
+										"type": "text/javascript",
+										"packages": {},
+										"requests": {}
+									}
+								},
+								{
+									"listen": "prerequest",
+									"script": {
+										"exec": [],
+										"type": "text/javascript"
+									}
+								}
+							],
+							"request": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Authorization",
+										"value": "Bearer {{student3AccessToken}}",
+										"type": "text"
+									}
+								],
+								"body": {
+									"mode": "formdata",
+									"formdata": []
+								},
+								"url": {
+									"raw": "{{baseUrl}}/auth/otp/send",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"auth",
+										"otp",
+										"send"
+									]
+								}
+							},
+							"response": []
+						},
+						{
+							"name": "[1.22] Verify Student 3 OTP",
+							"event": [
+								{
+									"listen": "test",
+									"script": {
+										"exec": [
+											"pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+											"pm.test(\"Email verified message\", () => {",
+											"\tpm.expect(pm.response.json().message).to.include(\"verified\");",
+											"});",
+											"",
+											"console.log(\"Student 4 email is now verified — Brevo round-trip confirmed end-to-end.\");"
+										],
+										"type": "text/javascript",
+										"packages": {},
+										"requests": {}
+									}
+								},
+								{
+									"listen": "prerequest",
+									"script": {
+										"exec": [],
+										"type": "text/javascript"
+									}
+								}
+							],
+							"request": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Authorization",
+										"value": "Bearer {{student3AccessToken}}",
+										"type": "text"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n\t\"otp\": \"427531\"\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/auth/otp/verify",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"auth",
+										"otp",
+										"verify"
+									]
+								}
+							},
+							"response": []
 						}
 					]
 				},
@@ -1832,7 +2357,21 @@
 											"});",
 											"pm.test(\"Business phone hidden for non-owner\", () => {",
 											"    pm.expect(pm.response.json().data.business_phone).to.be.null;",
-											"});"
+											"});",
+											"",
+											"// Visualization Script",
+											"pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+											"pm.test(\"Business name visible\", () => {",
+											"    pm.expect(pm.response.json().data.business_name).to.eql(\"Mehta PG House\");",
+											"});",
+											"pm.test(\"Email hidden for non-owner\", () => {",
+											"    pm.expect(pm.response.json().data.email).to.be.null;",
+											"});",
+											"pm.test(\"Business phone hidden for non-owner\", () => {",
+											"    pm.expect(pm.response.json().data.business_phone).to.be.null;",
+											"});",
+											"",
+											" "
 										],
 										"type": "text/javascript",
 										"packages": {},
