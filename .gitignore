@@ -2,11 +2,12 @@
 node_modules/
 
 # Environment files — never commit any .env variant
+# Environment files — never commit
 .env
 .env.local
 .env.azure
+.env.render
 .env.*.local
-.env.test
 
 # Local file uploads — stored on disk in dev, Azure Blob in prod
 uploads/
