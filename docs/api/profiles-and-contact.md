@@ -159,6 +159,7 @@ Reveals student contact information using the guest/unverified/verified contact 
 ### Request Contract
 
 - Auth required: Optional
+- Optional-auth exception: invalid/expired tokens fall back to guest/unverified behavior instead of returning `401` from auth middleware.
 - Auth transport accepted:
     - Cookie mode (`accessToken` cookie)
     - Bearer mode (`Authorization: Bearer <access-token>`)
@@ -196,7 +197,7 @@ Status: `200`
 }
 ```
 
-### Scenario: verified user still receives the student route response actually enforced by the service
+### Scenario: verified user receives full contact bundle (service-enforced behavior)
 
 Status: `200`
 
@@ -352,9 +353,11 @@ Reveals PG owner contact information. This endpoint is intentionally `POST`, not
 ### Request Contract
 
 - Auth required: Optional
+- Optional-auth exception: invalid/expired tokens fall back to guest/unverified behavior instead of returning `401` from auth middleware.
 - Auth transport accepted:
     - Cookie mode (`accessToken` cookie)
     - Bearer mode (`Authorization: Bearer <access-token>`)
+- Quota-gated for guests and unverified users
 - Route method: `POST`
 - Response header: `Cache-Control: no-store`
 

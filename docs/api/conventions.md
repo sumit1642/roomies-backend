@@ -134,6 +134,24 @@ Some auth flows return a slightly different message:
 
 That difference is service-specific and documented in the auth feature doc.
 
+
+## Auth Transport Header Convention
+
+Auth endpoints support two client transport modes:
+
+- default cookie mode (no special header)
+- bearer mode via `X-Client-Transport: bearer`
+
+When bearer mode is requested on auth endpoints, token responses include `accessToken` and `refreshToken` in JSON.
+Without that header, browser-safe cookie mode is used and token strings are not exposed in the response body.
+
+## Money Units Convention
+
+- Database storage uses paise (integer).
+- Public API request/response payloads use rupees (integer).
+
+Example: `rent_per_month = 950000` in the database corresponds to `rentPerMonth = 9500` in the API.
+
 ## Authorization and Privacy Conventions
 
 Roomies intentionally uses two different patterns depending on the sensitivity of the resource.
@@ -206,6 +224,15 @@ Guest contact reveal quota exhausted:
 	"loginRedirect": "/login/signup"
 }
 ```
+
+## Endpoint-specific Rate Limits
+
+Use these values for client retry behavior and UX copy:
+
+- `authLimiter`: **10 requests / 15 minutes** (`/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout/all`, Google auth endpoints).
+- `otpLimiter`: **5 requests / 15 minutes** (`/auth/otp/send`).
+- OTP verify IP throttle: **20 attempts / 15 minutes per IP** (`/auth/otp/verify`).
+- `publicRatingsLimiter`: **120 requests / 15 minutes** (public ratings reads).
 
 ## Upload Error Responses
 

@@ -19,6 +19,7 @@ The `NOTIFICATION_MESSAGES` map in `src/workers/notificationWorker.js` is author
 | `listing_expiring`           | One of your listings is expiring soon              | ACTIVE          |
 | `listing_expired`            | One of your listings has expired                   | ACTIVE          |
 | `listing_filled`             | A listing has been marked as filled                | ACTIVE          |
+| `verification_pending`      | We received your verification documents            | EMAIL-ONLY event (not in-app feed) |
 | `verification_approved`      | Your verification request was approved             | PLANNED emitter |
 | `verification_rejected`      | Your verification request was rejected             | PLANNED emitter |
 | `new_message`                | You have a new message                             | PLANNED emitter |

@@ -11,6 +11,7 @@ This file is the API front door. Endpoint-by-endpoint contracts live in `docs/ap
 ## Feature Docs
 
 - [Shared conventions](./api/conventions.md)
+- [Auth/Authz matrix](./api/authz-matrix.md)
 - [Auth](./api/auth.md)
 - [Profiles and contact reveal](./api/profiles-and-contact.md)
 - [Properties](./api/properties.md)
@@ -20,8 +21,20 @@ This file is the API front door. Endpoint-by-endpoint contracts live in `docs/ap
 - [Notifications](./api/notifications.md)
 - [Ratings and reports](./api/ratings-and-reports.md)
 - [Preferences](./api/preferences.md)
-- [Admin](./api/admin.md)
+- [Admin](./api/admin.md) _(currently not mounted in this workspace; calls return 404)_
 - [Health](./api/health.md)
+
+## Service-owned Documentation Model
+
+To reduce drift, each backend service now has a dedicated service contract page in `docs/services/README.md` that maps:
+
+- route entrypoints (`src/routes/*`)
+- validation contracts (`src/validators/*`)
+- business rules (`src/services/*`)
+- worker side effects (`src/workers/*`)
+
+API consumers should still start with feature docs in `docs/api/*`, then use service docs when they need
+implementation-backed edge-case behavior.
 
 ## Response Envelopes
 

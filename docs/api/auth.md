@@ -399,7 +399,7 @@ Status: `401`
 
 ## `POST /auth/logout`
 
-Revokes a session using the refresh token from the body or cookie.
+Revokes a session using the refresh token from the body or cookie. This endpoint intentionally does **not** require `authenticate`, so clients with expired access tokens can still revoke refresh-token sessions.
 
 ### Request
 
@@ -448,7 +448,7 @@ Status: `401`
 
 ## `POST /auth/logout/current`
 
-Revokes the currently authenticated session only.
+Revokes the currently authenticated session only. This endpoint **does** require `authenticate` and is session-scoped: the refresh token must belong to the same authenticated user/session context.
 
 ### Scenario: current-session logout succeeds
 
@@ -595,8 +595,8 @@ Sends an email OTP to the authenticated user.
 ### Request Contract
 
 - Auth required: Yes
-- Rate limited: Yes, stricter OTP limiter
-- Body: none
+- Rate limited: Yes, OTP limiter (**5 requests / 15 minutes**)
+- Body: none (if a body is sent, it is ignored)
 
 ### Scenario: OTP send succeeds
 

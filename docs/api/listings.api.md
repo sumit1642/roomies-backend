@@ -18,11 +18,14 @@ other listing endpoints require a valid access token.
 
 | Caller           | Browsing                       | Compatibility score       | Saving          | Interest        |
 | ---------------- | ------------------------------ | ------------------------- | --------------- | --------------- |
-| Guest (no token) | ✅ Up to 20 items per request  | ❌ Always 0 / unavailable | ❌ 401          | ❌ 401          |
+| Guest (no token) | ✅ Up to 20 items per request (server silently caps higher `limit`) | ❌ Always 0 / unavailable | ❌ 401          | ❌ 401          |
 | Authenticated    | ✅ Up to 100 items per request | ✅ When preferences exist | ✅ Student only | ✅ Student only |
 
 Guests receive identical listing data to authenticated users. The only differences are the item cap, the absence of
 compatibility scoring, and the inability to use write endpoints.
+
+Optional-auth exception: on these two read endpoints, invalid/expired bearer tokens are treated as guest access (the
+request is not rejected with `401` by `optionalAuthenticate`).
 
 ## Search and Retrieval
 
@@ -86,6 +89,10 @@ Status: `200`
 ```
 
 `compatibilityScore` is always `0` and `compatibilityAvailable` is always `false` for guests.
+
+Compatibility semantics for authenticated callers:
+- `compatibilityAvailable = false` means either side has no saved preferences, so no comparison was possible.
+- `compatibilityAvailable = true` with `compatibilityScore = 0` means comparison happened, but no preferences matched.
 
 #### Scenario: authenticated search with city, rent, and amenity filters
 
@@ -209,7 +216,7 @@ Status: `400`
 
 ### `GET /listings/:listingId`
 
-Fetches full listing detail. Also increments `views_count` asynchronously.
+Fetches full listing detail. Also increments `views_count` asynchronously (fire-and-forget side effect). Avoid polling this endpoint for background status checks.
 
 #### Request Contract
 
@@ -951,6 +958,8 @@ Status: `200`
 
 **Auth required.** Role: `student`. Returns the student's saved active listings.
 
+Integration note: this endpoint currently returns a mixed casing payload (legacy `snake_case` fields from SQL rows plus camelCase rent/deposit fields). Treat the example response as authoritative until the response is normalized in code.
+
 #### Scenario: paginated saved listings
 
 Status: `200`
@@ -978,7 +987,10 @@ Status: `200`
 				"depositAmount": 5000
 			}
 		],
-		"nextCursor": null
+		"nextCursor": {
+			"cursorTime": "2026-04-11T10:30:00.000Z",
+			"cursorId": "55555555-5555-4555-8555-555555555555"
+		}
 	}
 }
 ```
@@ -986,13 +998,13 @@ Status: `200`
 ## Photos
 
 Photo uploads are asynchronous. The HTTP request inserts a provisional row and queues a worker job. Clients should poll
-`GET /listings/:listingId/photos`.
+`GET /listings/:listingId/photos`. Use this endpoint (not listing detail polling) to avoid inflating `views_count`.
 
 **All photo endpoints require authentication.**
 
 ### `GET /listings/:listingId/photos`
 
-Returns completed photos only. Processing placeholders are hidden.
+Returns completed photos only. Processing placeholders are hidden (`photo_url LIKE 'processing:%'` rows are filtered out until processing completes).
 
 #### Scenario: success
 

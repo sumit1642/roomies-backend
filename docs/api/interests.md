@@ -11,6 +11,8 @@ Student-only endpoint for expressing interest in a listing.
 
 ### Request Body
 
+Body is optional. You can send no request body at all, or send `{}`.
+
 Minimal request:
 
 ```json
@@ -268,7 +270,7 @@ Status: `404`
 }
 ```
 
-This is privacy-preserving behavior. The API does not reveal whether the request exists.
+This is privacy-preserving behavior. The API does not reveal whether the request exists, and non-parties always get `404` (not `403`).
 
 ## `PATCH /interests/:interestId/status`
 
@@ -335,6 +337,8 @@ Status: `200`
 ```
 
 ### Scenario: poster accepts pending request
+
+`whatsappLink` can be `null` when the poster has no phone number on file; this is not an error and does not block acceptance.
 
 Request:
 
