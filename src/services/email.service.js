@@ -679,3 +679,36 @@ export const sendVerificationPendingEmail = async (to, ownerName, businessName) 
 		throw new AppError("Failed to send verification pending email — try again shortly", 502);
 	}
 };
+
+// Brevo REST API transport — used when EMAIL_PROVIDER=brevo-api.
+// Uses HTTPS (port 443), which is never blocked, unlike SMTP ports.
+// Brevo API docs: https://developers.brevo.com/reference/send-transac-email
+const sendViaBrevoAPI = async (to, subject, html, text) => {
+	const maskedTo = maskEmail(to);
+	logger.info({ to: maskedTo, provider: "brevo-api" }, "Sending email via Brevo REST API");
+
+	const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"api-key": config.BREVO_API_KEY,
+		},
+		body: JSON.stringify({
+			sender: { name: "Roomies", email: config.BREVO_SMTP_FROM },
+			to: [{ email: to }],
+			subject,
+			htmlContent: html,
+			textContent: text,
+		}),
+	});
+
+	if (!response.ok) {
+		const errorBody = await response.json().catch(() => ({}));
+		logger.error({ to: maskedTo, status: response.status, error: errorBody }, "Brevo API: email send failed");
+		throw new AppError("Failed to send email via Brevo API — try again shortly", 502);
+	}
+
+	const result = await response.json();
+	logger.info({ to: maskedTo, messageId: result.messageId }, "Brevo API: email sent successfully");
+	return result.messageId;
+};
