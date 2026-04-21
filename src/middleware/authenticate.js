@@ -12,58 +12,73 @@ const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
 const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
 const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
 
-// Cookie options are module-scope constants because a cookie set with a given
-// sameSite/secure configuration must be cleared or replaced with the exact same
-// flags — mismatched options cause browsers to treat them as different cookies.
-const ACCESS_COOKIE_OPTIONS = {
+// ─── Cross-origin cookie policy ───────────────────────────────────────────────
+//
+// In production the frontend (Vercel) and backend (Render) are on different
+// domains. Browsers apply the following rules:
+//
+//   sameSite: "strict"  → cookie is NEVER sent cross-site, even with
+//                          credentials: "include". Auth breaks completely.
+//   sameSite: "lax"     → cookie is sent on top-level navigations (GET) but
+//                          NOT on cross-origin fetch with credentials. Still
+//                          broken for API calls.
+//   sameSite: "none"    → sent on all cross-site requests, but REQUIRES
+//                          secure: true (HTTPS only).
+//
+// In practice, for a cross-domain SPA + API architecture the correct approach
+// is to use sameSite: "none" + secure: true in production so the browser
+// actually sends the cookie on every credentialed fetch.
+//
+// We also support the X-Client-Transport: bearer header (sent by the frontend
+// in production). When present, the auth controller returns tokens in the JSON
+// body AND sets cookies. The frontend stores tokens in memory/sessionStorage
+// and sends them as Authorization: Bearer headers — completely bypassing the
+// cross-domain cookie problem.
+//
+// Cookie options for each environment:
+//   development  → sameSite: "lax",  secure: false  (localhost HTTP)
+//   production   → sameSite: "none", secure: true   (cross-domain HTTPS)
+
+const IS_PROD = config.NODE_ENV === "production";
+
+export const ACCESS_COOKIE_OPTIONS = {
 	httpOnly: true,
-	secure: config.NODE_ENV === "production",
-	sameSite: "strict",
+	secure: IS_PROD,
+	sameSite: IS_PROD ? "none" : "lax",
 	maxAge: ACCESS_TTL_SECONDS * 1000,
 };
-const REFRESH_COOKIE_OPTIONS = {
+
+export const REFRESH_COOKIE_OPTIONS = {
 	httpOnly: true,
-	secure: config.NODE_ENV === "production",
-	sameSite: "strict",
+	secure: IS_PROD,
+	sameSite: IS_PROD ? "none" : "lax",
 	maxAge: REFRESH_TTL_SECONDS * 1000,
 };
 
 const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
 
-// Extracts the access token from req.cookies.accessToken (priority) or the
-// Authorization: Bearer header. Returns { token, source } or null.
-// Cookie takes priority so browser clients always use the secure HttpOnly path.
 const extractToken = (req) => {
-	const cookieToken = req.cookies?.accessToken;
-	if (cookieToken) {
-		return { token: cookieToken, source: "cookie" };
-	}
-
+	// Authorization: Bearer <token> takes priority over cookies for
+	// cross-origin clients that use the bearer transport.
 	const authHeader = req.headers.authorization;
 	if (authHeader && authHeader.startsWith("Bearer ")) {
 		return { token: authHeader.slice(7), source: "header" };
 	}
 
+	const cookieToken = req.cookies?.accessToken;
+	if (cookieToken) {
+		return { token: cookieToken, source: "cookie" };
+	}
+
 	return null;
 };
 
-// Attempts a silent refresh when the access token cookie is expired.
-// Uses verifyRefreshTokenPayload (which migrates legacy tokens that lack a sid)
-// rather than raw jwt.verify, so users with pre-sid tokens are not forced to
-// re-login when their access token expires.
-//
-// On success: issues a new access token and rotates the refresh token via CAS,
-// sets replacement cookies, and returns { userId, sid }.
-// On any failure: returns null — the caller will respond with 401.
 const attemptSilentRefresh = async (req, res) => {
 	const refreshToken = req.cookies?.refreshToken;
 	if (!refreshToken) return null;
 
 	let refreshPayload;
 	try {
-		// verifyRefreshTokenPayload handles legacy tokens (no sid) by migrating them
-		// to the per-session key scheme. Raw jwt.verify would reject those tokens,
-		// forcing a re-login unnecessarily.
 		refreshPayload = await verifyRefreshTokenPayload(refreshToken);
 	} catch {
 		return null;
@@ -73,13 +88,11 @@ const attemptSilentRefresh = async (req, res) => {
 		return null;
 	}
 
-	// Verify the token is still stored in Redis (not revoked via logout/revokeSession).
 	const storedToken = await redis.get(refreshTokenKey(refreshPayload.userId, refreshPayload.sid));
 	if (!storedToken || storedToken !== refreshToken) {
 		return null;
 	}
 
-	// Load fresh user state — the refresh token payload can be up to 7 days old.
 	const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [
 		refreshPayload.userId,
 	]);
@@ -123,9 +136,6 @@ const attemptSilentRefresh = async (req, res) => {
 	return { userId: refreshPayload.userId, sid: refreshPayload.sid };
 };
 
-// Verifies the access token, loads the user from DB, and attaches req.user.
-// Cookie-source expired tokens trigger a silent refresh (browser UX).
-// Header-source expired tokens return 401 immediately (Android handles refresh explicitly).
 export const authenticate = async (req, res, next) => {
 	try {
 		const extracted = extractToken(req);
@@ -140,6 +150,8 @@ export const authenticate = async (req, res, next) => {
 		try {
 			payload = jwt.verify(token, config.JWT_SECRET);
 		} catch (err) {
+			// Only attempt silent cookie-based refresh for cookie-sourced tokens.
+			// Header-sourced tokens (bearer transport) handle refresh client-side.
 			if (err.name === "TokenExpiredError" && source === "cookie") {
 				const session = await attemptSilentRefresh(req, res);
 				if (!session?.userId) {

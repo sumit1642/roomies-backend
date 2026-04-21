@@ -4,20 +4,18 @@ import * as authService from "../services/auth.service.js";
 import { parseTtlSeconds } from "../services/auth.service.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { config } from "../config/env.js";
+import { ACCESS_COOKIE_OPTIONS, REFRESH_COOKIE_OPTIONS } from "../middleware/authenticate.js";
 
-const ACCESS_COOKIE_OPTIONS = {
-	httpOnly: true,
-	secure: config.NODE_ENV === "production",
-	sameSite: "strict",
-	maxAge: parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60) * 1000,
-};
+// Determines whether the caller is a non-browser client (e.g. Android) or a
+// cross-origin SPA that uses the bearer transport instead of cookies.
+// The frontend sends X-Client-Transport: bearer in production.
+const isBearerTransport = (req) => req.headers["x-client-transport"] === "bearer";
 
-const REFRESH_COOKIE_OPTIONS = {
-	httpOnly: true,
-	secure: config.NODE_ENV === "production",
-	sameSite: "strict",
-	maxAge: parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60) * 1000,
-};
+// Builds the safe body payload for cookie-mode responses.
+const buildSafeBody = (tokens) => ({
+	user: tokens.user,
+	sid: tokens.sid,
+});
 
 const setAuthCookies = (res, accessToken, refreshToken) => {
 	res.cookie("accessToken", accessToken, ACCESS_COOKIE_OPTIONS);
@@ -25,41 +23,18 @@ const setAuthCookies = (res, accessToken, refreshToken) => {
 };
 
 const clearAuthCookies = (res) => {
+	// Must use the same sameSite/secure settings to clear correctly
 	res.clearCookie("accessToken", {
 		httpOnly: true,
-		secure: config.NODE_ENV === "production",
-		sameSite: "strict",
+		secure: ACCESS_COOKIE_OPTIONS.secure,
+		sameSite: ACCESS_COOKIE_OPTIONS.sameSite,
 	});
 	res.clearCookie("refreshToken", {
 		httpOnly: true,
-		secure: config.NODE_ENV === "production",
-		sameSite: "strict",
+		secure: REFRESH_COOKIE_OPTIONS.secure,
+		sameSite: REFRESH_COOKIE_OPTIONS.sameSite,
 	});
 };
-
-// Determines whether the caller is a non-browser client that manages its own
-// token lifecycle (e.g. the Android app). When true, tokens are included in the
-// JSON response body. When false, tokens are delivered only via HttpOnly cookies
-// and the body contains only safe session metadata.
-//
-// Browser clients using cookies gain no benefit from receiving raw tokens in the
-// body — they cannot read HttpOnly cookies from JavaScript anyway, and including
-// the tokens in JSON directly undermines the XSS protection that HttpOnly provides
-// by giving any script on the page an additional exfiltration surface.
-//
-// Android clients set X-Client-Transport: bearer to signal that they are managing
-// tokens explicitly and expect them in the response body.
-const isBearerTransport = (req) => req.headers["x-client-transport"] === "bearer";
-
-// Builds the safe body payload for cookie-mode responses. Contains everything
-// the browser UI needs (user identity, roles, verification state) without
-// exposing the raw token strings that only the HttpOnly cookie transport should
-// carry. The sid is included so the client can reference the current session
-// (e.g. for the session management UI) without needing the token itself.
-const buildSafeBody = (tokens) => ({
-	user: tokens.user,
-	sid: tokens.sid,
-});
 
 // ─── Controllers ──────────────────────────────────────────────────────────────
 
@@ -68,8 +43,10 @@ export const register = async (req, res, next) => {
 		const tokens = await authService.register(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
-		res.status(201).json({ status: "success", data });
+		// Always return full token data — the frontend needs it in production
+		// where cookies can't cross domains. In cookie-mode the frontend ignores
+		// the tokens in the body and relies on cookies.
+		res.status(201).json({ status: "success", data: tokens });
 	} catch (err) {
 		next(err);
 	}
@@ -80,8 +57,8 @@ export const login = async (req, res, next) => {
 		const tokens = await authService.login(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
-		res.json({ status: "success", data });
+		// Return full tokens unconditionally. Same reasoning as register above.
+		res.json({ status: "success", data: tokens });
 	} catch (err) {
 		next(err);
 	}
@@ -127,8 +104,8 @@ export const refresh = async (req, res, next) => {
 
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
-		res.json({ status: "success", data });
+		// Always return full tokens (bearer transport + cookie both work)
+		res.json({ status: "success", data: tokens });
 	} catch (err) {
 		next(err);
 	}
@@ -194,8 +171,7 @@ export const googleCallback = async (req, res, next) => {
 		const tokens = await authService.googleOAuth(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
-		res.json({ status: "success", data });
+		res.json({ status: "success", data: tokens });
 	} catch (err) {
 		next(err);
 	}
