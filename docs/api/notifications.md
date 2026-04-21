@@ -8,22 +8,39 @@ Shared conventions: [conventions.md](./conventions.md)
 
 The `NOTIFICATION_MESSAGES` map in `src/workers/notificationWorker.js` is authoritative.
 
-| Type                         | Message                                            | Status          |
-| ---------------------------- | -------------------------------------------------- | --------------- |
-| `interest_request_received`  | Someone expressed interest in your listing         | ACTIVE          |
-| `interest_request_accepted`  | Your interest request was accepted                 | ACTIVE          |
-| `interest_request_declined`  | Your interest request was declined                 | ACTIVE          |
-| `interest_request_withdrawn` | An interest request was withdrawn                  | ACTIVE          |
-| `connection_confirmed`       | Your connection has been confirmed by both parties | ACTIVE          |
-| `rating_received`            | You received a new rating                          | ACTIVE          |
-| `listing_expiring`           | One of your listings is expiring soon              | ACTIVE          |
-| `listing_expired`            | One of your listings has expired                   | ACTIVE          |
-| `listing_filled`             | A listing has been marked as filled                | ACTIVE          |
-| `verification_pending`      | We received your verification documents            | EMAIL-ONLY event (not in-app feed) |
-| `verification_approved`      | Your verification request was approved             | PLANNED emitter |
-| `verification_rejected`      | Your verification request was rejected             | PLANNED emitter |
-| `new_message`                | You have a new message                             | PLANNED emitter |
-| `connection_requested`       | You have a new connection request                  | PLANNED emitter |
+| Type                         | Message                                            | Status                                      |
+| ---------------------------- | -------------------------------------------------- | ------------------------------------------- |
+| `interest_request_received`  | Someone expressed interest in your listing         | ACTIVE                                      |
+| `interest_request_accepted`  | Your interest request was accepted                 | ACTIVE                                      |
+| `interest_request_declined`  | Your interest request was declined                 | ACTIVE                                      |
+| `interest_request_withdrawn` | An interest request was withdrawn                  | ACTIVE                                      |
+| `connection_confirmed`       | Your connection has been confirmed by both parties | ACTIVE                                      |
+| `rating_received`            | You received a new rating                          | ACTIVE                                      |
+| `listing_expiring`           | One of your listings is expiring soon              | ACTIVE                                      |
+| `listing_expired`            | One of your listings has expired                   | ACTIVE                                      |
+| `listing_filled`             | A listing has been marked as filled                | ACTIVE                                      |
+| `verification_approved`      | Your verification request was approved             | ACTIVE (in-app + email)                     |
+| `verification_rejected`      | Your verification request was rejected             | ACTIVE (in-app + email)                     |
+| `verification_pending`       | We received your verification documents            | ACTIVE (email only, no in-app notification) |
+| `new_message`                | You have a new message                             | PLANNED — no emitter                        |
+| `connection_requested`       | You have a new connection request                  | PLANNED — no emitter                        |
+
+### Delivery pipeline for verification events
+
+Verification notifications are not triggered directly by the API controller. They are driven by a CDC (Change Data
+Capture) outbox pattern:
+
+1. Admin calls `POST /admin/verification-queue/:requestId/approve|reject`
+2. `verification.service.js` commits `UPDATE verification_requests SET status = 'verified'|'rejected'|'pending'`
+3. Postgres trigger `trg_verification_status_changed` (migration `002`) writes to `verification_event_outbox`
+4. `src/workers/verificationEventWorker.js` polls the outbox every 5 seconds using `SELECT ... FOR UPDATE SKIP LOCKED`
+5. On each event, the worker calls:
+    - `enqueueNotification()` -> `notification-delivery` BullMQ queue -> in-app notification row
+    - `enqueueEmail()` -> `email-delivery` BullMQ queue -> Brevo REST/SMTP email
+6. `verification_pending` emits email only (no `enqueueNotification` call in source)
+
+This means verification notifications can originate from direct SQL on the database (not just the API), as long as the
+trigger fires. The worker handles retry with up to `MAX_ATTEMPTS = 5` retries per event.
 
 ## `GET /notifications`
 
@@ -37,6 +54,16 @@ Returns the authenticated user's notification feed.
     - `limit`
     - `cursorTime`
     - `cursorId`
+
+### Query parameter details
+
+`isRead` (optional boolean filter):
+
+- String: `"true"` or `"false"` (case-insensitive: `"TRUE"`, `"False"` also work)
+- Numeric: `0` (false) or `1` (true)
+- Omit entirely to receive all notifications (read + unread)
+
+Values like `"yes"`, `"1"` (string), and `2` are rejected with `400 Validation failed`.
 
 ### Scenario: fetch feed with pagination
 

@@ -5,12 +5,64 @@ OAuth.
 
 Shared response and error conventions live in [conventions.md](./conventions.md).
 
-## Transport Summary
+## Auth Transport Reference
 
-- Browser clients should use cookie mode.
-- Mobile and API clients should send `X-Client-Transport: bearer` to receive tokens in the JSON body.
-- Protected routes accept cookie auth and bearer auth unless otherwise noted.
-- Silent refresh only happens when the expired access token came from a cookie.
+### Token extraction priority
+
+`authenticate` and `optionalAuthenticate` extract the access token in this exact order:
+
+1. `req.cookies.accessToken` (HttpOnly cookie) — takes priority
+2. `Authorization: Bearer <token>` header — used only if no cookie is present
+
+If both are present, the cookie always wins.
+
+### Transport mode: cookie (default, browser)
+
+- No special request header needed
+- Auth endpoints set `accessToken` (TTL: `JWT_EXPIRES_IN`, default `15m`) and `refreshToken` (TTL:
+  `JWT_REFRESH_EXPIRES_IN`, default `7d`) as `HttpOnly; SameSite=Strict` cookies
+- Response body for auth endpoints contains `{ user, sid }` only — no raw token strings
+- `secure: true` in production, `secure: false` in development
+
+### Transport mode: bearer (mobile/API)
+
+- Set request header: `X-Client-Transport: bearer` (case-sensitive, lowercase `"bearer"`)
+- Response body for auth endpoints includes `{ accessToken, refreshToken, user, sid }`
+- For protected endpoints, send: `Authorization: Bearer <access-token>`
+
+### Silent refresh (cookie mode only)
+
+Triggers automatically inside `authenticate` middleware when:
+
+- `err.name === "TokenExpiredError"` and
+- token came from `req.cookies.accessToken` (not from `Authorization` header)
+
+Silent refresh process:
+
+1. Reads `req.cookies.refreshToken`
+2. Calls `verifyRefreshTokenPayload()` (supports legacy tokens missing `sid`)
+3. Checks Redis key `refreshToken:{userId}:{sid}` and verifies exact token match
+4. Loads fresh user state from DB
+5. Signs new access token and refresh token
+6. CAS-rotates refresh token atomically via Lua script
+7. Sets new cookies on the response
+
+Silent refresh never triggers for an expired bearer header token.
+
+### Error response matrix by scenario
+
+| Scenario                                | Middleware             | Response                                                                      |
+| --------------------------------------- | ---------------------- | ----------------------------------------------------------------------------- |
+| No token present                        | `authenticate`         | `401 { "message": "No token provided" }`                                      |
+| Bearer token expired                    | `authenticate`         | `401 { "message": "Token has expired" }`                                      |
+| Cookie token expired + refresh succeeds | `authenticate`         | Request continues transparently                                               |
+| Cookie token expired + refresh fails    | `authenticate`         | `401 { "message": "Session expired" }`                                        |
+| Token invalid (malformed/wrong secret)  | `authenticate`         | `401 { "message": "Invalid token" }`                                          |
+| User not found in DB                    | `authenticate`         | `401 { "message": "User not found" }`                                         |
+| User suspended/banned/deactivated       | `authenticate`         | `401 { "message": "Account is suspended" }` (or corresponding account status) |
+| Any token error                         | `optionalAuthenticate` | Request continues as guest (`req.user` is undefined)                          |
+| Invalid/expired token                   | `optionalAuthenticate` | Request continues as guest — never returns `401`                              |
+| Suspended user token                    | `optionalAuthenticate` | Request continues as guest                                                    |
 
 ## `POST /auth/register`
 
@@ -298,7 +350,16 @@ Rotates the refresh token and issues a fresh access token.
 
 - Auth required: No
 - Rate limited: Yes
-- Body: optional when using the refresh token cookie
+- Body: optional (cookie clients can omit body entirely)
+
+### Request body behavior
+
+The request body is fully optional for browser clients using cookie transport.
+
+- Cookie mode (browser): send no body; controller reads `req.cookies.refreshToken`
+- Bearer mode (mobile/API): send `{ "refreshToken": "..." }` in body
+
+Resolution order in controller: `req.body?.refreshToken ?? req.cookies?.refreshToken`.
 
 Bearer/mobile request example:
 
@@ -405,6 +466,13 @@ Revokes a session using the refresh token from the body or cookie. This endpoint
 ### Request
 
 Cookie-based browser request can send no body.
+
+The request body is optional in cookie mode and accepted in bearer mode:
+
+- Cookie mode (browser): send no body; controller reads `req.cookies.refreshToken`
+- Bearer mode (mobile/API): send `{ "refreshToken": "..." }`
+
+Resolution order in controller: `req.body?.refreshToken ?? req.cookies?.refreshToken`.
 
 Bearer/mobile request example:
 

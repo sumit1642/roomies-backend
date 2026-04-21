@@ -265,10 +265,45 @@ Status: `409`
 }
 ```
 
-## CDC side-effects note
+## CDC Outbox: Verification Side Effects
 
-When verification status changes to `verified`, `rejected`, or `pending`, trigger `trg_verification_status_changed`
-writes to `verification_event_outbox`. `verificationEventWorker` polls this table (5-second interval) and enqueues:
+Verification status changes trigger a CDC (Change Data Capture) outbox pipeline, not direct synchronous effects from the
+API.
 
-- in-app notification (`notification-delivery`)
-- email (`email-delivery`)
+### Trigger
+
+The Postgres trigger `trg_verification_status_changed` fires on `AFTER UPDATE OF status ON verification_requests` for
+any status change to `verified`, `rejected`, or `pending`. This fires regardless of whether the change comes from the
+API or direct SQL.
+
+### Worker behavior (`src/workers/verificationEventWorker.js`)
+
+| Property           | Value                                                                      |
+| ------------------ | -------------------------------------------------------------------------- |
+| Poll interval      | 5 seconds                                                                  |
+| Batch size         | 10 events per cycle                                                        |
+| Max retry attempts | 5 (then event is abandoned with error recorded)                            |
+| Concurrency safe   | Yes — `FOR UPDATE SKIP LOCKED` prevents double-processing across instances |
+| Startup behavior   | Runs one immediate drain on startup to catch accumulated events            |
+
+### Per-event actions
+
+| Event type              | In-app notification | Email                                 |
+| ----------------------- | ------------------- | ------------------------------------- |
+| `verification_approved` | Yes                 | Yes (`sendVerificationApprovedEmail`) |
+| `verification_rejected` | Yes                 | Yes (`sendVerificationRejectedEmail`) |
+| `verification_pending`  | No                  | Yes (`sendVerificationPendingEmail`)  |
+
+### Profile consistency guard
+
+Before enqueuing notifications, the worker verifies `pg_owner_profiles.verification_status` matches the event type. If
+inconsistent (for example, admin ran partial SQL), the worker corrects the profile status in the same DB transaction as
+the event acknowledgement.
+
+### Failure behavior
+
+- If `processEvent()` throws, `attempts` is incremented and `error_message` recorded.
+- After `MAX_ATTEMPTS = 5` failures, `processed_at` is set — event is permanently skipped but remains in table for
+  inspection.
+- Graceful shutdown (`SIGTERM`) calls `clearInterval` only — in-flight events are not drained and will be retried on
+  next startup.

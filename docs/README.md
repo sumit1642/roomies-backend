@@ -37,6 +37,9 @@ Feature-level API documentation lives in `docs/api/`.
 - [api/preferences.md](./api/preferences.md) — preferences metadata and student preferences endpoints
 - [api/admin.md](./api/admin.md) — admin surface scenarios (and current mount status)
 - [api/health.md](./api/health.md) — dependency health probe behavior
+- [api/appendix-middleware.md](./api/appendix-middleware.md) — middleware-to-route reference and chain behavior notes
+- [api/appendix-workers-crons.md](./api/appendix-workers-crons.md) — worker/cron responsibilities, triggers, retries,
+  and endpoint-visible effects
 
 ## Service Contracts
 

@@ -89,12 +89,12 @@ const NOTIFICATION_MESSAGES = {
 	// Emitted post-commit in _acceptInterestRequest when capacity is exhausted.
 	listing_filled: "A listing has been marked as filled",
 
-	// ── PLANNED: wire emitter in verification.service.js (Phase 5 admin work) ──
-	// Should fire from approveRequest() after committing the verification decision.
+	// ── ACTIVE: fired from verificationEventWorker.js (CDC pipeline) ───────────
+	// Emitted when verification_requests.status transitions to verified.
 	verification_approved: "Your verification request was approved",
 
-	// ── PLANNED: wire emitter in verification.service.js (Phase 5 admin work) ──
-	// Should fire from rejectRequest() after committing the rejection.
+	// ── ACTIVE: fired from verificationEventWorker.js (CDC pipeline) ───────────
+	// Emitted when verification_requests.status transitions to rejected.
 	verification_rejected: "Your verification request was rejected",
 
 	// ── PLANNED: wire emitter once in-app messaging is implemented (Phase 6+) ──

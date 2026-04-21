@@ -329,6 +329,25 @@ If only one cursor field is supplied, validation fails:
 }
 ```
 
+### Cursor pairing enforcement
+
+All keyset-paginated endpoints enforce that `cursorTime` and `cursorId` must be supplied together or both omitted.
+Validation runs before controller logic.
+
+This rule applies to:
+
+- `GET /listings`
+- `GET /listings/:listingId/interests`
+- `GET /interests/me`
+- `GET /notifications`
+- `GET /ratings/user/:userId`
+- `GET /ratings/property/:propertyId`
+- `GET /ratings/me/given`
+- `GET /ratings/connection/:connectionId`
+- `GET /connections/me`
+- `GET /properties`
+- `GET /listings/me/saved`
+
 ## Example Value Conventions
 
 The feature docs use consistent sample values.

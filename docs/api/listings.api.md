@@ -16,16 +16,35 @@ Prices are expressed in rupees in the API, even though the database stores paise
 `GET /listings` and `GET /listings/:listingId` are the only listing endpoints that accept unauthenticated requests. All
 other listing endpoints require a valid access token.
 
-| Caller           | Browsing                       | Compatibility score       | Saving          | Interest        |
-| ---------------- | ------------------------------ | ------------------------- | --------------- | --------------- |
+| Caller           | Browsing                                                            | Compatibility score       | Saving          | Interest        |
+| ---------------- | ------------------------------------------------------------------- | ------------------------- | --------------- | --------------- |
 | Guest (no token) | ✅ Up to 20 items per request (server silently caps higher `limit`) | ❌ Always 0 / unavailable | ❌ 401          | ❌ 401          |
-| Authenticated    | ✅ Up to 100 items per request | ✅ When preferences exist | ✅ Student only | ✅ Student only |
+| Authenticated    | ✅ Up to 100 items per request                                      | ✅ When preferences exist | ✅ Student only | ✅ Student only |
 
 Guests receive identical listing data to authenticated users. The only differences are the item cap, the absence of
 compatibility scoring, and the inability to use write endpoints.
 
 Optional-auth exception: on these two read endpoints, invalid/expired bearer tokens are treated as guest access (the
 request is not rejected with `401` by `optionalAuthenticate`).
+
+### Exact middleware chain for read endpoints
+
+`GET /listings`:
+
+`optionalAuthenticate -> validate(searchListingsSchema) -> guestListingGate -> listingController.searchListings`
+
+`GET /listings/:listingId`:
+
+`optionalAuthenticate -> validate(listingParamsSchema) -> guestListingGate -> listingController.getListing`
+
+`validate` runs before `guestListingGate` intentionally, so Zod-coerced numeric `limit` is available when the gate reads
+it.
+
+`guestListingGate` behavior:
+
+- Authenticated users (`req.user` set): passes through unchanged
+- Guests: silently caps `req.query.limit` to `20` only when requested value exceeds `20`
+- Does not block browsing, does not touch Redis, does not count requests
 
 ## Search and Retrieval
 
@@ -91,6 +110,7 @@ Status: `200`
 `compatibilityScore` is always `0` and `compatibilityAvailable` is always `false` for guests.
 
 Compatibility semantics for authenticated callers:
+
 - `compatibilityAvailable = false` means either side has no saved preferences, so no comparison was possible.
 - `compatibilityAvailable = true` with `compatibilityScore = 0` means comparison happened, but no preferences matched.
 
@@ -216,7 +236,8 @@ Status: `400`
 
 ### `GET /listings/:listingId`
 
-Fetches full listing detail. Also increments `views_count` asynchronously (fire-and-forget side effect). Avoid polling this endpoint for background status checks.
+Fetches full listing detail. Also increments `views_count` asynchronously (fire-and-forget side effect). Avoid polling
+this endpoint for background status checks.
 
 #### Request Contract
 
@@ -958,7 +979,8 @@ Status: `200`
 
 **Auth required.** Role: `student`. Returns the student's saved active listings.
 
-Integration note: this endpoint currently returns a mixed casing payload (legacy `snake_case` fields from SQL rows plus camelCase rent/deposit fields). Treat the example response as authoritative until the response is normalized in code.
+Integration note: this endpoint currently returns a mixed casing payload (legacy `snake_case` fields from SQL rows plus
+camelCase rent/deposit fields). Treat the example response as authoritative until the response is normalized in code.
 
 #### Scenario: paginated saved listings
 
@@ -1004,7 +1026,8 @@ Photo uploads are asynchronous. The HTTP request inserts a provisional row and q
 
 ### `GET /listings/:listingId/photos`
 
-Returns completed photos only. Processing placeholders are hidden (`photo_url LIKE 'processing:%'` rows are filtered out until processing completes).
+Returns completed photos only. Processing placeholders are hidden (`photo_url LIKE 'processing:%'` rows are filtered out
+until processing completes).
 
 #### Scenario: success
 
@@ -1029,11 +1052,40 @@ Status: `200`
 
 **Auth required.** Uploads a staged image using `multipart/form-data`.
 
+#### Middleware chain
+
+`authenticate -> upload.single("photo") -> validate(uploadPhotoSchema) -> photoController.uploadPhoto`
+
 #### Multipart requirements
 
 - field name: `photo`
 - accepted MIME types: `image/jpeg`, `image/png`, `image/webp`
 - max size: `10MB`
+- extension must match declared MIME type (cross-checked by upload middleware)
+- staged file path: `uploads/staging/{uuid}.ext`
+
+#### Service flow (`src/services/photo.service.js` -> `enqueuePhotoUpload`)
+
+1. Acquires row lock on listing (`SELECT ... FOR UPDATE`) while validating ownership
+2. Allocates `display_order` server-side via `SELECT COALESCE(MAX(display_order), -1) + 1`
+3. Inserts provisional row with `photo_url = 'processing:{photoId}'`
+4. Commits transaction
+5. Enqueues BullMQ job on `media-processing` queue (`process-photo`)
+
+#### Queue failure path
+
+If queue enqueue fails after DB commit (for example Redis unavailable):
+
+- provisional `listing_photos` row is soft-deleted
+- endpoint returns `503` with retryable message
+
+#### Async processing (`src/workers/mediaProcessor.js`, concurrency: 1)
+
+- Sharp resize to max `1200x1200`, convert WebP quality 80, strip EXIF metadata
+- Upload to Azure Blob via storage adapter (30s timeout)
+- Update `listing_photos.photo_url` with final URL
+- Elect cover photo if none exists
+- Delete staging file (best-effort)
 
 #### Scenario: upload accepted and queued
 
