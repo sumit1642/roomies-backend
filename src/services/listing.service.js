@@ -254,7 +254,8 @@ export const createListing = async (posterId, posterRoles, body) => {
         longitude,
         expires_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+        $1, $2, $3::listing_type_enum, $4, $5, $6, $7, $8, $9, $10::room_type_enum,
+        $11::bed_type_enum, $12, $13::gender_enum,
         $14, $15, $16, $17, $18, $19, $20, $21, $22,
         NOW() + INTERVAL '60 days'
       )
@@ -287,8 +288,8 @@ export const createListing = async (posterId, posterRoles, body) => {
 
 		const listingId = rows[0].listing_id;
 
-		await bulkInsertListingAmenities(client, listingId, body.amenityIds);
-		await bulkInsertListingPreferences(client, listingId, body.preferences);
+		await bulkInsertListingAmenities(client, listingId, body.amenityIds ?? []);
+		await bulkInsertListingPreferences(client, listingId, body.preferences ?? []);
 
 		await client.query("COMMIT");
 
@@ -297,8 +298,8 @@ export const createListing = async (posterId, posterRoles, body) => {
 				posterId,
 				listingId,
 				listingType: body.listingType,
-				amenityCount: body.amenityIds.length,
-				preferenceCount: body.preferences.length,
+				amenityCount: (body.amenityIds ?? []).length,
+				preferenceCount: (body.preferences ?? []).length,
 			},
 			"Listing created",
 		);
@@ -314,10 +315,6 @@ export const createListing = async (posterId, posterRoles, body) => {
 };
 
 // ─── Get single listing ───────────────────────────────────────────────────────
-//
-// userId may be null for guest callers. The listing detail is returned
-// regardless — guests see all listing data except compatibility scoring,
-// which requires a logged-in user's preferences.
 export const getListing = async (listingId) => {
 	const listing = await fetchListingDetail(listingId);
 	if (!listing) throw new AppError("Listing not found", 404);
@@ -332,12 +329,6 @@ export const getListing = async (listingId) => {
 };
 
 // ─── Search listings ──────────────────────────────────────────────────────────
-//
-// userId may be null when called for a guest (optionalAuthenticate set no user).
-// When null:
-//   - scoreListingsForUser is skipped entirely
-//   - every item gets compatibilityScore: 0 and compatibilityAvailable: false
-//   - all filter/sort/pagination logic is identical to the authenticated path
 export const searchListings = async (userId, filters) => {
 	const {
 		city,
@@ -393,25 +384,25 @@ export const searchListings = async (userId, filters) => {
 	}
 
 	if (roomType !== undefined) {
-		clauses.push(`l.room_type = $${p}`);
+		clauses.push(`l.room_type = $${p}::room_type_enum`);
 		params.push(roomType);
 		p++;
 	}
 
 	if (bedType !== undefined) {
-		clauses.push(`l.bed_type = $${p}`);
+		clauses.push(`l.bed_type = $${p}::bed_type_enum`);
 		params.push(bedType);
 		p++;
 	}
 
 	if (preferredGender !== undefined) {
-		clauses.push(`(l.preferred_gender = $${p} OR l.preferred_gender IS NULL)`);
+		clauses.push(`(l.preferred_gender = $${p}::gender_enum OR l.preferred_gender IS NULL)`);
 		params.push(preferredGender);
 		p++;
 	}
 
 	if (listingType !== undefined) {
-		clauses.push(`l.listing_type = $${p}`);
+		clauses.push(`l.listing_type = $${p}::listing_type_enum`);
 		params.push(listingType);
 		p++;
 	}
@@ -486,8 +477,6 @@ export const searchListings = async (userId, filters) => {
 	const hasNextPage = rows.length > limit;
 	const items = hasNextPage ? rows.slice(0, limit) : rows;
 
-	// Compatibility scoring requires an authenticated user with saved preferences.
-	// For guests (userId === null), skip both DB queries and return zero scores.
 	let scoreMap = {};
 	let userHasPreferences = false;
 	let listingPreferenceCounts = new Map();
@@ -562,13 +551,21 @@ export const updateListing = async (posterId, listingId, body) => {
 		longitude: "longitude",
 	};
 
+	// Enum columns need explicit casts
+	const enumCasts = {
+		room_type: "::room_type_enum",
+		bed_type: "::bed_type_enum",
+		preferred_gender: "::gender_enum",
+	};
+
 	const setClauses = [];
 	const values = [];
 	let paramIndex = 1;
 
 	for (const [key, column] of Object.entries(columnMap)) {
 		if (body[key] !== undefined) {
-			setClauses.push(`${column} = $${paramIndex}`);
+			const cast = enumCasts[column] ?? "";
+			setClauses.push(`${column} = $${paramIndex}${cast}`);
 			values.push(body[key]);
 			paramIndex++;
 		}
@@ -697,6 +694,8 @@ const ALLOWED_STATUS_TRANSITIONS = {
 	deactivated: ["active"],
 };
 
+// FIX: All status enum values in UPDATE/WHERE clauses need explicit ::listing_status_enum casts
+// to avoid "column is of type listing_status_enum but expression is of type text" error
 export const updateListingStatus = async (posterId, listingId, newStatus) => {
 	const { rows: listingRows } = await pool.query(
 		`SELECT status, expires_at, (expires_at <= NOW()) AS is_expired
@@ -729,17 +728,19 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 	try {
 		await client.query("BEGIN");
 
+		// FIX: Use explicit ::listing_status_enum cast on ALL status comparisons in this query
+		// Without this, PostgreSQL rejects the parameterized value as plain text
 		const { rows: updatedRows } = await client.query(
 			`UPDATE listings l
-       SET status     = $1,
-           filled_at  = CASE WHEN $1 = 'filled' THEN NOW() ELSE l.filled_at END
+       SET status     = $1::listing_status_enum,
+           filled_at  = CASE WHEN $1::listing_status_enum = 'filled'::listing_status_enum THEN NOW() ELSE l.filled_at END
        WHERE l.listing_id = $2
          AND l.posted_by  = $3
-         AND l.status     = $4
+         AND l.status     = $4::listing_status_enum
          AND l.deleted_at IS NULL
-				 AND ($1 <> 'active' OR l.expires_at > NOW())
+         AND ($1::listing_status_enum <> 'active'::listing_status_enum OR l.expires_at > NOW())
          AND (
-           $1 <> 'active'
+           $1::listing_status_enum <> 'active'::listing_status_enum
            OR l.property_id IS NULL
            OR EXISTS (
              SELECT 1

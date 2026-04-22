@@ -1,4 +1,11 @@
 // src/services/interest.service.js
+// FIX: ON CONFLICT clause must EXACTLY match the partial unique index definition.
+// The index idx_interest_requests_no_duplicates is:
+//   ON interest_requests (sender_id, listing_id)
+//   WHERE status IN ('pending','accepted') AND deleted_at IS NULL
+//
+// The ON CONFLICT clause must also include AND deleted_at IS NULL to match exactly.
+// Without it, PostgreSQL error 42P10: "there is no unique or exclusion constraint matching"
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
@@ -18,9 +25,6 @@ const LISTING_TYPE_TO_CONNECTION_TYPE = {
 };
 
 // ─── Create interest request ─────────────────────────────────────────────────
-// A student expresses interest in a listing. Only one active (pending or
-// accepted) interest request per student per listing is allowed; the partial
-// unique index idx_interest_requests_no_duplicates enforces this at DB level.
 export const createInterestRequest = async (studentId, listingId, data) => {
 	const { message } = data;
 
@@ -57,19 +61,19 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 		throw new AppError("You cannot express interest in your own listing", 422);
 	}
 
-	// ON CONFLICT predicate must exactly match the partial unique index:
+	// FIX: The ON CONFLICT WHERE clause must EXACTLY match the partial index:
 	//   idx_interest_requests_no_duplicates ON (sender_id, listing_id)
 	//   WHERE status IN ('pending','accepted') AND deleted_at IS NULL
-	// The original clause incorrectly included "AND deleted_at IS NULL" inside
-	// the ON CONFLICT WHERE, which caused PostgreSQL to skip conflict detection
-	// for soft-deleted rows and allowed duplicate active requests to be inserted.
-	// The fix removes that extra predicate so the clause matches the index exactly.
+	//
+	// Both the status filter AND deleted_at IS NULL must be present.
+	// Adding the ::request_status_enum cast also ensures proper type matching.
 	const { rows } = await pool.query(
 		`INSERT INTO interest_requests
        (sender_id, listing_id, message, status)
-     VALUES ($1, $2, $3, 'pending')
+     VALUES ($1, $2, $3, 'pending'::request_status_enum)
      ON CONFLICT (sender_id, listing_id)
        WHERE status IN ('pending', 'accepted')
+         AND deleted_at IS NULL
      DO NOTHING
      RETURNING request_id, sender_id, listing_id, message, status, created_at`,
 		[studentId, listingId, message ?? null],
@@ -101,8 +105,6 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 };
 
 // ─── Transition interest request status ──────────────────────────────────────
-// Routes accepted → _acceptInterestRequest (atomic multi-step).
-// Routes declined/withdrawn → simple UPDATE with actor ownership check.
 export const transitionInterestRequest = async (callerId, requestId, targetStatus) => {
 	const ALLOWED_STATUSES = new Set(["accepted", "declined", "withdrawn"]);
 	if (!ALLOWED_STATUSES.has(targetStatus)) {
@@ -115,6 +117,7 @@ export const transitionInterestRequest = async (callerId, requestId, targetStatu
 
 	const ownershipClause = targetStatus === "declined" ? `AND l.posted_by = $2` : `AND ir.sender_id = $2`;
 
+	// FIX: Add ::request_status_enum cast to avoid type mismatch
 	const { rowCount, rows } = await pool.query(
 		`UPDATE interest_requests ir
      SET status     = $3::request_status_enum,
@@ -122,7 +125,7 @@ export const transitionInterestRequest = async (callerId, requestId, targetStatu
      FROM listings l
      WHERE ir.request_id  = $1
        AND ir.listing_id  = l.listing_id
-       AND ir.status      = 'pending'
+       AND ir.status      = 'pending'::request_status_enum
        AND ir.deleted_at  IS NULL
        ${ownershipClause}
      RETURNING
@@ -188,19 +191,12 @@ export const transitionInterestRequest = async (callerId, requestId, targetStatu
 };
 
 // ─── Accept interest request (internal) ──────────────────────────────────────
-// Atomically: accepts the request, creates the connection row, increments
-// current_occupants, and (if capacity exhausted) marks the listing 'filled'
-// and expires all remaining pending requests. All within one BEGIN/COMMIT.
-// Post-commit notifications are fire-and-forget via enqueueNotification.
 const _acceptInterestRequest = async (posterId, requestId) => {
 	const client = await pool.connect();
 
 	try {
 		await client.query("BEGIN");
 
-		// Lock both the interest request and its parent listing simultaneously.
-		// FOR UPDATE on the JOIN prevents concurrent accepts or listing status
-		// changes for the duration of this transaction.
 		const { rows: irRows } = await client.query(
 			`SELECT
          ir.request_id,
@@ -299,7 +295,7 @@ const _acceptInterestRequest = async (posterId, requestId) => {
              status             = 'filled'::listing_status_enum,
              filled_at          = NOW()
          WHERE listing_id = $2
-           AND status     = 'active'
+           AND status     = 'active'::listing_status_enum
            AND deleted_at IS NULL`,
 				[newOccupantCount, ir.listing_id],
 			);
@@ -315,7 +311,7 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 				`UPDATE listings
          SET current_occupants = $1
          WHERE listing_id = $2
-           AND status     = 'active'
+           AND status     = 'active'::listing_status_enum
            AND deleted_at IS NULL`,
 				[newOccupantCount, ir.listing_id],
 			);
@@ -387,7 +383,6 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 };
 
 // ─── Get single interest request ─────────────────────────────────────────────
-// Both the sender and the listing poster can fetch detail. Third parties get 404.
 export const getInterestRequest = async (callerId, requestId) => {
 	const { rows } = await pool.query(
 		`SELECT
@@ -449,7 +444,6 @@ export const getInterestRequest = async (callerId, requestId) => {
 };
 
 // ─── Get interest requests for a listing (poster's view) ─────────────────────
-// Only the listing poster can call this. Returns keyset-paginated requests.
 export const getInterestRequestsForListing = async (posterId, listingId, filters) => {
 	const { rows: listingRows } = await pool.query(
 		`SELECT listing_id FROM listings
@@ -543,7 +537,6 @@ export const getInterestRequestsForListing = async (posterId, listingId, filters
 };
 
 // ─── Get my interest requests (student's view) ───────────────────────────────
-// Returns all requests the authenticated student has sent, keyset-paginated.
 export const getMyInterestRequests = async (studentId, filters) => {
 	const { status, cursorTime, cursorId, limit = 20 } = filters;
 
@@ -620,8 +613,6 @@ export const getMyInterestRequests = async (studentId, filters) => {
 };
 
 // ─── Expire pending requests for a listing ───────────────────────────────────
-// Bulk-expires all pending interest requests on a listing. Called inside
-// transactions when a listing is deactivated, deleted, or filled.
 export const expirePendingRequestsForListing = async (listingId, client = pool, excludeRequestId = null) => {
 	const params = [listingId];
 	let excludeClause = "";
@@ -635,7 +626,7 @@ export const expirePendingRequestsForListing = async (listingId, client = pool, 
 		`UPDATE interest_requests
      SET status = 'expired'::request_status_enum, updated_at = NOW()
      WHERE listing_id = $1
-       AND status     = 'pending'
+       AND status     = 'pending'::request_status_enum
        AND deleted_at IS NULL
        ${excludeClause}`,
 		params,
