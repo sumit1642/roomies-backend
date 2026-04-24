@@ -1,8 +1,4 @@
-// src/workers/notificationWorker.js
-//
 // BullMQ worker for reliable async notification delivery.
-//
-// ─── WHY THIS EXISTS ─────────────────────────────────────────────────────────
 //
 // Before this branch, notification INSERTs were fire-and-forget pool.query calls
 // made directly in the service layer after a transaction committed. That pattern
@@ -15,21 +11,15 @@
 // with exponential backoff, and exhausted jobs land in the failed set for
 // manual inspection and replay.
 //
-// ─── CONCURRENCY = 10 ────────────────────────────────────────────────────────
-//
 // Each notification job is a single SQL INSERT — pure I/O with no CPU cost.
 // Running 10 concurrent jobs keeps the queue draining quickly during bursts
 // without risking connection pool exhaustion (10 concurrent inserts against a
 // pool of 20 leaves comfortable headroom for HTTP handlers).
 //
-// ─── ON CONFLICT (idempotency_key) DO NOTHING ────────────────────────────────
-//
 // Protects against the retry-after-crash duplicate scenario: if the worker
 // crashed after the INSERT succeeded but before BullMQ received the completion
 // acknowledgement, the retry would re-run with the same job.id. The UNIQUE
 // index on idempotency_key turns that retry into a silent no-op.
-//
-// ─── NOTIFICATION CONTRACT ────────────────────────────────────────────────────
 //
 // The NOTIFICATION_MESSAGES map below is the authoritative contract between
 // the enum values defined in the DB schema and the messages shown to users.
@@ -56,8 +46,6 @@ import { bullConnection } from "./bullConnection.js";
 
 export const NOTIFICATION_QUEUE_NAME = "notification-delivery";
 
-// ─── Notification message contract ────────────────────────────────────────────
-//
 // Maps every notification_type_enum value to its human-readable message.
 // Stored at insert time so the feed always shows the message that was current
 // when the notification was created — old notifications do not retroactively
@@ -68,43 +56,28 @@ export const NOTIFICATION_QUEUE_NAME = "notification-delivery";
 //   PLANNED — enum value reserved; no emitter yet. Implement the emitter and
 //             remove this annotation when the feature ships.
 const NOTIFICATION_MESSAGES = {
-	// ── ACTIVE: fired from interest.service.js ─────────────────────────────────
 	interest_request_received: "Someone expressed interest in your listing",
 	interest_request_accepted: "Your interest request was accepted",
 	interest_request_declined: "Your interest request was declined",
 	interest_request_withdrawn: "An interest request was withdrawn",
 
-	// ── ACTIVE: fired from connection.service.js ───────────────────────────────
 	connection_confirmed: "Your connection has been confirmed by both parties",
 
-	// ── ACTIVE: fired from rating.service.js ──────────────────────────────────
 	rating_received: "You received a new rating",
 
-	// ── ACTIVE: fired from cron/expiryWarning.js ────────────────────────────────
 	listing_expiring: "One of your listings is expiring soon",
-	// ── ACTIVE: fired from cron/listingExpiry.js ────────────────────────────────
 	listing_expired: "One of your listings has expired",
 
-	// ── ACTIVE: fired from interest.service.js when a listing becomes filled ───
-	// Emitted post-commit in _acceptInterestRequest when capacity is exhausted.
 	listing_filled: "A listing has been marked as filled",
 
-	// ── ACTIVE: fired from verificationEventWorker.js (CDC pipeline) ───────────
-	// Emitted when verification_requests.status transitions to verified.
 	verification_approved: "Your verification request was approved",
 
-	// ── ACTIVE: fired from verificationEventWorker.js (CDC pipeline) ───────────
-	// Emitted when verification_requests.status transitions to rejected.
 	verification_rejected: "Your verification request was rejected",
 
-	// ── PLANNED: wire emitter once in-app messaging is implemented (Phase 6+) ──
-	// The 'new_message' type is reserved for the future WebSocket/messaging phase.
+	// Reserved for the future in-app messaging phase.
 	new_message: "You have a new message",
 
-	// ── PLANNED: no emitter yet — connection_requested would be appropriate for ─
-	// an admin-created connection or a future "request to connect" feature.
-	// Currently all connections are created by the accept flow in interest.service.js
-	// which emits interest_request_accepted instead.
+	// Reserved for a future "request to connect" flow.
 	connection_requested: "You have a new connection request",
 };
 

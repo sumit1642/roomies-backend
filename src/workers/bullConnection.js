@@ -1,5 +1,3 @@
-// src/workers/bullConnection.js
-//
 // Parses config.REDIS_URL into a BullMQ/ioredis connection object. Extracts
 // host, port, username, password, TLS flag, and DB index. All five fields are
 // derived here once at startup so queue.js and the worker files never duplicate

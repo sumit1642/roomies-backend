@@ -1,8 +1,3 @@
-// src/middleware/validate.js
-//
-// validate() wraps a Zod schema and returns an Express middleware.
-// Usage: router.post('/register', validate(registerSchema), authController.register)
-//
 // After successful parse, result.data is written back to req so that Zod
 // coercions, defaults, and transformations are visible to downstream handlers.
 //
@@ -28,13 +23,9 @@ export const validate = (schema) => (req, res, next) => {
 		return next(result.error);
 	}
 
-	// req.body and req.params are plain writable properties — direct assignment is fine.
 	req.body = result.data.body ?? req.body;
 	req.params = result.data.params ?? req.params;
 
-	// req.query may be a non-writable getter in Express 5, so we use
-	// Object.defineProperty to safely replace it with an own data property.
-	// Only do this when Zod actually produced a query shape (not undefined).
 	if (result.data.query != null) {
 		Object.defineProperty(req, "query", {
 			value: result.data.query,

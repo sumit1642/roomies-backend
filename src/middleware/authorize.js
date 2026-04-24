@@ -1,10 +1,6 @@
-// src/middleware/authorize.js
-
 import { AppError } from "./errorHandler.js";
 
 // Role gate — must run after authenticate (req.user must exist).
-// Usage: router.get('/queue', authenticate, authorize('admin'), controller.fn)
-//
 // The role parameter is validated immediately when authorize(role) is called —
 // at route registration time, not per-request. This means a misconfigured route
 // (e.g. authorize() or authorize(undefined)) throws at startup rather than

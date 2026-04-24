@@ -1,5 +1,3 @@
-// src/middleware/upload.js
-
 import multer from "multer";
 import path from "path";
 import crypto from "crypto";
@@ -15,16 +13,11 @@ const MIME_TO_EXTENSIONS = {
 	"image/webp": [".webp"],
 };
 
-// Derived from MIME_TO_EXTENSIONS so a new entry in the map automatically
-// becomes an allowed type — no second list to keep in sync.
 const ALLOWED_MIME_TYPES = new Set(Object.keys(MIME_TO_EXTENSIONS));
 
 const storage = multer.diskStorage({
 	destination: async (_req, _file, cb) => {
 		try {
-			// Ensure the staging directory exists before Multer tries to write.
-			// recursive: true makes this a no-op if the directory already exists,
-			// so it's safe to call on every upload without a prior existence check.
 			await fs.mkdir("uploads/staging", { recursive: true });
 			cb(null, "uploads/staging");
 		} catch (err) {

@@ -1,4 +1,3 @@
-// src/workers/mediaProcessor.js
 // BullMQ worker for async photo processing: compress with Sharp, write to storage,
 // update DB, elect cover photo, and clean up the staging file.
 

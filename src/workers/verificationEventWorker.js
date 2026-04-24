@@ -1,8 +1,4 @@
-// src/workers/verificationEventWorker.js
-//
 // CDC (Change Data Capture) outbox drainer for verification events.
-//
-// ─── WHAT THIS WORKER DOES ────────────────────────────────────────────────────
 //
 // The Postgres trigger trg_verification_status_changed (created in migration
 // 002) writes a row to verification_event_outbox whenever
@@ -17,8 +13,6 @@
 //   2. Enqueuing an in-app notification via the existing BullMQ infrastructure.
 //   3. Enqueuing a transactional email via the existing email queue.
 //
-// ─── SELECT FOR UPDATE SKIP LOCKED ────────────────────────────────────────────
-//
 // This is the key concurrency primitive. When the worker claims a batch of
 // outbox rows, it locks them with FOR UPDATE. SKIP LOCKED tells Postgres:
 // "don't wait for rows that another transaction has already locked — just skip
@@ -26,15 +20,11 @@
 // (e.g. during a rolling deploy) will never process the same event twice.
 // They cooperate automatically without any application-level coordination.
 //
-// ─── RETRY SEMANTICS ─────────────────────────────────────────────────────────
-//
 // If processEvent() throws (e.g. a transient DB error), the worker increments
 // the event's `attempts` counter and records the error message, then continues
 // to the next event. The failed event will be retried on the next poll cycle.
 // After MAX_ATTEMPTS failures, the event is permanently skipped (marked with
 // a terminal error message) so a broken event cannot block the queue forever.
-//
-// ─── POLLING VS LISTEN/NOTIFY ────────────────────────────────────────────────
 //
 // This implementation uses setInterval polling (every POLL_INTERVAL_MS = 5s).
 // For verification events, this is perfectly fine — verification decisions are
@@ -51,8 +41,6 @@ import { logger } from "../logger/index.js";
 import { enqueueNotification } from "./notificationQueue.js";
 import { enqueueEmail } from "./emailQueue.js";
 
-// ─── Configuration ────────────────────────────────────────────────────────────
-
 // How often the worker wakes up and checks for pending events.
 // 5 seconds is a good balance between responsiveness and DB query overhead
 // at Roomies' scale. Lower this (e.g. 1000ms) if you need faster reactions.
@@ -67,8 +55,6 @@ const BATCH_SIZE = 10;
 // The error_message column records why, for manual operator inspection.
 const MAX_ATTEMPTS = 5;
 
-// ─── Core event processor ─────────────────────────────────────────────────────
-//
 // Handles a single outbox event. Called inside the drain transaction, so any
 // DB writes here (the profile consistency update) participate in the same
 // transaction as the processed_at acknowledgement.
@@ -116,7 +102,6 @@ const processEvent = async (event, client) => {
 	const { email, owner_full_name, business_name, verification_status } = userRows[0];
 
 	if (event_type === "verification_approved") {
-		// ── Profile consistency guard ──────────────────────────────────────
 		// If the admin ran SQL that only updated verification_requests but forgot
 		// to also update pg_owner_profiles (easy mistake), this ensures the profile
 		// reflects the correct state before any notification goes out.
@@ -137,7 +122,6 @@ const processEvent = async (event, client) => {
 			);
 		}
 
-		// In-app notification — fire and forget (BullMQ handles retry)
 		enqueueNotification({
 			recipientId: user_id,
 			type: "verification_approved",
@@ -145,7 +129,6 @@ const processEvent = async (event, client) => {
 			entityId: request_id,
 		});
 
-		// Transactional email — fire and forget (BullMQ handles retry)
 		enqueueEmail({
 			type: "verification_approved",
 			to: email,
@@ -157,7 +140,6 @@ const processEvent = async (event, client) => {
 			"verificationEventWorker: approval event processed — notification + email enqueued",
 		);
 	} else if (event_type === "verification_rejected") {
-		// ── Profile consistency guard ──────────────────────────────────────
 		if (verification_status !== "rejected") {
 			await client.query(
 				`UPDATE pg_owner_profiles
@@ -194,8 +176,7 @@ const processEvent = async (event, client) => {
 			"verificationEventWorker: rejection event processed — notification + email enqueued",
 		);
 	} else if (event_type === "verification_pending") {
-		// Acknowledgement email only — no in-app notification needed for "we got
-		// your documents." The admin dashboard is the primary channel for this state.
+		// Acknowledgement email only — no in-app notification needed for this state.
 		enqueueEmail({
 			type: "verification_pending",
 			to: email,
@@ -213,8 +194,6 @@ const processEvent = async (event, client) => {
 	}
 };
 
-// ─── Drain cycle ──────────────────────────────────────────────────────────────
-//
 // Claims a batch of unprocessed events, processes each one, and marks
 // successfully processed events with processed_at = NOW(). Failed events
 // have their attempts counter incremented and error recorded for retry.
@@ -229,8 +208,8 @@ const drainOutbox = async () => {
 	try {
 		await client.query("BEGIN");
 
-		// Claim the next batch of pending events using SKIP LOCKED so concurrent
-		// worker instances do not process the same events simultaneously.
+		// Claim rows with SKIP LOCKED so concurrent worker instances do not
+		// process the same events simultaneously.
 		const { rows: events } = await client.query(
 			`SELECT
                  event_id,
@@ -248,7 +227,6 @@ const drainOutbox = async () => {
 			[MAX_ATTEMPTS, BATCH_SIZE],
 		);
 
-		// Nothing pending — release the connection without any work.
 		if (!events.length) {
 			await client.query("ROLLBACK");
 			return;
@@ -313,8 +291,7 @@ const drainOutbox = async () => {
 
 		await client.query("COMMIT");
 	} catch (err) {
-		// Outer catch: something went wrong with the transaction infrastructure
-		// itself (not just one event). Roll back and let the next poll cycle retry.
+		// Outer catch: transaction-level failure, not a single-event failure.
 		try {
 			await client.query("ROLLBACK");
 		} catch (_) {
@@ -326,8 +303,6 @@ const drainOutbox = async () => {
 	}
 };
 
-// ─── Public API ───────────────────────────────────────────────────────────────
-//
 // Called from server.js after Redis and Postgres are confirmed healthy.
 // Returns an object with a close() method so server.js can stop the poll
 // loop during graceful shutdown.

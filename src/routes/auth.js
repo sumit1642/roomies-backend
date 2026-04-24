@@ -1,5 +1,3 @@
-// src/routes/auth.js
-
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { validate } from "../middleware/validate.js";
@@ -57,5 +55,4 @@ authRouter.post("/otp/send", otpLimiter, authenticate, authController.sendOtp);
 authRouter.post("/otp/verify", authenticate, validate(otpVerifySchema), authController.verifyOtp);
 authRouter.get("/me", authenticate, authController.me);
 
-// ─── Google OAuth callback ────────────────────────────────────────────────────
 authRouter.post("/google/callback", authLimiter, validate(googleCallbackSchema), authController.googleCallback);

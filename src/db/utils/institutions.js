@@ -1,7 +1,5 @@
-// src/db/utils/institutions.js
-
 import { pool } from "../client.js";
- 
+
 // Called during student registration to determine whether the email address
 // qualifies for automatic verification without going through the OTP flow.
 //

@@ -1,5 +1,3 @@
-// src/middleware/errorHandler.js
-
 import { logger } from "../logger/index.js";
 import { MAX_UPLOAD_SIZE_BYTES, UPLOAD_FIELD_NAME } from "../config/constants.js";
 
@@ -112,7 +110,6 @@ export const errorHandler = (err, req, res, next) => {
 		});
 	}
 
-	// PostgreSQL constraint errors.
 	if (err.code === "23505")
 		return res.status(409).json({ status: "error", message: "A record with this value already exists" });
 	if (err.code === "23503")
@@ -120,7 +117,6 @@ export const errorHandler = (err, req, res, next) => {
 	if (err.code === "23514")
 		return res.status(400).json({ status: "error", message: "Data failed a database constraint check" });
 
-	// JWT errors.
 	if (err.name === "JsonWebTokenError") return res.status(401).json({ status: "error", message: "Invalid token" });
 	if (err.name === "TokenExpiredError")
 		return res.status(401).json({ status: "error", message: "Token has expired" });

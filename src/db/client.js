@@ -1,32 +1,23 @@
-// src/db/client.js
-
 import pg from "pg";
 import { config } from "../config/env.js";
 import { logger } from "../logger/index.js";
 
 const { Pool } = pg;
 
-// One pool for the entire process — never create a new Pool per request.
-// pg manages the connection lifecycle internally.
 export const pool = new Pool({
 	connectionString: config.DATABASE_URL,
 
-	// Max connections in the pool.
-	// Keep this below your PostgreSQL max_connections setting.
 	max: 20,
 
-	// How long (ms) a client can sit idle before being closed.
 	idleTimeoutMillis: 30_000,
 
-	// How long (ms) to wait for a connection before throwing an error.
 	connectionTimeoutMillis: 5_000,
 });
 
-// Log when a new client connects — useful for spotting connection leaks
 pool.on("connect", () => {
 	logger.debug("pg pool: new client connected");
 });
- 
+
 // for example, the PostgreSQL backend process was killed, or the TCP connection
 // was dropped by a network device. In these cases pg has already removed the
 // bad client from the pool and will open a fresh connection on the next query.
@@ -49,14 +40,11 @@ pool.on("error", (err) => {
 		logger.fatal({ err }, "pg pool: unrecoverable connection error — shutting down");
 		process.exit(1);
 	}
- 
-	// pg discards the bad client and the pool recovers automatically.
-	// No exit needed — the error is logged and the server keeps running.
 });
- 
+
 // ENOTFOUND means DNS resolution failed — the host does not exist.
 // Both are unrecoverable at runtime; defined once at module scope to avoid
 // reallocating on every error event.
 const fatalCodes = new Set(["ECONNREFUSED", "ENOTFOUND"]);
- 
+
 export const query = (text, params) => pool.query(text, params);

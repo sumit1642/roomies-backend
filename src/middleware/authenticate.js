@@ -1,5 +1,3 @@
-// src/middleware/authenticate.js
-
 import jwt from "jsonwebtoken";
 import { config } from "../config/env.js";
 import { AppError } from "./errorHandler.js";

@@ -1,16 +1,9 @@
-// src/workers/queue.js
-// Named singleton registry for BullMQ Queue instances — prevents opening a new
-// Redis connection on every enqueue call by reusing one Queue per queue name.
-
 import { Queue } from "bullmq";
 import { logger } from "../logger/index.js";
 import { bullConnection } from "./bullConnection.js";
 
 const queues = new Map();
 
-// Returns the existing Queue instance for `name`, or creates and caches one on first call.
-// All queues share the same Redis connection config sourced from bullConnection.js,
-// which correctly handles ACL usernames, non-zero DB indices, and TLS.
 export const getQueue = (name) => {
 	if (queues.has(name)) return queues.get(name);
 
