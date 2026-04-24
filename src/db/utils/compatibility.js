@@ -1,5 +1,5 @@
-// src/db/utils/compatibility.js
-//
+
+
 
 
 import { pool } from "../client.js";

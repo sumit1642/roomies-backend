@@ -1,4 +1,4 @@
-// src/controllers/photo.controller.js
+
 
 import * as photoService from "../services/photo.service.js";
 import { rm } from "node:fs/promises";
@@ -9,7 +9,7 @@ const cleanupStagedFile = async (filePath) => {
 	try {
 		await rm(filePath, { force: true });
 	} catch (cleanupErr) {
-		// Log but don't throw — preserve the original API error response.
+		
 		logger.warn({ msg: "Failed to cleanup staged file", filePath, err: cleanupErr });
 	}
 };
@@ -26,12 +26,12 @@ export const uploadPhoto = async (req, res, next) => {
 		const result = await photoService.enqueuePhotoUpload(
 			req.user.userId,
 			req.params.listingId,
-			req.file.path, // Absolute path to the staged file on disk
-			req.body.displayOrder, // May be undefined — service handles the default
+			req.file.path, 
+			req.body.displayOrder, 
 		);
 
-		// 202 Accepted: the request has been received and queued. The photo is not
-		// yet available. The client should poll GET /photos to observe completion.
+		
+		
 		res.status(202).json({ status: "success", data: result });
 	} catch (err) {
 		await cleanupStagedFile(req.file?.path);

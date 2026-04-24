@@ -1,5 +1,5 @@
-// BullMQ worker for async photo processing: compress with Sharp, write to storage,
-// update DB, elect cover photo, and clean up the staging file.
+
+
 
 import fs from "fs/promises";
 import sharp from "sharp";
@@ -25,8 +25,8 @@ export const startMediaWorker = () => {
 				"Media worker: processing job",
 			);
 
-			// Resize to fit within 1200×1200, convert to WebP, strip EXIF metadata
-			// (EXIF can contain GPS coordinates — always strip for user privacy).
+			
+			
 			const outputBuffer = await sharp(stagingPath)
 				.resize(MAX_DIMENSION_PX, MAX_DIMENSION_PX, { fit: "inside", withoutEnlargement: true })
 				.webp({ quality: WEBP_QUALITY })
@@ -50,8 +50,8 @@ export const startMediaWorker = () => {
 					"Media worker: photo row deleted before processing completed — cleaning up uploaded file",
 				);
 
-				// The permanent file was already written to storage before the DB row disappeared.
-				// Delete it best-effort to prevent orphaned storage objects.
+				
+				
 				try {
 					await storageService.delete(finalUrl);
 				} catch (deleteErr) {
@@ -64,13 +64,13 @@ export const startMediaWorker = () => {
 				try {
 					await fs.unlink(stagingPath);
 				} catch (_) {
-					/* best-effort, cron handles orphans */
+					
 				}
 				return;
 			}
 
-			// Atomically elect cover only if the listing has none — NOT EXISTS + UPDATE
-			// in a single statement closes the TOCTOU race window entirely.
+			
+			
 			await pool.query(
 				`UPDATE listing_photos
          SET is_cover = TRUE

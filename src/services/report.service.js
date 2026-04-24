@@ -1,13 +1,13 @@
-// src/services/report.service.js
+
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 
-// ─── Submit report ────────────────────────────────────────────────────────────
-// Atomic INSERT ... SELECT: eligibility (caller is party to the connection) and
-// the INSERT happen in one statement. Zero rows → 404. 23505 (duplicate open
-// report from same reporter) → global handler converts to 409.
+
+
+
+
 export const submitReport = async (reporterId, ratingId, { reason, explanation }) => {
 	const { rows } = await pool.query(
 		`INSERT INTO rating_reports (reporter_id, rating_id, reason, explanation)
@@ -41,9 +41,9 @@ export const submitReport = async (reporterId, ratingId, { reason, explanation }
 	};
 };
 
-// ─── Get report queue (admin) ─────────────────────────────────────────────────
-// Returns open reports oldest-first (anti-starvation). LEFT JOINs ensure reports
-// remain visible even when the target rating, reporter, or reviewer is soft-deleted.
+
+
+
 export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	const hasPartialCursor = (cursorTime !== undefined) !== (cursorId !== undefined);
@@ -202,15 +202,15 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	};
 };
 
-// ─── Resolve report (admin) ───────────────────────────────────────────────────
-// Two outcomes: resolved_removed (hides the rating, triggers the DB aggregate
-// trigger) or resolved_kept (closes the report, rating stays visible).
-// AND status = 'open' is the concurrency guard — concurrent resolves produce
-// rowCount === 0 on the second attempt → 409.
-//
-// All logger.info calls are placed after COMMIT so they only fire when the
-// transaction has successfully persisted. A failed COMMIT does not produce a
-// false-positive success log.
+
+
+
+
+
+
+
+
+
 export const resolveReport = async (adminId, reportId, { resolution, adminNotes }) => {
 	const validResolutions = ["resolved_removed", "resolved_kept"];
 	if (!validResolutions.includes(resolution)) {
@@ -224,8 +224,8 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 	const client = await pool.connect();
 
 	let ratingId;
-	// Track whether the rating was already soft-deleted so we can log correctly
-	// after COMMIT without re-querying.
+	
+	
 	let ratingWasAlreadySoftDeleted = false;
 
 	try {
@@ -251,8 +251,8 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 		ratingId = reportRows[0].rating_id;
 
 		if (resolution === "resolved_removed") {
-			// The DB trigger update_rating_aggregates fires automatically after this
-			// UPDATE to recalculate average_rating and rating_count on the reviewee.
+			
+			
 			const { rowCount: ratingRowCount } = await client.query(
 				`UPDATE ratings
          SET is_visible = FALSE
@@ -262,9 +262,9 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 			);
 
 			if (ratingRowCount === 0) {
-				// Zero rows: either the rating is soft-deleted (already invisible,
-				// desired state achieved) or the row is completely missing (FK violation,
-				// should never happen). Distinguish the two cases.
+				
+				
+				
 				const { rows: ratingCheck } = await client.query(
 					`SELECT deleted_at FROM ratings WHERE rating_id = $1`,
 					[ratingId],
@@ -277,16 +277,16 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 					);
 				}
 
-				// Rating is soft-deleted: already invisible, aggregates already adjusted.
-				// Mark the flag so we can choose the right log message after COMMIT.
+				
+				
 				ratingWasAlreadySoftDeleted = true;
 			}
 		}
 
 		await client.query("COMMIT");
 
-		// All logging happens after COMMIT to avoid false-positive success entries
-		// when the transaction is later rolled back.
+		
+		
 		if (ratingWasAlreadySoftDeleted) {
 			logger.info(
 				{ adminId, reportId, ratingId },

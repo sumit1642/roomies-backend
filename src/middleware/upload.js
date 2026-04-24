@@ -5,8 +5,8 @@ import fs from "fs/promises";
 import { AppError } from "./errorHandler.js";
 import { MAX_UPLOAD_SIZE_BYTES } from "../config/constants.js";
 
-// Maps each allowed MIME type to its valid file extensions.
-// Used to catch obvious mismatches like a .txt file claiming image/jpeg.
+
+
 const MIME_TO_EXTENSIONS = {
 	"image/jpeg": [".jpg", ".jpeg"],
 	"image/png": [".png"],
@@ -36,9 +36,9 @@ const fileFilter = (_req, file, cb) => {
 		return cb(new AppError(`Unsupported file type: ${file.mimetype}. Accepted types: JPEG, PNG, WebP`, 400));
 	}
 
-	// A client can lie about mimetype. Cross-check the file extension against
-	// what's expected for the claimed MIME type to catch obvious mismatches
-	// (e.g. a .txt file with Content-Type: image/jpeg).
+	
+	
+	
 	const ext = path.extname(file.originalname).toLowerCase();
 	const allowedExts = MIME_TO_EXTENSIONS[file.mimetype];
 	if (!allowedExts.includes(ext)) {

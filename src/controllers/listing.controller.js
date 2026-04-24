@@ -1,4 +1,4 @@
-// src/controllers/listing.controller.js
+
 
 import * as listingService from "../services/listing.service.js";
 
@@ -20,8 +20,8 @@ export const getListing = async (req, res, next) => {
 	}
 };
 
-// userId is nullable: req.user is undefined for guests (optionalAuthenticate ran).
-// Passing null signals the service to skip compatibility scoring.
+
+
 export const searchListings = async (req, res, next) => {
 	try {
 		const userId = req.user?.userId ?? null;

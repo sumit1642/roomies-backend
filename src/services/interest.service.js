@@ -1,11 +1,11 @@
-// src/services/interest.service.js
-// FIX: ON CONFLICT clause must EXACTLY match the partial unique index definition.
-// The index idx_interest_requests_no_duplicates is:
-//   ON interest_requests (sender_id, listing_id)
-//   WHERE status IN ('pending','accepted') AND deleted_at IS NULL
-//
-// The ON CONFLICT clause must also include AND deleted_at IS NULL to match exactly.
-// Without it, PostgreSQL error 42P10: "there is no unique or exclusion constraint matching"
+
+
+
+
+
+
+
+
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
@@ -24,7 +24,7 @@ const LISTING_TYPE_TO_CONNECTION_TYPE = {
 	hostel_bed: "hostel_stay",
 };
 
-// ─── Create interest request ─────────────────────────────────────────────────
+
 export const createInterestRequest = async (studentId, listingId, data) => {
 	const { message } = data;
 
@@ -61,12 +61,12 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 		throw new AppError("You cannot express interest in your own listing", 422);
 	}
 
-	// FIX: The ON CONFLICT WHERE clause must EXACTLY match the partial index:
-	//   idx_interest_requests_no_duplicates ON (sender_id, listing_id)
-	//   WHERE status IN ('pending','accepted') AND deleted_at IS NULL
-	//
-	// Both the status filter AND deleted_at IS NULL must be present.
-	// Adding the ::request_status_enum cast also ensures proper type matching.
+	
+	
+	
+	
+	
+	
 	const { rows } = await pool.query(
 		`INSERT INTO interest_requests
        (sender_id, listing_id, message, status)
@@ -104,7 +104,7 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 	};
 };
 
-// ─── Transition interest request status ──────────────────────────────────────
+
 export const transitionInterestRequest = async (callerId, requestId, targetStatus) => {
 	const ALLOWED_STATUSES = new Set(["accepted", "declined", "withdrawn"]);
 	if (!ALLOWED_STATUSES.has(targetStatus)) {
@@ -117,7 +117,7 @@ export const transitionInterestRequest = async (callerId, requestId, targetStatu
 
 	const ownershipClause = targetStatus === "declined" ? `AND l.posted_by = $2` : `AND ir.sender_id = $2`;
 
-	// FIX: Add ::request_status_enum cast to avoid type mismatch
+	
 	const { rowCount, rows } = await pool.query(
 		`UPDATE interest_requests ir
      SET status     = $3::request_status_enum,
@@ -190,7 +190,7 @@ export const transitionInterestRequest = async (callerId, requestId, targetStatu
 	};
 };
 
-// ─── Accept interest request (internal) ──────────────────────────────────────
+
 const _acceptInterestRequest = async (posterId, requestId) => {
 	const client = await pool.connect();
 
@@ -382,7 +382,7 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 	}
 };
 
-// ─── Get single interest request ─────────────────────────────────────────────
+
 export const getInterestRequest = async (callerId, requestId) => {
 	const { rows } = await pool.query(
 		`SELECT
@@ -443,7 +443,7 @@ export const getInterestRequest = async (callerId, requestId) => {
 	};
 };
 
-// ─── Get interest requests for a listing (poster's view) ─────────────────────
+
 export const getInterestRequestsForListing = async (posterId, listingId, filters) => {
 	const { rows: listingRows } = await pool.query(
 		`SELECT listing_id FROM listings
@@ -536,7 +536,7 @@ export const getInterestRequestsForListing = async (posterId, listingId, filters
 	};
 };
 
-// ─── Get my interest requests (student's view) ───────────────────────────────
+
 export const getMyInterestRequests = async (studentId, filters) => {
 	const { status, cursorTime, cursorId, limit = 20 } = filters;
 
@@ -612,7 +612,7 @@ export const getMyInterestRequests = async (studentId, filters) => {
 	};
 };
 
-// ─── Expire pending requests for a listing ───────────────────────────────────
+
 export const expirePendingRequestsForListing = async (listingId, client = pool, excludeRequestId = null) => {
 	const params = [listingId];
 	let excludeClause = "";

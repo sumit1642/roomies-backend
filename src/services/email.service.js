@@ -1,65 +1,65 @@
-// src/services/email.service.js
-//
-// ─── TRANSPORT ARCHITECTURE ───────────────────────────────────────────────────
-//
-// This service supports two email providers, selected at startup by EMAIL_PROVIDER
-// in the environment:
-//
-//   "ethereal" — Nodemailer pointed at Ethereal's fake SMTP server.
-//                Used during local development. Every email is intercepted and
-//                never delivered to the real recipient. A preview URL is logged
-//                to the console so you can read the OTP without a real inbox.
-//                Set EMAIL_PROVIDER=ethereal in .env.local.
-//
-//   "brevo"    — Nodemailer pointed at Brevo's SMTP relay
-//                (smtp-relay.brevo.com:587 with STARTTLS).
-//                Used in production / staging. Emails are really delivered.
-//                Brevo's dashboard provides delivery logs and open tracking.
-//                Set EMAIL_PROVIDER=brevo in your production env file.
-//
-// Both providers use the same Nodemailer transport API. The rest of this file —
-// sendOtpEmail, maskEmail, and the format guards — is identical for both. The
-// factory function below just swaps the SMTP credentials underneath.
-//
-// ─── WHY NOT THE @getbrevo/brevo REST SDK? ───────────────────────────────────
-//
-// Brevo publishes an official JS SDK that wraps their REST API. For sending a
-// simple OTP email, the SMTP relay via Nodemailer is the better choice because:
-//   1. Zero new dependencies — Nodemailer is already installed.
-//   2. Identical code path — switching providers is a config change, not a
-//      code change. The SDK's API differs significantly from Nodemailer's.
-//   3. Brevo's own docs recommend Nodemailer for Node.js SMTP relay:
-//      https://developers.brevo.com/docs/smtp-integration
-//
-// ─── BREVO CONNECTION SETTINGS ───────────────────────────────────────────────
-//
-// Per Brevo's official SMTP relay documentation:
-//   Host:       smtp-relay.brevo.com   (hardcoded — never from env vars)
-//   Port:       587                     (non-encrypted; STARTTLS upgrades it)
-//   secure:     false                   (true is only for port 465 / raw SSL)
-//   Login:      your BREVO_SMTP_LOGIN   (e.g. xxxxx@smtp-brevo.com)
-//   Password:   your BREVO_SMTP_KEY     (starts with "xsmtpsib-...", NOT the API key)
-//
-// The host and port are intentionally NOT read from env vars. Brevo has exactly
-// one SMTP relay endpoint and one recommended port. Making them configurable
-// would only create opportunities for them to be set incorrectly in production.
-//
-// ─── BREVO SMTP KEY vs API KEY ────────────────────────────────────────────────
-//
-// Brevo has two different credential types that look similar but serve different
-// purposes:
-//   SMTP key — starts with "xsmtpsib-..." — used as the SMTP password here.
-//   API key  — starts with "xkeysib-..."  — used by the REST SDK / HTTP API.
-//
-// The cross-field guard in env.js detects the API key being used where the SMTP
-// key is expected and exits with a clear error message at startup.
-//
-// ─── BREVO FROM ADDRESS ──────────────────────────────────────────────────────
-//
-// BREVO_SMTP_FROM must be an email address that is verified as a sender in your
-// Brevo account (Senders & Domains section). Using an unverified address causes
-// Brevo to reject the message with a 550 error. This address is what recipients
-// see as the "From" field — it can differ from BREVO_SMTP_LOGIN.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import nodemailer from "nodemailer";
 import { config } from "../config/env.js";
@@ -68,14 +68,14 @@ import { AppError } from "../middleware/errorHandler.js";
 
 const activeEmailProvider = config.EMAIL_PROVIDER === "brevo" ? "brevo" : "ethereal";
 
-// ─── Mask email for safe logging ─────────────────────────────────────────────
-//
-// "priya@iitb.ac.in" → "p****@iitb.ac.in"
-//
-// Keeps the first character and the full domain so log correlation remains
-// possible (you can identify the user) without exposing the full address in
-// log aggregators or audit trails. This is especially important because OTP
-// send events are high-frequency and will appear in every logging pipeline.
+
+
+
+
+
+
+
+
 const maskEmail = (email) => {
 	const [local, domain] = email.split("@");
 	if (!domain) return "****";
@@ -83,13 +83,13 @@ const maskEmail = (email) => {
 	return `${prefix}****@${domain}`;
 };
 
-// ─── Transport factory ────────────────────────────────────────────────────────
-//
-// Creates and returns a Nodemailer transporter based on EMAIL_PROVIDER. Called
-// once at module load time (see the `transport` singleton below) so the TCP
-// connection setup cost is paid at startup, not on the first send call.
-// Nodemailer reuses the underlying SMTP connection for subsequent calls when
-// the server keeps it alive, which both Brevo and Ethereal do.
+
+
+
+
+
+
+
 const createEmailTransport = () => {
 	if (config.EMAIL_PROVIDER === "brevo") {
 		logger.info(
@@ -104,26 +104,26 @@ const createEmailTransport = () => {
 		);
 
 		return nodemailer.createTransport({
-			// Brevo's documented SMTP relay host — hardcoded intentionally.
-			// See: https://developers.brevo.com/docs/smtp-integration
+			
+			
 			host: "smtp-relay.brevo.com",
-			// Port 587 uses STARTTLS: the connection starts unencrypted and
-			// Nodemailer upgrades it automatically. secure must be false here.
-			// (Port 465 with secure: true is the alternative SSL-from-the-start path.)
+			
+			
+			
 			port: 587,
 			secure: false,
 			auth: {
-				// BREVO_SMTP_LOGIN: your Brevo SMTP login (e.g. xxxxx@smtp-brevo.com)
+				
 				user: config.BREVO_SMTP_LOGIN,
-				// BREVO_SMTP_KEY: your Brevo SMTP key (xsmtpsib-...), NOT the API key
+				
 				pass: config.BREVO_SMTP_KEY,
 			},
 		});
 	}
 
-	// Default: Ethereal fake SMTP for local development.
-	// config.SMTP_HOST / SMTP_USER / SMTP_PASS come from .env.local.
-	// secure is derived from port: port 465 → true (raw SSL), all others → false.
+	
+	
+	
 	logger.info(
 		{
 			provider: "ethereal",
@@ -136,8 +136,8 @@ const createEmailTransport = () => {
 	return nodemailer.createTransport({
 		host: config.SMTP_HOST,
 		port: config.SMTP_PORT,
-		// Ethereal uses port 587 with STARTTLS, so secure is false.
-		// Only set true if you explicitly use port 465 for raw SSL.
+		
+		
 		secure: config.SMTP_PORT === 465,
 		auth: {
 			user: config.SMTP_USER,
@@ -146,39 +146,39 @@ const createEmailTransport = () => {
 	});
 };
 
-// ─── Singleton transport ──────────────────────────────────────────────────────
-//
-// Created once when this module is first imported. Re-creating it per call
-// would open a new TCP connection on every OTP send, which is wasteful and slow.
+
+
+
+
 const transport = createEmailTransport();
 
 logger.info({ provider: activeEmailProvider }, `Email provider selected at startup: ${activeEmailProvider}`);
 
-// ─── Sender address resolver ──────────────────────────────────────────────────
-//
-// Returns the correct "From" address for the active provider. The Nodemailer
-// `from` field accepts RFC 5322 format: "Display Name <address@example.com>".
-// Using a display name makes the email look professional in the recipient's inbox
-// ("Roomies" instead of a raw SMTP address).
+
+
+
+
+
+
 const getSenderAddress = () => {
 	if (config.EMAIL_PROVIDER === "brevo") {
-		// BREVO_SMTP_FROM must be verified in your Brevo account's Senders section.
-		// Brevo rejects messages from unverified sender addresses with a 550 error.
+		
+		
 		return `"Roomies" <${config.BREVO_SMTP_FROM}>`;
 	}
-	// Ethereal: SMTP_FROM is any address — Ethereal intercepts everything.
+	
 	return `"Roomies" <${config.SMTP_FROM}>`;
 };
 
-// ─── Send OTP email ───────────────────────────────────────────────────────────
-//
-// Sends a 6-digit OTP to the given email address. The email is formatted as a
-// professional transactional message with both plain-text and HTML versions.
-// Nodemailer uses the HTML version for capable clients and falls back to plain
-// text for clients that cannot render HTML.
+
+
+
+
+
+
 export const sendOtpEmail = async (to, otp) => {
-	// Input validation — the auth service validates before calling this, but
-	// guard here so this function is safe to call from any future context.
+	
+	
 	if (!to || typeof to !== "string" || !to.includes("@")) {
 		throw new AppError("Invalid recipient email address", 400);
 	}
@@ -206,12 +206,12 @@ export const sendOtpEmail = async (to, otp) => {
 			from: fromAddress,
 			to,
 			subject: "Your Roomies verification code",
-			// Plain-text version: used by email clients that cannot render HTML and
-			// by screen readers. Always include this — it also improves spam scoring.
+			
+			
 			text: `Your Roomies verification code is: ${otp}\n\nThis code expires in 10 minutes. Do not share it with anyone.\n\nIf you did not request this code, you can safely ignore this email.`,
-			// HTML version: rendered by virtually all modern email clients.
-			// Uses inline styles for maximum compatibility — many email clients
-			// (including Gmail) strip <style> tags but preserve inline styles.
+			
+			
+			
 			html: `
 <!DOCTYPE html>
 <html lang="en">
@@ -277,10 +277,10 @@ export const sendOtpEmail = async (to, otp) => {
 			`,
 		});
 
-		// Ethereal Mail returns a preview URL that lets you read the email in a
-		// browser without a real inbox. nodemailer.getTestMessageUrl() returns
-		// null for real SMTP providers like Brevo, so this log line is silently
-		// skipped in production.
+		
+		
+		
+		
 		const previewUrl = nodemailer.getTestMessageUrl(info);
 		if (previewUrl) {
 			logger.info(
@@ -288,21 +288,21 @@ export const sendOtpEmail = async (to, otp) => {
 				"OTP email sent — open preview URL to read the code",
 			);
 		} else {
-			// Real delivery (Brevo). Log the message ID, which appears in Brevo's
-			// transactional email logs and is useful for debugging delivery issues.
+			
+			
 			logger.info({ to: maskedTo, messageId: info.messageId, provider: config.EMAIL_PROVIDER }, "OTP email sent");
 		}
 
 		return info.messageId;
 	} catch (err) {
-		// Redact the full error object — it may contain SMTP credentials or server
-		// details that should not appear in log aggregators or error trackers.
+		
+		
 		logger.error(
 			{
 				to: maskedTo,
 				provider: config.EMAIL_PROVIDER,
-				// err.code gives you a machine-readable signal (e.g. "ECONNREFUSED",
-				// "EAUTH") without exposing the full SMTP session details.
+				
+				
 				errCode: err.code,
 				errMessage: err.message,
 			},
@@ -313,15 +313,15 @@ export const sendOtpEmail = async (to, otp) => {
 	}
 };
 
-// These are PLANNED email types — the email worker has handlers registered
-// for them, but the admin verification service does not yet enqueue jobs of
-// these types. They are defined now so the worker does not crash if a job
-// arrives, and so the service layer can wire them up cleanly in phase 5 admin.
 
-// ─── Verification approved email ─────────────────────────────────────────────
-//
-// Sent to a PG owner when an admin approves their verification request.
-// The owner can now create properties and listings.
+
+
+
+
+
+
+
+
 export const sendVerificationApprovedEmail = async (to, ownerName, businessName) => {
 	if (!to || typeof to !== "string" || !to.includes("@")) {
 		throw new AppError("Invalid recipient email address", 400);
@@ -445,10 +445,10 @@ export const sendVerificationApprovedEmail = async (to, ownerName, businessName)
 	}
 };
 
-// ─── Verification rejected email ──────────────────────────────────────────────
-//
-// Sent to a PG owner when an admin rejects their verification request.
-// Includes the rejection reason so the owner knows what to fix before resubmitting.
+
+
+
+
 export const sendVerificationRejectedEmail = async (to, ownerName, rejectionReason) => {
 	if (!to || typeof to !== "string" || !to.includes("@")) {
 		throw new AppError("Invalid recipient email address", 400);
@@ -583,12 +583,12 @@ export const sendVerificationRejectedEmail = async (to, ownerName, rejectionReas
 	}
 };
 
-// ─── Verification pending / received email ────────────────────────────────────
-//
-// Sent to a PG owner immediately after they submit a verification document and
-// the status transitions to 'pending'. The purpose is a simple acknowledgement:
-// "We got your documents, an admin will review them shortly." This prevents
-// the owner from thinking their submission was lost and spamming resubmissions.
+
+
+
+
+
+
 export const sendVerificationPendingEmail = async (to, ownerName, businessName) => {
 	if (!to || typeof to !== "string" || !to.includes("@")) {
 		throw new AppError("Invalid recipient email address", 400);
@@ -714,9 +714,9 @@ export const sendVerificationPendingEmail = async (to, ownerName, businessName) 
 	}
 };
 
-// Brevo REST API transport — used when EMAIL_PROVIDER=brevo-api.
-// Uses HTTPS (port 443), which is never blocked, unlike SMTP ports.
-// Brevo API docs: https://developers.brevo.com/reference/send-transac-email
+
+
+
 const sendViaBrevoAPI = async (to, subject, html, text) => {
 	const maskedTo = maskEmail(to);
 	logger.info({ to: maskedTo, provider: "brevo-api" }, "Sending email via Brevo REST API");

@@ -1,22 +1,22 @@
-// src/services/listing.service.js
-//
-// ─── THE PAISE RULE ───────────────────────────────────────────────────────────
-//
-// rent_per_month and deposit_amount are stored in PAISE (smallest INR unit)
-// in the database. 1 rupee = 100 paise. Rs 8,500/month → stored as 850,000.
-//
-// This file is the ONLY place where the conversion happens:
-//   write path:  rupees × 100  before any INSERT or UPDATE
-//   read path:   paise  ÷ 100  after any SELECT, before returning to caller
-//
-// ─── GUEST ACCESS ────────────────────────────────────────────────────────────
-//
-// searchListings and getListing accept a nullable userId (null for guests).
-// When userId is null:
-//   - Compatibility scoring is skipped (no user preferences to compare against)
-//   - compatibilityScore is always 0, compatibilityAvailable is always false
-//   - All other listing data is returned normally
-// ─────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
@@ -27,7 +27,7 @@ import { expirePendingRequestsForListing } from "./interest.service.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 import { dedupePreferencesByKey } from "../config/preferences.js";
 
-// ─── Location fields that belong to the parent property for pg/hostel listings ─
+
 const PROPERTY_OWNED_LOCATION_FIELDS = new Set([
 	"addressLine",
 	"city",
@@ -314,7 +314,7 @@ export const createListing = async (posterId, posterRoles, body) => {
 	}
 };
 
-// ─── Get single listing ───────────────────────────────────────────────────────
+
 export const getListing = async (listingId) => {
 	const listing = await fetchListingDetail(listingId);
 	if (!listing) throw new AppError("Listing not found", 404);
@@ -328,7 +328,7 @@ export const getListing = async (listingId) => {
 	return toRupees(listing);
 };
 
-// ─── Search listings ──────────────────────────────────────────────────────────
+
 export const searchListings = async (userId, filters) => {
 	const {
 		city,
@@ -551,7 +551,7 @@ export const updateListing = async (posterId, listingId, body) => {
 		longitude: "longitude",
 	};
 
-	// Enum columns need explicit casts
+	
 	const enumCasts = {
 		room_type: "::room_type_enum",
 		bed_type: "::bed_type_enum",
@@ -694,8 +694,8 @@ const ALLOWED_STATUS_TRANSITIONS = {
 	deactivated: ["active"],
 };
 
-// FIX: All status enum values in UPDATE/WHERE clauses need explicit ::listing_status_enum casts
-// to avoid "column is of type listing_status_enum but expression is of type text" error
+
+
 export const updateListingStatus = async (posterId, listingId, newStatus) => {
 	const { rows: listingRows } = await pool.query(
 		`SELECT status, expires_at, (expires_at <= NOW()) AS is_expired
@@ -728,8 +728,8 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 	try {
 		await client.query("BEGIN");
 
-		// FIX: Use explicit ::listing_status_enum cast on ALL status comparisons in this query
-		// Without this, PostgreSQL rejects the parameterized value as plain text
+		
+		
 		const { rows: updatedRows } = await client.query(
 			`UPDATE listings l
        SET status     = $1::listing_status_enum,

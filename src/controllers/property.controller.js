@@ -1,4 +1,4 @@
-// src/controllers/property.controller.js
+
 
 import * as propertyService from "../services/property.service.js";
 

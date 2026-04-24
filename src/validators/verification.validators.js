@@ -1,14 +1,14 @@
-// src/validators/verification.validators.js
+
 
 import { z } from "zod";
 import { keysetPaginationQuerySchema } from "./pagination.validators.js";
 
-// ─── Document submission ──────────────────────────────────────────────────────
 
-// POST /api/v1/pg-owners/:userId/documents
-// document_url is validated as a non-empty string here — format and reachability
-// are enforced by the storage layer in Phase 2. Accepting a URL string now keeps
-// the verification pipeline decoupled from the upload mechanism.
+
+
+
+
+
 export const submitDocumentSchema = z.object({
 	params: z.object({
 		userId: z.uuid({ error: "Invalid user ID" }),
@@ -21,19 +21,19 @@ export const submitDocumentSchema = z.object({
 	}),
 });
 
-// ─── Admin queue pagination ───────────────────────────────────────────────────
 
-// GET /api/v1/admin/verification-queue
-// Keyset pagination — cursor encodes the last-seen (submitted_at, request_id) pair.
-// Both fields are required together or neither: a partial cursor is ambiguous.
-// limit defaults to 20 and is capped at 100 to prevent accidentally large responses.
+
+
+
+
+
 export const getQueueSchema = z.object({
 	query: keysetPaginationQuerySchema,
 });
 
-// ─── Admin resolution ─────────────────────────────────────────────────────────
 
-// POST /api/v1/admin/verification-queue/:requestId/approve
+
+
 export const approveRequestSchema = z.object({
 	params: z.object({
 		requestId: z.uuid({ error: "Invalid request ID" }),
@@ -43,9 +43,9 @@ export const approveRequestSchema = z.object({
 	}),
 });
 
-// POST /api/v1/admin/verification-queue/:requestId/reject
-// rejectionReason is required on rejection — it is what the PG owner sees when
-// they check their status, so a rejection without a reason is not allowed.
+
+
+
 export const rejectRequestSchema = z.object({
 	params: z.object({
 		requestId: z.uuid({ error: "Invalid request ID" }),

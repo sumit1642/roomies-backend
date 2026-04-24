@@ -1,11 +1,11 @@
-// src/validators/rating.validators.js
+
 
 import { z } from "zod";
 import { keysetPaginationQuerySchema } from "./pagination.validators.js";
 
-// Reusable optional 1–5 dimension score for cleanliness, communication,
-// reliability, and value fields. Keeping one definition prevents drift
-// if the scale ever changes.
+
+
+
 const dimensionScoreSchema = z.coerce
 	.number()
 	.int()
@@ -13,7 +13,7 @@ const dimensionScoreSchema = z.coerce
 	.max(5, { error: "Score must be between 1 and 5" })
 	.optional();
 
-// ─── Submit rating ─────────────────────────────────────────────────────────────
+
 export const submitRatingSchema = z.object({
 	body: z.object({
 		connectionId: z.uuid({ error: "connectionId must be a valid UUID" }),
@@ -44,14 +44,14 @@ export const submitRatingSchema = z.object({
 	}),
 });
 
-// ─── Get ratings for a connection ─────────────────────────────────────────────
+
 export const getRatingsForConnectionSchema = z.object({
 	params: z.object({
 		connectionId: z.uuid({ error: "Invalid connection ID" }),
 	}),
 });
 
-// ─── Get public ratings for a user ────────────────────────────────────────────
+
 export const getPublicRatingsSchema = z.object({
 	params: z.object({
 		userId: z.uuid({ error: "Invalid user ID" }),
@@ -59,12 +59,12 @@ export const getPublicRatingsSchema = z.object({
 	query: keysetPaginationQuerySchema,
 });
 
-// ─── Get my given ratings ──────────────────────────────────────────────────────
+
 export const getMyGivenRatingsSchema = z.object({
 	query: keysetPaginationQuerySchema,
 });
 
-// ─── Get public ratings for a property ────────────────────────────────────────
+
 export const getPublicPropertyRatingsSchema = z.object({
 	params: z.object({
 		propertyId: z.uuid({ error: "Invalid property ID" }),

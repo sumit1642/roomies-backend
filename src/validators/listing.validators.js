@@ -1,10 +1,10 @@
-// src/validators/listing.validators.js
+
 
 import { z } from "zod";
 import { buildKeysetPaginationQuerySchema, keysetPaginationQuerySchema } from "./pagination.validators.js";
 import { preferencesSchema, requiredPreferencesSchema } from "./preferences.validators.js";
 
-// ─── Shared sub-schemas ───────────────────────────────────────────────────────
+
 
 const amenityIdsSchema = z.array(z.uuid({ error: "Each amenity ID must be a valid UUID" })).default([]);
 
@@ -19,7 +19,7 @@ const withCoordinateRefinement = (schema) =>
 			path: ["latitude"],
 		});
 
-// ─── Listing params ───────────────────────────────────────────────────────────
+
 
 export const listingParamsSchema = z.object({
 	params: z.object({
@@ -27,7 +27,7 @@ export const listingParamsSchema = z.object({
 	}),
 });
 
-// ─── Search listings ──────────────────────────────────────────────────────────
+
 
 export const searchListingsSchema = z.object({
 	query: buildKeysetPaginationQuerySchema({
@@ -82,7 +82,7 @@ export const searchListingsSchema = z.object({
 		),
 });
 
-// ─── Create listing ───────────────────────────────────────────────────────────
+
 
 export const createListingSchema = z.object({
 	body: withCoordinateRefinement(
@@ -164,7 +164,7 @@ export const createListingSchema = z.object({
 	),
 });
 
-// ─── Update listing ───────────────────────────────────────────────────────────
+
 
 export const updateListingSchema = z.object({
 	params: z.object({
@@ -189,9 +189,9 @@ export const updateListingSchema = z.object({
 			availableFrom: z.string().date({ error: "availableFrom must be a valid date (YYYY-MM-DD)" }).optional(),
 			availableUntil: z.string().date({ error: "availableUntil must be a valid date (YYYY-MM-DD)" }).optional(),
 
-			// Address fields — only meaningful for student listings.
-			// For pg_room and hostel_bed, the service rejects these fields entirely
-			// (Fix for QA finding #2 — location invariant enforcement).
+			
+			
+			
 			addressLine: z.string().min(5).max(500).optional(),
 			city: z.string().min(2).max(100).optional(),
 			locality: z.string().max(100).optional(),
@@ -210,13 +210,13 @@ export const updateListingSchema = z.object({
 	),
 });
 
-// ─── Update listing status ────────────────────────────────────────────────────
 
-// PATCH /api/v1/listings/:listingId/status
-// Poster-initiated lifecycle transitions only. 'expired' is intentionally
-// excluded — it is set exclusively by the cron job, never by user action.
-// The service enforces the full ALLOWED_STATUS_TRANSITIONS state machine;
-// the validator only ensures the value is a known user-facing target status.
+
+
+
+
+
+
 export const updateListingStatusSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
@@ -228,7 +228,7 @@ export const updateListingStatusSchema = z.object({
 	}),
 });
 
-// ─── Listing preferences (standalone) ────────────────────────────────────────
+
 
 export const updatePreferencesSchema = z.object({
 	params: z.object({
@@ -239,7 +239,7 @@ export const updatePreferencesSchema = z.object({
 	}),
 });
 
-// ─── Save / unsave ────────────────────────────────────────────────────────────
+
 
 export const saveListingSchema = z.object({
 	params: z.object({
@@ -247,7 +247,7 @@ export const saveListingSchema = z.object({
 	}),
 });
 
-// ─── Saved listings feed ──────────────────────────────────────────────────────
+
 
 export const savedListingsSchema = z.object({
 	query: keysetPaginationQuerySchema,

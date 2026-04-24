@@ -1,4 +1,4 @@
-// src/controllers/preferences.controller.js
+
 
 import * as preferencesService from "../services/preferences.service.js";
 

@@ -1,20 +1,20 @@
-// src/services/rating.service.js
+
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { enqueueNotification } from "../workers/notificationQueue.js";
 
-// ─── Submit rating ─────────────────────────────────────────────────────────────
-// Ratings require a confirmed connection between reviewer and reviewee.
-// The INSERT uses WHERE EXISTS to atomically verify eligibility, preventing
-// a rating without a confirmed interaction at the database level.
-//
-// ON CONFLICT (reviewer_id, connection_id, reviewee_id) DO NOTHING matches the
-// partial unique index idx_ratings_one_per_connection exactly. The original code
-// incorrectly appended "WHERE deleted_at IS NULL" to the ON CONFLICT clause,
-// which PostgreSQL does not support — conflict predicates must match the index
-// definition verbatim, which has no deleted_at predicate.
+
+
+
+
+
+
+
+
+
+
 export const submitRating = async (reviewerId, data) => {
 	const {
 		connectionId,
@@ -32,7 +32,7 @@ export const submitRating = async (reviewerId, data) => {
 		throw new AppError("Invalid revieweeType: must be 'user' or 'property'", 400);
 	}
 
-	// Step 1: polymorphic reviewee existence check before the gated INSERT.
+	
 	if (revieweeType === "user") {
 		const { rows } = await pool.query(`SELECT 1 FROM users WHERE user_id = $1 AND deleted_at IS NULL`, [
 			revieweeId,
@@ -45,9 +45,9 @@ export const submitRating = async (reviewerId, data) => {
 		if (!rows.length) throw new AppError("Reviewee property not found", 404);
 	}
 
-	// Step 2: atomic gated INSERT.
-	// WHERE EXISTS verifies: connection exists and is confirmed, caller is a
-	// party, and caller and reviewee are different parties (no self-rating).
+	
+	
+	
 	let result;
 	if (revieweeType === "user") {
 		result = await pool.query(
@@ -83,8 +83,8 @@ export const submitRating = async (reviewerId, data) => {
 			],
 		);
 	} else {
-		// Property path: the WITH gate CTE captures owner_id alongside eligibility
-		// so the notification can fire without a second query.
+		
+		
 		result = await pool.query(
 			`WITH gate AS (
          SELECT p.owner_id
@@ -125,10 +125,10 @@ export const submitRating = async (reviewerId, data) => {
 		);
 	}
 
-	// Step 3: interpret rowCount === 0.
-	// Zero rows means either: (a) the connection does not exist or caller is not
-	// a party → 404; (b) connection exists but is unconfirmed → 422;
-	// (c) ON CONFLICT fired (duplicate) → 409.
+	
+	
+	
+	
 	if (result.rowCount === 0) {
 		const { rows: connRows } = await pool.query(
 			`SELECT connection_id, confirmation_status
@@ -167,7 +167,7 @@ export const submitRating = async (reviewerId, data) => {
 
 	logger.info({ reviewerId, connectionId, revieweeType, revieweeId, ratingId, overallScore }, "Rating submitted");
 
-	// Step 4: post-commit notification.
+	
 	if (revieweeType === "user") {
 		enqueueNotification({
 			recipientId: revieweeId,
@@ -190,9 +190,9 @@ export const submitRating = async (reviewerId, data) => {
 	return { ratingId, createdAt };
 };
 
-// ─── Get ratings for a connection ─────────────────────────────────────────────
-// Returns { myRatings: Rating[], theirRatings: Rating[] } for both parties.
-// Only the two connection parties can call this; third parties get 404.
+
+
+
 export const getRatingsForConnection = async (callerId, connectionId) => {
 	const { rows: connRows } = await pool.query(
 		`SELECT initiator_id, counterpart_id
@@ -277,8 +277,8 @@ const buildNextCursor = (fetchedRows, limit) => {
 	};
 };
 
-// ─── Get public ratings for a user ────────────────────────────────────────────
-// No auth required. Returns paginated visible ratings received by the user.
+
+
 export const getPublicRatings = async (userId, filters) => {
 	const { cursorTime, cursorId, limit = 20 } = filters;
 
@@ -355,9 +355,9 @@ export const getPublicRatings = async (userId, filters) => {
 	};
 };
 
-// ─── Get my given ratings ──────────────────────────────────────────────────────
-// The authenticated user's full history of ratings they submitted.
-// Includes is_visible so reviewers can see their own hidden ratings.
+
+
+
 export const getMyGivenRatings = async (reviewerId, filters) => {
 	const { cursorTime, cursorId, limit = 20 } = filters;
 
@@ -461,8 +461,8 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
 	};
 };
 
-// ─── Get public ratings for a property ────────────────────────────────────────
-// No auth required. 404 if property does not exist.
+
+
 export const getPublicPropertyRatings = async (propertyId, filters) => {
 	const { rows: propRows } = await pool.query(
 		`SELECT 1 FROM properties WHERE property_id = $1 AND deleted_at IS NULL`,

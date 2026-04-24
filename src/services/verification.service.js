@@ -1,19 +1,19 @@
-// src/services/verification.service.js
+
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 
-// ─── Shared rollback-failure logger ──────────────────────────────────────────
-//
-// Both approveRequest and rejectRequest wrap their ROLLBACK in a try/catch and
-// log identically. Extracting the pattern here removes the duplication and
-// ensures any future logging change only needs to happen in one place.
-//
-// Parameters:
-//   rollbackErr  — the error thrown by client.query("ROLLBACK")
-//   originalErr  — the error that triggered the rollback in the first place
-//   context      — plain object with { adminUserId, requestId } for log correlation
+
+
+
+
+
+
+
+
+
+
 const handleRollbackFailure = (
 	rollbackErr,
 	originalErr,
@@ -23,13 +23,13 @@ const handleRollbackFailure = (
 	logger.error({ rollbackErr, originalErr, ...context }, message);
 };
 
-// ─── Document submission ──────────────────────────────────────────────────────
+
 
 export const submitDocument = async (requestingUserId, targetUserId, { documentType, documentUrl }) => {
-	// Route-level ownership check catches cross-user attacks by comparing JWT
-	// claims. This guard is different — it verifies actual database state: that a
-	// non-deleted pg_owner_profiles row exists for this user. A student who somehow
-	// obtained a pg_owner role would pass the ownership check but fail here.
+	
+	
+	
+	
 	if (requestingUserId !== targetUserId) {
 		throw new AppError("Forbidden", 403);
 	}
@@ -110,7 +110,7 @@ export const submitDocument = async (requestingUserId, targetUserId, { documentT
 	}
 };
 
-// ─── Admin queue ──────────────────────────────────────────────────────────────
+
 
 export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
@@ -159,7 +159,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 	return { items, nextCursor };
 };
 
-// ─── Admin resolution ─────────────────────────────────────────────────────────
+
 
 export const approveRequest = async (adminUserId, requestId, { adminNotes } = {}) => {
 	const client = await pool.connect();

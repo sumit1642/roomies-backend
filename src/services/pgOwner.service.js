@@ -1,4 +1,4 @@
-// src/services/pgOwner.service.js
+
 
 import { pool } from "../db/client.js";
 import { AppError } from "../middleware/errorHandler.js";
@@ -33,21 +33,21 @@ export const getPgOwnerProfile = async (requestingUserId, targetUserId) => {
 	return rows[0];
 };
 
-// Returns contact details for a PG owner profile.
-//
-// Access control is handled entirely upstream by optionalAuthenticate and
-// contactRevealGate before this service is ever reached. This service trusts
-// that the gate already enforced the quota and caller eligibility — its only
-// job here is to fetch the data and shape the response correctly based on
-// which tier the caller belongs to.
-//
-// emailOnly: false — verified users. Returns the full bundle: email + whatsapp_phone
-//                    (business_phone serves as the WhatsApp number for PG owners).
-// emailOnly: true  — guests and unverified users. Returns email only. The
-//                    whatsapp_phone field is stripped at the service boundary so
-//                    it never exists on any object that leaves this function,
-//                    making it impossible to accidentally serialise or log it
-//                    further down the stack.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export const getPgOwnerContactReveal = async (targetUserId, emailOnly = false) => {
 	const { rows } = await pool.query(
 		`

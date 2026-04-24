@@ -1,4 +1,4 @@
-// src/controllers/auth.controller.js
+
 
 import * as authService from "../services/auth.service.js";
 import { parseTtlSeconds } from "../services/auth.service.js";
@@ -6,12 +6,12 @@ import { AppError } from "../middleware/errorHandler.js";
 import { config } from "../config/env.js";
 import { ACCESS_COOKIE_OPTIONS, REFRESH_COOKIE_OPTIONS } from "../middleware/authenticate.js";
 
-// Determines whether the caller is a non-browser client (e.g. Android) or a
-// cross-origin SPA that uses the bearer transport instead of cookies.
-// The frontend sends X-Client-Transport: bearer in production.
+
+
+
 const isBearerTransport = (req) => req.headers["x-client-transport"] === "bearer";
 
-// Builds the safe body payload for cookie-mode responses.
+
 const buildSafeBody = (tokens) => ({
 	user: tokens.user,
 	sid: tokens.sid,
@@ -23,7 +23,7 @@ const setAuthCookies = (res, accessToken, refreshToken) => {
 };
 
 const clearAuthCookies = (res) => {
-	// Must use the same sameSite/secure settings to clear correctly
+	
 	res.clearCookie("accessToken", {
 		httpOnly: true,
 		secure: ACCESS_COOKIE_OPTIONS.secure,
@@ -36,16 +36,16 @@ const clearAuthCookies = (res) => {
 	});
 };
 
-// ─── Controllers ──────────────────────────────────────────────────────────────
+
 
 export const register = async (req, res, next) => {
 	try {
 		const tokens = await authService.register(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-		// Always return full token data — the frontend needs it in production
-		// where cookies can't cross domains. In cookie-mode the frontend ignores
-		// the tokens in the body and relies on cookies.
+		
+		
+		
 		res.status(201).json({ status: "success", data: tokens });
 	} catch (err) {
 		next(err);
@@ -57,7 +57,7 @@ export const login = async (req, res, next) => {
 		const tokens = await authService.login(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-		// Return full tokens unconditionally. Same reasoning as register above.
+		
 		res.json({ status: "success", data: tokens });
 	} catch (err) {
 		next(err);
@@ -104,7 +104,7 @@ export const refresh = async (req, res, next) => {
 
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-		// Always return full tokens (bearer transport + cookie both work)
+		
 		res.json({ status: "success", data: tokens });
 	} catch (err) {
 		next(err);

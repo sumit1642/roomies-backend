@@ -37,21 +37,21 @@ const start = async () => {
 
 		let isShuttingDown = false;
 
-		// Shutdown order:
-		//   1. Stop accepting new HTTP connections (server.close)
-		//   2. Stop cron so no new maintenance work starts
-		//   3. Await HTTP drain completion
-		//   4. Close BullMQ workers (drain in-flight jobs)
-		//   5. Stop the CDC outbox drainer (polling loop)
-		//   6. Close BullMQ queue registry (Redis connections)
-		//   7. Close rate-limit Redis client
-		//   8. Close PostgreSQL pool
-		//   9. Close main Redis connection
-		//   10. Exit
-		//
-		// Cron is stopped before awaiting HTTP drain (step 2 before step 3) to
-		// close the window where a cron job could fire and enqueue new BullMQ
-		// jobs after the workers have already started closing.
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
 		const shutdown = (signal) => async () => {
 			if (isShuttingDown) {
 				logger.warn(`${signal} received again during shutdown — ignoring duplicate signal`);

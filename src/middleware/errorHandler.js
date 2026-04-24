@@ -20,13 +20,13 @@ export class AppError extends Error {
 	}
 }
 
-// eslint-disable-next-line no-unused-vars
+
 export const errorHandler = (err, req, res, next) => {
 	if (res.headersSent) {
 		return next(err);
 	}
 
-	// Zod v4 validation errors — format all issues into field/message pairs.
+	
 	if (err.name === "ZodError") {
 		logger.warn(
 			{
@@ -49,8 +49,8 @@ export const errorHandler = (err, req, res, next) => {
 		});
 	}
 
-	// Multer upload errors. Each branch logs the specific Multer error code and
-	// message so upload failures are diagnosable without reading raw stack traces.
+	
+	
 	if (err.name === "MulterError") {
 		if (err.code === "LIMIT_FILE_SIZE") {
 			logger.warn(
@@ -87,7 +87,7 @@ export const errorHandler = (err, req, res, next) => {
 			});
 		}
 
-		// Unknown Multer error — log the full code and message so it is not lost.
+		
 		logger.warn(
 			{
 				req: { method: req.method, url: req.url },

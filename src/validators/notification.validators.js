@@ -1,15 +1,15 @@
-// src/validators/notification.validators.js
+
 
 import { z } from "zod";
 
-// ─── Notification feed ────────────────────────────────────────────────────────
+
 export const getFeedSchema = z.object({
 	query: z
 		.object({
-			// Accepts the exact strings "true"/"false" (case-insensitive) and the
-			// numeric values 0 (false) and 1 (true). Any other value — including
-			// numbers like 2 or -1 — is passed through unchanged so z.boolean()
-			// rejects it with a clean 400.
+			
+			
+			
+			
 			isRead: z
 				.preprocess((val) => {
 					if (typeof val === "string") {
@@ -40,12 +40,12 @@ export const getFeedSchema = z.object({
 		),
 });
 
-// ─── Mark notifications as read ───────────────────────────────────────────────
-// `all` is z.literal(true) — only the value true is accepted, not false or any
-// other value. Sending { all: false } is rejected by Zod before .refine() runs.
-// The .refine() XOR uses a presence check (data.all !== undefined) rather than
-// a value check, which is equivalent since z.literal(true) guarantees that if
-// the field is present its value is always true.
+
+
+
+
+
+
 export const markReadSchema = z.object({
 	body: z
 		.object({

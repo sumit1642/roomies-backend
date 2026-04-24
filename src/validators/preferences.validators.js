@@ -1,4 +1,4 @@
-// src/validators/preferences.validators.js
+
 
 import { z } from "zod";
 import { PREFERENCE_DEFINITIONS, getAllowedPreferenceValues } from "../config/preferences.js";
@@ -27,6 +27,6 @@ export const preferencePairSchema = z
 
 export const preferencesSchema = z.array(preferencePairSchema).default([]);
 
-// For explicit full-replace endpoints (PUT), require the field to be provided
-// by the client to avoid accidental implicit clear-all when omitted.
+
+
 export const requiredPreferencesSchema = z.array(preferencePairSchema);

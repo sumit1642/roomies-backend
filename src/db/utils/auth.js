@@ -1,4 +1,4 @@
-// src/db/utils/auth.js
+
 
 import { pool } from "../client.js";
 
@@ -36,7 +36,7 @@ export const findUserById = async (id, client = pool) => {
 	}
 	return user;
 
-	// return rows[0] ?? null;
+	
 };
 
 export const findUserByEmail = async (email, client = pool) => {
@@ -56,22 +56,22 @@ export const findUserByEmail = async (email, client = pool) => {
 	);
 	return rows[0] ?? null;
 };
-// Google ID token). Called during OAuth sign-in to determine whether this
-// Google account has been seen before (returning user) or is new.
-//
-// Returns enough columns for the service to make a branching decision:
-//   - user_id           → needed for JWT issuance and Redis key
-//   - email             → included in JWT payload
-//   - google_id         → returned so the caller can confirm the link rather
-//                         than assuming it
-//   - account_status    → checked before issuing tokens, same as login
-//   - is_email_verified → included in token response user object
-//
-// Does NOT return password_hash — OAuth users may not have one, and the
-// OAuth flow never needs it. Keeping it out prevents accidental logging.
-//
-// Accepts an optional client so it can participate in a transaction when the
-// account-linking UPDATE and a subsequent SELECT need to be atomic.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export const findUserByGoogleId = async (googleId, client = pool) => {
 	const { rows } = await client.query(
 		`

@@ -1,19 +1,19 @@
-// src/middleware/rateLimiter.js
-//
-// All rate limiters live here — one import location for every route file.
-//
-// ─── DISTRIBUTED STORE ───────────────────────────────────────────────────────
-//
-// Uses rate-limit-redis so counters are shared across all Node instances.
-// passOnStoreError: true on all limiters — Redis unavailability degrades to no
-// rate limiting rather than blocking all requests.
-//
-// ─── SHUTDOWN ────────────────────────────────────────────────────────────────
-//
-// The dedicated Redis client opened here is never used elsewhere, so it must
-// be explicitly closed during graceful shutdown. Export closeRateLimitRedisClient
-// and call it in server.js before process.exit(0). Without this the socket stays
-// open and Node will not exit cleanly.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import rateLimit from "express-rate-limit";
 import { RedisStore } from "rate-limit-redis";
@@ -21,7 +21,7 @@ import { createClient } from "redis";
 import { config } from "../config/env.js";
 import { logger } from "../logger/index.js";
 
-// ─── Dedicated Redis client for rate limiting ─────────────────────────────────
+
 const rateLimitRedisClient = createClient({
 	url: config.REDIS_URL,
 	socket: {
@@ -54,11 +54,11 @@ rateLimitRedisClient.connect().catch((err) => {
 	);
 });
 
-// ─── Close helper for graceful shutdown ───────────────────────────────────────
-//
-// Call this from server.js during shutdown (before process.exit) so the socket
-// is released and Node exits cleanly. Errors are caught and logged; this function
-// never throws so it cannot interrupt the shutdown sequence.
+
+
+
+
+
 export const closeRateLimitRedisClient = async () => {
 	try {
 		if (rateLimitRedisClient.isOpen) {
@@ -70,14 +70,14 @@ export const closeRateLimitRedisClient = async () => {
 	}
 };
 
-// ─── Shared Redis store factory ───────────────────────────────────────────────
+
 const makeRedisStore = (prefix) =>
 	new RedisStore({
 		sendCommand: (...args) => rateLimitRedisClient.sendCommand(args),
 		prefix,
 	});
 
-// ─── OTP send — strictest ────────────────────────────────────────────────────
+
 export const otpLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 5,
@@ -91,7 +91,7 @@ export const otpLimiter = rateLimit({
 	},
 });
 
-// ─── Auth endpoints — register / login / refresh ─────────────────────────────
+
 export const authLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 10,
@@ -105,10 +105,10 @@ export const authLimiter = rateLimit({
 	},
 });
 
-// ─── Public rating reads — anti-enumeration / anti-scraping ────────────────
-// Applied on unauthenticated public endpoints under /ratings/user/:userId and
-// /ratings/property/:propertyId to reduce aggressive scraping while keeping
-// normal browsing traffic unaffected.
+
+
+
+
 export const publicRatingsLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 120,

@@ -1,43 +1,43 @@
-// BullMQ worker for reliable async notification delivery.
-//
-// Before this branch, notification INSERTs were fire-and-forget pool.query calls
-// made directly in the service layer after a transaction committed. That pattern
-// is fast but unreliable: if the process crashed between the commit and the
-// query, the notification was silently lost with no retry and no recovery path.
-//
-// This worker gives notifications the same reliability guarantee as photo
-// processing: the job is written to Redis atomically at enqueue time. Even a
-// process crash after enqueue leaves the job intact. BullMQ retries on failure
-// with exponential backoff, and exhausted jobs land in the failed set for
-// manual inspection and replay.
-//
-// Each notification job is a single SQL INSERT — pure I/O with no CPU cost.
-// Running 10 concurrent jobs keeps the queue draining quickly during bursts
-// without risking connection pool exhaustion (10 concurrent inserts against a
-// pool of 20 leaves comfortable headroom for HTTP handlers).
-//
-// Protects against the retry-after-crash duplicate scenario: if the worker
-// crashed after the INSERT succeeded but before BullMQ received the completion
-// acknowledgement, the retry would re-run with the same job.id. The UNIQUE
-// index on idempotency_key turns that retry into a silent no-op.
-//
-// The NOTIFICATION_MESSAGES map below is the authoritative contract between
-// the enum values defined in the DB schema and the messages shown to users.
-// Each entry is annotated with its lifecycle status so the surface area is
-// always visible in one place:
-//
-//   ACTIVE   — a real emitter exists in the current codebase; this type is
-//              produced and consumed in production today.
-//
-//   PLANNED  — the DB enum reserves the value, a message template is defined
-//              here so the worker never crashes on an unknown type, but no
-//              service currently enqueues jobs of this type. When implemented,
-//              remove the PLANNED annotation.
-//
-// This table should be reviewed whenever a new notification type is added to
-// the notification_type_enum in the schema. Adding a type to the enum without
-// a corresponding entry here causes the worker to insert a NULL message, which
-// is permitted but degrades the user experience.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import { Worker } from "bullmq";
 import { pool } from "../db/client.js";
@@ -46,15 +46,15 @@ import { bullConnection } from "./bullConnection.js";
 
 export const NOTIFICATION_QUEUE_NAME = "notification-delivery";
 
-// Maps every notification_type_enum value to its human-readable message.
-// Stored at insert time so the feed always shows the message that was current
-// when the notification was created — old notifications do not retroactively
-// change wording when templates are updated.
-//
-// Lifecycle annotations:
-//   ACTIVE  — emitter exists; type is produced today.
-//   PLANNED — enum value reserved; no emitter yet. Implement the emitter and
-//             remove this annotation when the feature ships.
+
+
+
+
+
+
+
+
+
 const NOTIFICATION_MESSAGES = {
 	interest_request_received: "Someone expressed interest in your listing",
 	interest_request_accepted: "Your interest request was accepted",
@@ -74,10 +74,10 @@ const NOTIFICATION_MESSAGES = {
 
 	verification_rejected: "Your verification request was rejected",
 
-	// Reserved for the future in-app messaging phase.
+	
 	new_message: "You have a new message",
 
-	// Reserved for a future "request to connect" flow.
+	
 	connection_requested: "You have a new connection request",
 };
 
@@ -95,11 +95,11 @@ export const startNotificationWorker = () => {
 			const message = NOTIFICATION_MESSAGES[type] ?? null;
 
 			if (!message) {
-				// An unknown type means either a new enum value was added to the DB
-				// schema without a corresponding entry in NOTIFICATION_MESSAGES above,
-				// or a bug in the enqueue call. We log at warn level and proceed —
-				// inserting with a NULL message is better than crashing the worker and
-				// leaving the notification undelivered.
+				
+				
+				
+				
+				
 				logger.warn(
 					{ type, jobId: job.id },
 					"Notification worker: no message template for this type — inserting with NULL message. " +
@@ -107,8 +107,8 @@ export const startNotificationWorker = () => {
 				);
 			}
 
-			// Capture the query result so we can distinguish a genuine INSERT from
-			// an idempotent replay (ON CONFLICT DO NOTHING → rowCount 0).
+			
+			
 			const res = await pool.query(
 				`INSERT INTO notifications
            (recipient_id, notification_type, entity_type, entity_id, message, idempotency_key)
@@ -120,9 +120,9 @@ export const startNotificationWorker = () => {
 			if (res.rowCount === 1) {
 				logger.debug({ recipientId, type, entityId }, "Notification worker: notification inserted");
 			} else {
-				// rowCount is 0 when the UNIQUE constraint on idempotency_key fired.
-				// This is expected during BullMQ retries where the job succeeded on a
-				// previous attempt but the completion acknowledgement was lost.
+				
+				
+				
 				logger.debug(
 					{ recipientId, type, entityId, jobId: job.id },
 					"Notification worker: notification skipped (idempotent replay)",

@@ -1,4 +1,4 @@
-// src/services/auth.service.js
+
 
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -102,29 +102,29 @@ export const casRefreshToken = async (
 	return result === 1;
 };
 
-// Verifies the refresh token JWT and returns { userId, sid }.
-//
-// Legacy tokens (issued before per-session keys) lack a sid. When detected,
-// this function reads the old per-user key (userSessionsKey), generates a fresh
-// sid, migrates to the per-session scheme atomically via MULTI/EXEC, and deletes
-// the legacy key.
-//
-// RACE WINDOW (legacy path only — acceptable by design):
-// There is a TOCTOU gap between reading legacyToken via
-//   redis.get(legacyRefreshKey(userId))
-// and the subsequent MULTI/EXEC that writes the new per-session key, removes
-// the old legacyKey, and rotates incomingRefreshToken to newRefreshToken.
-// A concurrent request with the same incomingRefreshToken could also read
-// legacyToken and pass the comparison, then both issue new session IDs. The
-// worst outcome is two valid sessions derived from one legacy token — the next
-// call to verifyRefreshTokenPayload on either will use the modern per-session
-// path and succeed normally. This race is acceptable because:
-//   1. Legacy tokens are a transitional artefact being phased out; new logins
-//      always produce per-session tokens with a sid.
-//   2. Making the legacy migration fully atomic would require a Lua script that
-//      duplicates the rotation logic for a shrinking population of tokens.
-//   3. Worst case is a harmless duplicate session, not data loss or privilege
-//      escalation. The next refresh on either session will CAS-rotate correctly.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 	let payload;
 	try {
@@ -137,12 +137,12 @@ export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 		throw new AppError("Refresh token payload is invalid", 401);
 	}
 
-	// Modern path — token already has a sid.
+	
 	if (payload.sid) {
 		return { userId: payload.userId, sid: payload.sid };
 	}
 
-	// Legacy path — token was minted without a sid. Attempt fallback migration.
+	
 	logger.warn(
 		{ userId: payload.userId },
 		"verifyRefreshTokenPayload: legacy token without sid — attempting migration",
@@ -198,8 +198,8 @@ export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 	return { userId: payload.userId, sid: newSid };
 };
 
-// Sync variant used by logoutCurrent — migration is not needed there because
-// logout only needs to validate and identify the session to revoke.
+
+
 const _verifyRefreshTokenPayloadSync = (incomingRefreshToken) => {
 	let payload;
 	try {
@@ -503,18 +503,18 @@ export const sendOtp = async (userId, email) => {
 	const otp = generateOtp();
 	const hash = await bcrypt.hash(otp, 10);
 
-	// Store the OTP hash and reset the attempt counter atomically.
-	// This must complete before enqueuing the email — if Redis is down here,
-	// we throw immediately and the email is never queued (correct: there is no
-	// OTP to verify). If Redis goes down between setEx and enqueueEmail, the OTP
-	// is stored but no email is sent. The user can hit "resend" to create a fresh
-	// job. This is the accepted failure mode documented in emailQueue.js.
+	
+	
+	
+	
+	
+	
 	await Promise.all([redis.setEx(`otp:${userId}`, OTP_TTL, hash), redis.del(`otpAttempts:${userId}`)]);
 
-	// Enqueue the email job — fire and forget. The worker handles SMTP delivery,
-	// retries on Brevo failures, and logs exhaustion at error level.
-	// We no longer await email delivery in the HTTP path, so the response returns
-	// in ~1ms (just the Redis write above) instead of waiting for the SMTP round-trip.
+	
+	
+	
+	
 	enqueueEmail({ type: "otp", to: email, data: { otp } });
 
 	logger.info({ userId }, "OTP enqueued for delivery");
@@ -605,7 +605,7 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 		throw new AppError("Google account does not have a verified email address", 400);
 	}
 
-	// Path 1: returning OAuth user
+	
 	const existingByGoogleId = await findUserByGoogleId(googleId);
 
 	if (existingByGoogleId) {
@@ -632,9 +632,9 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 		return tokens;
 	}
 
-	// Path 2: account linking — email-based account exists, no google_id yet.
-	// AND google_id IS NULL guards against concurrent linking races; a 23505
-	// means a different account already claimed this googleId.
+	
+	
+	
 	const existingByEmail = await findUserByEmail(email);
 
 	if (existingByEmail) {
@@ -687,7 +687,7 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 		return tokens;
 	}
 
-	// Path 3: new user registration via Google.
+	
 	if (!role) {
 		throw new AppError("Role is required for new account registration via Google", 400);
 	}

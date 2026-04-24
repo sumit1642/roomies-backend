@@ -1,30 +1,30 @@
-// src/validators/property.validators.js
+
 
 import { z } from "zod";
 
-// Strict ISO 8601 regex — avoids Date.parse which accepts non-ISO strings like
-// "January 1 2020" that PostgreSQL would reject at query time.
+
+
 const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/;
 
-// Validates that a string is both ISO 8601 formatted AND semantically valid.
-// The regex catches format issues; the Date round-trip catches impossible dates
-// like 2024-13-45 that match the regex pattern but aren't real dates.
+
+
+
 const isValidISO8601 = (s) => {
 	if (!ISO_8601_RE.test(s)) return false;
 	const ms = Date.parse(s);
 	return !Number.isNaN(ms);
 };
 
-// Converts null, empty string, or whitespace-only strings to undefined so
-// .optional() treats them as absent instead of coercing them to 0.
+
+
 const toOptionalNumber = (val) => {
 	if (val === null) return undefined;
 	if (typeof val === "string" && val.trim() === "") return undefined;
 	return val;
 };
 
-// Reusable coordinate schema — eliminates duplication across create/update and
-// between latitude/longitude while keeping field-specific range constraints.
+
+
 const coordinateSchema = (min, max, label) =>
 	z.preprocess(
 		toOptionalNumber,

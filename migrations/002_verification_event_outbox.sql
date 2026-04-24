@@ -1,4 +1,4 @@
--- Active: 1774765370673@@127.0.0.1@5432@roomies_db
+
 DO $$
 BEGIN
     IF NOT EXISTS (

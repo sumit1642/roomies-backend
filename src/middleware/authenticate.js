@@ -10,32 +10,32 @@ const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
 const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
 const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
 
-// ─── Cross-origin cookie policy ───────────────────────────────────────────────
-//
-// In production the frontend (Vercel) and backend (Render) are on different
-// domains. Browsers apply the following rules:
-//
-//   sameSite: "strict"  → cookie is NEVER sent cross-site, even with
-//                          credentials: "include". Auth breaks completely.
-//   sameSite: "lax"     → cookie is sent on top-level navigations (GET) but
-//                          NOT on cross-origin fetch with credentials. Still
-//                          broken for API calls.
-//   sameSite: "none"    → sent on all cross-site requests, but REQUIRES
-//                          secure: true (HTTPS only).
-//
-// In practice, for a cross-domain SPA + API architecture the correct approach
-// is to use sameSite: "none" + secure: true in production so the browser
-// actually sends the cookie on every credentialed fetch.
-//
-// We also support the X-Client-Transport: bearer header (sent by the frontend
-// in production). When present, the auth controller returns tokens in the JSON
-// body AND sets cookies. The frontend stores tokens in memory/sessionStorage
-// and sends them as Authorization: Bearer headers — completely bypassing the
-// cross-domain cookie problem.
-//
-// Cookie options for each environment:
-//   development  → sameSite: "lax",  secure: false  (localhost HTTP)
-//   production   → sameSite: "none", secure: true   (cross-domain HTTPS)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 const IS_PROD = config.NODE_ENV === "production";
 
@@ -56,8 +56,8 @@ export const REFRESH_COOKIE_OPTIONS = {
 const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
 
 const extractToken = (req) => {
-	// Authorization: Bearer <token> takes priority over cookies for
-	// cross-origin clients that use the bearer transport.
+	
+	
 	const authHeader = req.headers.authorization;
 	if (authHeader && authHeader.startsWith("Bearer ")) {
 		return { token: authHeader.slice(7), source: "header" };
@@ -148,8 +148,8 @@ export const authenticate = async (req, res, next) => {
 		try {
 			payload = jwt.verify(token, config.JWT_SECRET);
 		} catch (err) {
-			// Only attempt silent cookie-based refresh for cookie-sourced tokens.
-			// Header-sourced tokens (bearer transport) handle refresh client-side.
+			
+			
 			if (err.name === "TokenExpiredError" && source === "cookie") {
 				const session = await attemptSilentRefresh(req, res);
 				if (!session?.userId) {

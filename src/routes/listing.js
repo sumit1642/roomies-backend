@@ -1,22 +1,22 @@
-// src/routes/listing.js
-//
-// ─── AUTH POLICY ─────────────────────────────────────────────────────────────
-//
-// READ routes (GET / and GET /:listingId):
-//   optionalAuthenticate → guestListingGate → validate → controller
-//
-//   Guests can browse freely. optionalAuthenticate resolves req.user if a
-//   valid token is present; guestListingGate caps the response size for guests.
-//   The service omits compatibility scoring when req.user is absent.
-//
-// WRITE routes (POST, PUT, PATCH, DELETE) and saved listings:
-//   authenticate (required) — unchanged behaviour.
-//
-// ─── ROUTE REGISTRATION ORDER NOTE ───────────────────────────────────────────
-// Static path segments must be registered BEFORE parameterised segments that
-// share the same prefix, or the parameterised route will shadow them.
-// /me/saved and / (search) are registered first; /:listingId comes after.
-// ─────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
@@ -47,9 +47,9 @@ import { UPLOAD_FIELD_NAME } from "../config/constants.js";
 
 export const listingRouter = Router();
 
-// ─── Static routes first — must precede /:listingId ──────────────────────────
 
-// Saved listings: auth required (student only)
+
+
 listingRouter.get(
 	"/me/saved",
 	authenticate,
@@ -58,10 +58,10 @@ listingRouter.get(
 	listingController.getSavedListings,
 );
 
-// Search listings: guests allowed
-// Chain: optionalAuthenticate → validate → guestListingGate → controller
-// validate runs before guestListingGate so that the limit field is already
-// coerced to a number (by Zod) when guestListingGate reads it.
+
+
+
+
 listingRouter.get(
 	"/",
 	optionalAuthenticate,
@@ -70,12 +70,12 @@ listingRouter.get(
 	listingController.searchListings,
 );
 
-// Create listing: auth required
+
 listingRouter.post("/", authenticate, validate(createListingSchema), listingController.createListing);
 
-// ─── Parameterised routes — after all static routes ──────────────────────────
 
-// Get single listing: guests allowed
+
+
 listingRouter.get(
 	"/:listingId",
 	optionalAuthenticate,
@@ -84,7 +84,7 @@ listingRouter.get(
 	listingController.getListing,
 );
 
-// Write routes: auth required
+
 listingRouter.put("/:listingId", authenticate, validate(updateListingSchema), listingController.updateListing);
 
 listingRouter.delete("/:listingId", authenticate, validate(listingParamsSchema), listingController.deleteListing);
@@ -96,7 +96,7 @@ listingRouter.patch(
 	listingController.updateListingStatus,
 );
 
-// ─── Child resource routes ────────────────────────────────────────────────────
+
 
 listingRouter.get(
 	"/:listingId/preferences",
@@ -128,7 +128,7 @@ listingRouter.delete(
 	listingController.unsaveListing,
 );
 
-// ─── Photo routes (child resource of /:listingId) ────────────────────────────
+
 
 listingRouter.get("/:listingId/photos", authenticate, validate(uploadPhotoSchema), photoController.getPhotos);
 
@@ -161,7 +161,7 @@ listingRouter.put(
 	photoController.reorderPhotos,
 );
 
-// ─── Interest request routes (child resource of /:listingId) ─────────────────
+
 
 import { createInterestSchema, getListingInterestsSchema } from "../validators/interest.validators.js";
 import * as interestController from "../controllers/interest.controller.js";
