@@ -1,66 +1,13 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import crypto from "crypto";
 import { redis } from "../cache/client.js";
 import { logger } from "../logger/index.js";
 
 const COOKIE_NAME = "contactRevealAnonCount";
 const MAX_FREE_REVEALS = 10;
-const TTL_SECONDS = 30 * 24 * 60 * 60; 
+const TTL_SECONDS = 30 * 24 * 60 * 60;
 const LOGIN_REDIRECT_PATH = "/login/signup";
 
-
 const HIGH_COUNT_WARNING_THRESHOLD = 50;
-
-
 
 const INCR_WITH_INITIAL_TTL_SCRIPT = `
 local count = redis.call("INCR", KEYS[1])
@@ -102,40 +49,13 @@ const limitReachedResponse = (res) =>
 		loginRedirect: LOGIN_REDIRECT_PATH,
 	});
 
-
-
-
-
-
-
-
-
-
-
-
 const installPreResponseHook = (res, safeCookieCount, fingerprint, redisKey) => {
 	let charged = false;
 
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
 	const chargeQuota = (res) => {
 		if (charged) return;
 		charged = true;
 
-		
-		
-		
-		
 		res.cookie(COOKIE_NAME, String(safeCookieCount + 1), {
 			httpOnly: true,
 			secure: process.env.NODE_ENV === "production",
@@ -143,10 +63,6 @@ const installPreResponseHook = (res, safeCookieCount, fingerprint, redisKey) => 
 			maxAge: TTL_SECONDS * 1000,
 		});
 
-		
-		
-		
-		
 		if (redis?.isOpen) {
 			redis
 				.eval(INCR_WITH_INITIAL_TTL_SCRIPT, {
@@ -173,9 +89,6 @@ const installPreResponseHook = (res, safeCookieCount, fingerprint, redisKey) => 
 						},
 						"contactRevealGate: quota charged",
 					);
-					
-					
-					
 				})
 				.catch((redisErr) => {
 					logger.warn(
@@ -186,9 +99,6 @@ const installPreResponseHook = (res, safeCookieCount, fingerprint, redisKey) => 
 		}
 	};
 
-	
-	
-	
 	const wrapMethod = (methodName) => {
 		const original = res[methodName].bind(res);
 		res[methodName] = (...args) => {
@@ -196,8 +106,7 @@ const installPreResponseHook = (res, safeCookieCount, fingerprint, redisKey) => 
 			if (code >= 200 && code < 300) {
 				chargeQuota(res);
 			}
-			
-			
+
 			res.json = originalJson;
 			res.send = originalSend;
 			res.end = originalEnd;
@@ -205,8 +114,6 @@ const installPreResponseHook = (res, safeCookieCount, fingerprint, redisKey) => 
 		};
 	};
 
-	
-	
 	const originalJson = res.json.bind(res);
 	const originalSend = res.send.bind(res);
 	const originalEnd = res.end.bind(res);
@@ -217,16 +124,11 @@ const installPreResponseHook = (res, safeCookieCount, fingerprint, redisKey) => 
 };
 
 export const contactRevealGate = async (req, res, next) => {
-	
 	if (req.user?.isEmailVerified === true) {
 		req.contactReveal = { emailOnly: false, verified: true };
 		return next();
 	}
 
-	
-
-	
-	
 	const cookieCount = Number.parseInt(req.cookies?.[COOKIE_NAME] ?? "0", 10);
 	const safeCookieCount = Number.isFinite(cookieCount) ? cookieCount : 0;
 
@@ -235,11 +137,6 @@ export const contactRevealGate = async (req, res, next) => {
 		return limitReachedResponse(res);
 	}
 
-	
-	
-	
-	
-	
 	const fingerprint = anonFingerprint(req);
 	const redisKey = `contactRevealAnon:${fingerprint}`;
 
@@ -256,7 +153,6 @@ export const contactRevealGate = async (req, res, next) => {
 				return limitReachedResponse(res);
 			}
 		} catch (redisErr) {
-			
 			logger.warn(
 				{ err: redisErr.message },
 				"contactRevealGate: Redis pre-check unavailable — falling back to cookie-only enforcement",
@@ -264,16 +160,8 @@ export const contactRevealGate = async (req, res, next) => {
 		}
 	}
 
-	
-	
-	
-	
-	
-	
 	installPreResponseHook(res, safeCookieCount, fingerprint, redisKey);
 
-	
-	
 	req.contactReveal = { emailOnly: true, verified: false };
 	return next();
 };
