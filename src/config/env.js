@@ -67,7 +67,7 @@ const envSchema = z.object({
 	// are present for the chosen provider, and exit with a clear per-variable
 	// error message if anything is missing.
 	/**
-	 * "brevo-api : For tier0 deployment, render doesn't provides smtp on free tier , so we are using brevo http api key as fallback option."
+	 * "brevo-api": For tier0 deployment, Render doesn't provide SMTP on the free tier, so we use the Brevo HTTP API as a fallback option.
 	 */
 	EMAIL_PROVIDER: z
 		.enum(["ethereal", "brevo", "brevo-api"], {

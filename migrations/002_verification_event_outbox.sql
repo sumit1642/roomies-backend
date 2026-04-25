@@ -1,4 +1,5 @@
-
+-- Migration 002: Add verification event outbox pattern
+-- Creates outbox table for async notification processing on verification status changes
 DO $$
 BEGIN
     IF NOT EXISTS (
