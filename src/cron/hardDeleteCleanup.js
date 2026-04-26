@@ -132,6 +132,18 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.listing_photos = lp;
 
+		
+		const { rowCount: ro } = await client.query(
+			`DELETE FROM rent_observations
+     WHERE listing_id IN (
+       SELECT listing_id FROM listings
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}
+     )`,
+			p,
+		);
+		results.rent_observations = ro;
+
 		const { rowCount: li } = await client.query(
 			`DELETE FROM listings
        WHERE deleted_at IS NOT NULL

@@ -14,6 +14,8 @@ import { closeRateLimitRedisClient } from "./middleware/rateLimiter.js";
 import { registerListingExpiryCron } from "./cron/listingExpiry.js";
 import { registerExpiryWarningCron } from "./cron/expiryWarning.js";
 import { registerHardDeleteCleanupCron } from "./cron/hardDeleteCleanup.js";
+import { registerRentIndexRefreshCron } from "./cron/rentIndexRefresh.js";
+import { registerSavedSearchAlertCron } from "./cron/savedSearchAlert.js";
 
 const start = async () => {
 	try {
@@ -29,7 +31,14 @@ const start = async () => {
 
 		const verificationEventWorker = startVerificationEventWorker();
 
-		const cronTasks = [registerListingExpiryCron(), registerExpiryWarningCron(), registerHardDeleteCleanupCron()];
+		// CHANGE this block inside start():
+		const cronTasks = [
+			registerListingExpiryCron(),
+			registerExpiryWarningCron(),
+			registerHardDeleteCleanupCron(),
+			registerRentIndexRefreshCron(),
+			registerSavedSearchAlertCron(),
+		];
 
 		const server = app.listen(config.PORT, () => {
 			logger.info(`Server running on port ${config.PORT} [${config.NODE_ENV}]`);
@@ -37,21 +46,6 @@ const start = async () => {
 
 		let isShuttingDown = false;
 
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
 		const shutdown = (signal) => async () => {
 			if (isShuttingDown) {
 				logger.warn(`${signal} received again during shutdown — ignoring duplicate signal`);
