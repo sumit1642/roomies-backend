@@ -1,5 +1,3 @@
-
-
 import { pool } from "../db/client.js";
 import { AppError } from "../middleware/errorHandler.js";
 
@@ -12,6 +10,7 @@ export const getPgOwnerProfile = async (requestingUserId, targetUserId) => {
 			pop.business_name,
 			pop.owner_full_name,
 			pop.business_description,
+			pop.profile_photo_url,
 			CASE WHEN $2::uuid = pop.user_id THEN pop.business_phone ELSE NULL END AS business_phone,
 			pop.operating_since,
 			pop.verification_status,
@@ -32,21 +31,6 @@ export const getPgOwnerProfile = async (requestingUserId, targetUserId) => {
 	if (!rows.length) throw new AppError("PG owner profile not found", 404);
 	return rows[0];
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 export const getPgOwnerContactReveal = async (targetUserId, emailOnly = false) => {
 	const { rows } = await pool.query(
