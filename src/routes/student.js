@@ -1,3 +1,9 @@
+// src/routes/student.js
+//
+// IMPORTANT — mount order:
+//   roommateRouter is mounted FIRST (before /:userId routes) so Express does
+//   not capture the literal string "roommates" as a :userId param.
+
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { optionalAuthenticate } from "../middleware/optionalAuthenticate.js";
@@ -13,12 +19,19 @@ import {
 } from "../validators/student.validators.js";
 import * as studentController from "../controllers/student.controller.js";
 import * as profilePhotoController from "../controllers/profilePhoto.controller.js";
+import { roommateRouter } from "./roommate.js";
 
 export const studentRouter = Router();
 
+// ── Roommate sub-router (no :userId prefix — its own routes carry /:userId) ──
+// Must be registered before any /:userId routes below.
+studentRouter.use(roommateRouter);
+
+// ── Profile ───────────────────────────────────────────────────────────────────
 studentRouter.get("/:userId/profile", authenticate, validate(getStudentParamsSchema), studentController.getProfile);
 studentRouter.put("/:userId/profile", authenticate, validate(updateStudentSchema), studentController.updateProfile);
 
+// ── Photo ─────────────────────────────────────────────────────────────────────
 studentRouter.put(
 	"/:userId/photo",
 	authenticate,
@@ -34,6 +47,7 @@ studentRouter.delete(
 	profilePhotoController.deleteStudentPhoto,
 );
 
+// ── Contact reveal ────────────────────────────────────────────────────────────
 studentRouter.get(
 	"/:userId/contact/reveal",
 	optionalAuthenticate,
@@ -46,6 +60,7 @@ studentRouter.get(
 	studentController.revealContact,
 );
 
+// ── Preferences ───────────────────────────────────────────────────────────────
 studentRouter.get(
 	"/:userId/preferences",
 	authenticate,
