@@ -311,6 +311,7 @@ export const getListing = async (listingId) => {
 
 export const searchListings = async (userId, filters) => {
 	const {
+		sortBy = "recent",
 		city,
 		minRent,
 		maxRent,
@@ -499,6 +500,11 @@ export const searchListings = async (userId, filters) => {
 		compatibilityAvailable:
 			userId !== null && userHasPreferences && (listingPreferenceCounts.get(row.listing_id) ?? 0) > 0,
 	}));
+
+	if (sortBy === "compatibility") {
+		enrichedItems.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
+		return { items: enrichedItems, nextCursor: null };
+	}
 
 	const nextCursor =
 		hasNextPage ?
