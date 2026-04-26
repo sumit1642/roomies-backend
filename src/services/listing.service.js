@@ -1,3 +1,5 @@
+// src/services/listing.service.js
+
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
@@ -113,7 +115,7 @@ const fetchListingDetail = async (listingId, client = pool) => {
         '[]'
       ) AS preferences,
 
-(
+      (
         SELECT COALESCE(
           JSON_AGG(
             JSONB_BUILD_OBJECT(
@@ -435,7 +437,7 @@ export const searchListings = async (userId, filters) => {
       l.created_at,
       COALESCE(p.property_name, NULL) AS property_name,
       COALESCE(p.average_rating, u.average_rating) AS average_rating,
-	  (
+      (
         SELECT ph.photo_url
         FROM listing_photos ph
         WHERE ph.listing_id = l.listing_id
@@ -667,9 +669,29 @@ export const deleteListing = async (posterId, listingId) => {
 	return { listingId, deleted: true };
 };
 
+// ─── Status transition table ──────────────────────────────────────────────────
+//
+// 'filled' → 'active' is now permitted so that a listing can be re-activated
+// after a tenant moves out.  When this transition fires, current_occupants is
+// reset to 0 — the room is genuinely vacant again and must accept new interest
+// requests from scratch.
+//
+// Why not keep current_occupants as-is?  Because:
+//   1. We have no way of knowing which individual tenant left.
+//   2. The interest request / connection model doesn't track which confirmed
+//      connections map to which physical occupancy slot.
+//   3. Setting it to 0 is the safe default: the owner re-activates the listing
+//      specifically because there is a vacancy to fill.
+//
+// 'expired' → 'active' is intentionally NOT here: that path already goes
+// through `renewListing` (POST /:listingId/renew), which also resets expires_at.
+// Allowing it here without resetting expires_at would produce a listing that is
+// active but immediately re-expires on the next cron tick — confusing and wrong.
+
 const ALLOWED_STATUS_TRANSITIONS = {
 	active: ["filled", "deactivated"],
 	deactivated: ["active"],
+	filled: ["active"], // ← re-listing after vacancy
 };
 
 export const updateListingStatus = async (posterId, listingId, newStatus) => {
@@ -700,14 +722,22 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 
 	const deactivating = newStatus === "filled" || newStatus === "deactivated";
 
+	// When transitioning filled → active we need to reset occupancy.
+	const reactivatingFromFilled = currentStatus === "filled" && newStatus === "active";
+
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
+
+		// Build the SET clause dynamically so we only touch current_occupants
+		// when this is a filled→active reactivation.
+		const occupancyReset = reactivatingFromFilled ? `, current_occupants = 0` : "";
 
 		const { rows: updatedRows } = await client.query(
 			`UPDATE listings l
        SET status     = $1::listing_status_enum,
            filled_at  = CASE WHEN $1::listing_status_enum = 'filled'::listing_status_enum THEN NOW() ELSE l.filled_at END
+           ${occupancyReset}
        WHERE l.listing_id = $2
          AND l.posted_by  = $3
          AND l.status     = $4::listing_status_enum
@@ -768,7 +798,16 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 		client.release();
 	}
 
-	logger.info({ posterId, listingId, from: currentStatus, to: newStatus }, "Listing status updated");
+	logger.info(
+		{
+			posterId,
+			listingId,
+			from: currentStatus,
+			to: newStatus,
+			...(reactivatingFromFilled && { occupancyReset: true }),
+		},
+		"Listing status updated",
+	);
 	return { listingId, status: newStatus };
 };
 

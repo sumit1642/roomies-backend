@@ -1,3 +1,5 @@
+// src/services/photo.service.js
+
 import path from "path";
 import crypto from "crypto";
 import { pool } from "../db/client.js";
@@ -7,29 +9,74 @@ import { storageService } from "../storage/index.js";
 import { MEDIA_QUEUE_NAME } from "../workers/mediaProcessor.js";
 import { getQueue } from "../workers/queue.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
+import { MAX_PHOTOS_PER_LISTING } from "../config/constants.js";
+
+// ─── enqueuePhotoUpload ───────────────────────────────────────────────────────
+//
+// Accepts a staged file, inserts a provisional `listing_photos` row with a
+// `processing:` placeholder URL, then enqueues a BullMQ job so the media worker
+// can compress → upload → update the row asynchronously.
+//
+// Photo cap enforcement:
+//   We count ONLY rows that are not soft-deleted AND whose URL is NOT a
+//   `processing:` placeholder.  This means:
+//     • Photos still being processed don't consume a slot — they haven't
+//       landed yet and could fail.  Counting them would let a burst of parallel
+//       uploads sneak past the cap before any individual upload completes.
+//     • Soft-deleted photos don't consume a slot — they're gone from the
+//       user's perspective.
+//   The count query runs inside the same transaction as the INSERT, with a
+//   FOR SHARE lock on the listing row so two concurrent uploads can't both
+//   read "4 photos" and both insert their 5th slot before either commits.
 
 export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displayOrder) => {
 	const client = await pool.connect();
 	let photoId = null;
 	let transactionOpen = false;
+
 	try {
 		await client.query("BEGIN");
 		transactionOpen = true;
 
+		// Lock the listing row (FOR SHARE) so concurrent uploads must queue
+		// behind this transaction's count check, preventing double-admission.
 		const { rows: listingRows } = await client.query(
 			`SELECT listing_id
        FROM listings
        WHERE listing_id = $1
          AND posted_by  = $2
          AND deleted_at IS NULL
-       FOR UPDATE`,
+       FOR SHARE`,
 			[listingId, posterId],
 		);
+
 		if (!listingRows.length) {
 			await client.query("ROLLBACK");
 			throw new AppError("Listing not found", 404);
 		}
 
+		// Count only committed, non-processing photos — these are the ones the
+		// user actually sees and that count toward the cap.
+		const { rows: countRows } = await client.query(
+			`SELECT COUNT(*)::int AS photo_count
+       FROM listing_photos
+       WHERE listing_id = $1
+         AND deleted_at IS NULL
+         AND photo_url  NOT LIKE 'processing:%'`,
+			[listingId],
+		);
+
+		const currentCount = countRows[0].photo_count;
+		if (currentCount >= MAX_PHOTOS_PER_LISTING) {
+			await client.query("ROLLBACK");
+			throw new AppError(
+				`Listing already has the maximum of ${MAX_PHOTOS_PER_LISTING} photos. ` +
+					`Delete an existing photo before uploading a new one.`,
+				422,
+			);
+		}
+
+		// Derive display order if the caller did not specify one.
 		let order = displayOrder;
 		if (order === undefined || order === null) {
 			const { rows: orderRows } = await client.query(
@@ -41,6 +88,7 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displ
 			);
 			order = orderRows[0].next_order;
 		}
+
 		photoId = crypto.randomUUID();
 		const placeholderUrl = `processing:${photoId}`;
 
@@ -54,6 +102,8 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displ
 		await client.query("COMMIT");
 		transactionOpen = false;
 
+		// Enqueue the compression + upload job outside the transaction so a
+		// slow Redis doesn't hold a DB connection open.
 		const queue = getQueue(MEDIA_QUEUE_NAME);
 		try {
 			await queue.add(
@@ -67,10 +117,11 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displ
 				},
 			);
 		} catch (queueErr) {
+			// Roll back the provisional row so the slot isn't permanently occupied.
 			const cleanupResult = await pool.query(
 				`UPDATE listing_photos
          SET deleted_at = NOW()
-         WHERE photo_id = $1
+         WHERE photo_id  = $1
            AND listing_id = $2
            AND deleted_at IS NULL
            AND photo_url LIKE 'processing:%'`,
@@ -84,7 +135,6 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displ
 
 			try {
 				await import("fs/promises").then((fs) => fs.unlink(stagingPath));
-				
 			} catch (unlinkErr) {
 				logger.warn(
 					{ unlinkErr, stagingPath },
@@ -111,6 +161,8 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displ
 		client.release();
 	}
 };
+
+// ─── getListingPhotos ─────────────────────────────────────────────────────────
 
 export const getListingPhotos = async (listingId, options = {}) => {
 	const { skipValidation = false, ownerId } = options;
@@ -143,7 +195,7 @@ export const getListingPhotos = async (listingId, options = {}) => {
        photo_url      AS "photoUrl",
        is_cover       AS "isCover",
        display_order  AS "displayOrder",
-       uploaded_at     AS "createdAt"
+       uploaded_at    AS "createdAt"
      FROM listing_photos
      WHERE listing_id = $1
        AND deleted_at IS NULL
@@ -153,6 +205,8 @@ export const getListingPhotos = async (listingId, options = {}) => {
 	);
 	return rows;
 };
+
+// ─── deletePhoto ──────────────────────────────────────────────────────────────
 
 export const deletePhoto = async (posterId, listingId, photoId) => {
 	const client = await pool.connect();
@@ -220,6 +274,8 @@ export const deletePhoto = async (posterId, listingId, photoId) => {
 	return { photoId, deleted: true };
 };
 
+// ─── setCoverPhoto ────────────────────────────────────────────────────────────
+
 export const setCoverPhoto = async (posterId, listingId, photoId) => {
 	const client = await pool.connect();
 	try {
@@ -257,7 +313,7 @@ export const setCoverPhoto = async (posterId, listingId, photoId) => {
 		const { rowCount } = await client.query(
 			`UPDATE listing_photos
        SET is_cover = TRUE
-       WHERE photo_id = $1
+       WHERE photo_id   = $1
          AND listing_id = $2
          AND deleted_at IS NULL
          AND photo_url NOT LIKE 'processing:%'`,
@@ -278,6 +334,8 @@ export const setCoverPhoto = async (posterId, listingId, photoId) => {
 	}
 };
 
+// ─── reorderPhotos ────────────────────────────────────────────────────────────
+
 export const reorderPhotos = async (posterId, listingId, photos) => {
 	const { rows: ownerCheck } = await pool.query(
 		`SELECT 1 FROM listings
@@ -290,8 +348,8 @@ export const reorderPhotos = async (posterId, listingId, photos) => {
 	try {
 		await client.query("BEGIN");
 
-		const submittedDisplayOrders = photos.map(({ displayOrder }) => displayOrder);
 		const submittedPhotoIds = photos.map(({ photoId }) => photoId);
+		const submittedDisplayOrders = photos.map(({ displayOrder }) => displayOrder);
 
 		const photoIdFrequency = new Map();
 		for (const photoId of submittedPhotoIds) {

@@ -1,15 +1,8 @@
-
-
-
-
-
+// src/controllers/report.controller.js
 
 import * as reportService from "../services/report.service.js";
 
-const UUID_V1_TO_V5_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-
-
+// ─── submitReport ─────────────────────────────────────────────────────────────
 
 export const submitReport = async (req, res, next) => {
 	try {
@@ -20,49 +13,17 @@ export const submitReport = async (req, res, next) => {
 	}
 };
 
-
-
 export const getReportQueue = async (req, res, next) => {
 	try {
 		const { cursorTime, cursorId, limit } = req.query;
-
-		const parsedCursorTime =
-			typeof cursorTime === "string" ?
-				(() => {
-					const dt = new Date(cursorTime);
-					return Number.isNaN(dt.getTime()) ? undefined : dt;
-				})()
-			:	undefined;
-
-		const parsedCursorId =
-			typeof cursorId === "string" && UUID_V1_TO_V5_REGEX.test(cursorId) ? cursorId : undefined;
-
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		const parsedLimit = typeof limit === "string" && limit.trim() !== "" ? Number(limit) : undefined;
-
-		const safeParsedLimit =
-			Number.isFinite(parsedLimit) && Number.isInteger(parsedLimit) && parsedLimit > 0 ? parsedLimit : undefined;
-
-		const result = await reportService.getReportQueue({
-			cursorTime: parsedCursorTime,
-			cursorId: parsedCursorId,
-			limit: safeParsedLimit,
-		});
+		const result = await reportService.getReportQueue({ cursorTime, cursorId, limit });
 		res.json({ status: "success", data: result });
 	} catch (err) {
 		next(err);
 	}
 };
 
-
+// ─── resolveReport ────────────────────────────────────────────────────────────
 
 export const resolveReport = async (req, res, next) => {
 	try {
