@@ -15,6 +15,9 @@ import {
 	saveListingSchema,
 	savedListingsSchema,
 } from "../validators/listing.validators.js";
+import { createInterestSchema, getListingInterestsSchema } from "../validators/interest.validators.js";
+import * as interestController from "../controllers/interest.controller.js";
+
 import * as listingController from "../controllers/listing.controller.js";
 import { upload } from "../middleware/upload.js";
 import {
@@ -26,6 +29,7 @@ import {
 import * as photoController from "../controllers/photo.controller.js";
 import { UPLOAD_FIELD_NAME } from "../config/constants.js";
 import { renewListingHandler } from "../controllers/listingRenewal.controller.js";
+import { getListingAnalyticsHandler } from "../controllers/listingAnalytics.controller.js";
 
 export const listingRouter = Router();
 
@@ -66,17 +70,9 @@ listingRouter.patch(
 	listingController.updateListingStatus,
 );
 
-// ── Renewal ───────────────────────────────────────────────────────────────────
-//
-// POST /:listingId/renew
-//
-// Resets expires_at to NOW() + 60 days and re-activates the listing if it was
-// expired or deactivated. No request body needed — the only input is the
-// listingId param and the authenticated user's identity.
-//
-// Intentionally POST (not PATCH): renewal is an action/command, not a field
-// update. It has side effects beyond just changing a field value.
 listingRouter.post("/:listingId/renew", authenticate, validate(listingParamsSchema), renewListingHandler);
+
+listingRouter.get("/:listingId/analytics", authenticate, validate(listingParamsSchema), getListingAnalyticsHandler);
 
 listingRouter.get(
 	"/:listingId/preferences",
@@ -138,9 +134,6 @@ listingRouter.put(
 	validate(reorderPhotosSchema),
 	photoController.reorderPhotos,
 );
-
-import { createInterestSchema, getListingInterestsSchema } from "../validators/interest.validators.js";
-import * as interestController from "../controllers/interest.controller.js";
 
 listingRouter.post(
 	"/:listingId/interests",

@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
@@ -23,7 +14,6 @@ const LISTING_TYPE_TO_CONNECTION_TYPE = {
 	pg_room: "pg_stay",
 	hostel_bed: "hostel_stay",
 };
-
 
 export const createInterestRequest = async (studentId, listingId, data) => {
 	const { message } = data;
@@ -61,12 +51,6 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 		throw new AppError("You cannot express interest in your own listing", 422);
 	}
 
-	
-	
-	
-	
-	
-	
 	const { rows } = await pool.query(
 		`INSERT INTO interest_requests
        (sender_id, listing_id, message, status)
@@ -104,7 +88,6 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 	};
 };
 
-
 export const transitionInterestRequest = async (callerId, requestId, targetStatus) => {
 	const ALLOWED_STATUSES = new Set(["accepted", "declined", "withdrawn"]);
 	if (!ALLOWED_STATUSES.has(targetStatus)) {
@@ -117,7 +100,6 @@ export const transitionInterestRequest = async (callerId, requestId, targetStatu
 
 	const ownershipClause = targetStatus === "declined" ? `AND l.posted_by = $2` : `AND ir.sender_id = $2`;
 
-	
 	const { rowCount, rows } = await pool.query(
 		`UPDATE interest_requests ir
      SET status     = $3::request_status_enum,
@@ -189,7 +171,6 @@ export const transitionInterestRequest = async (callerId, requestId, targetStatu
 		updatedAt: ir.updated_at,
 	};
 };
-
 
 const _acceptInterestRequest = async (posterId, requestId) => {
 	const client = await pool.connect();
@@ -382,7 +363,11 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 	}
 };
 
-
+// ── getInterestRequest ────────────────────────────────────────────────────────
+//
+// Now fetches poster phone + name so we can build a WhatsApp link for the
+// student — they may want to reach the poster directly after their request is
+// accepted. The link is null when the poster hasn't provided a phone number.
 export const getInterestRequest = async (callerId, requestId) => {
 	const { rows } = await pool.query(
 		`SELECT
@@ -394,21 +379,41 @@ export const getInterestRequest = async (callerId, requestId) => {
        ir.created_at,
        ir.updated_at,
        l.posted_by,
-       l.title        AS listing_title,
-       l.city         AS listing_city,
-       l.listing_type AS listing_type,
-       COALESCE(sp.full_name, u_sender.email) AS sender_name,
-       sp.profile_photo_url                   AS sender_photo_url
+       l.title          AS listing_title,
+       l.city           AS listing_city,
+       l.listing_type   AS listing_type,
+
+       -- Sender (student who expressed interest)
+       COALESCE(sp.full_name, u_sender.email)  AS sender_name,
+       sp.profile_photo_url                    AS sender_photo_url,
+
+       -- Poster contact info for WhatsApp link (only meaningful when accepted)
+       CASE
+         WHEN l.listing_type = 'student_room' THEN u_poster.phone
+         ELSE pop.business_phone
+       END AS poster_phone,
+       COALESCE(pop.business_name, sp_poster.full_name, u_poster.email) AS poster_name
+
      FROM interest_requests ir
      JOIN listings l
-       ON l.listing_id  = ir.listing_id
-      AND l.deleted_at  IS NULL
+       ON l.listing_id    = ir.listing_id
+      AND l.deleted_at    IS NULL
      JOIN users u_sender
-       ON u_sender.user_id   = ir.sender_id
+       ON u_sender.user_id    = ir.sender_id
       AND u_sender.deleted_at IS NULL
      LEFT JOIN student_profiles sp
        ON sp.user_id    = ir.sender_id
       AND sp.deleted_at IS NULL
+     -- Poster joins for WhatsApp link
+     JOIN users u_poster
+       ON u_poster.user_id    = l.posted_by
+      AND u_poster.deleted_at IS NULL
+     LEFT JOIN student_profiles sp_poster
+       ON sp_poster.user_id    = l.posted_by
+      AND sp_poster.deleted_at IS NULL
+     LEFT JOIN pg_owner_profiles pop
+       ON pop.user_id    = l.posted_by
+      AND pop.deleted_at IS NULL
      WHERE ir.request_id = $1
        AND (ir.sender_id = $2 OR l.posted_by = $2)
        AND ir.deleted_at IS NULL`,
@@ -421,6 +426,14 @@ export const getInterestRequest = async (callerId, requestId) => {
 
 	const row = rows[0];
 
+	// Only surface the WhatsApp link when the request is accepted — before that
+	// it's noise, and surfacing a phone number pre-acceptance would bypass the
+	// platform's connection flow.
+	const whatsappLink =
+		row.status === "accepted" && row.poster_phone ?
+			_buildWhatsAppLink(row.poster_phone, `Hi ${row.poster_name}, regarding my interest in ${row.listing_title}`)
+		:	null;
+
 	return {
 		interestRequestId: row.request_id,
 		studentId: row.sender_id,
@@ -429,6 +442,7 @@ export const getInterestRequest = async (callerId, requestId) => {
 		status: row.status,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
+		whatsappLink,
 		listing: {
 			listingId: row.listing_id,
 			title: row.listing_title,
@@ -442,7 +456,6 @@ export const getInterestRequest = async (callerId, requestId) => {
 		},
 	};
 };
-
 
 export const getInterestRequestsForListing = async (posterId, listingId, filters) => {
 	const { rows: listingRows } = await pool.query(
@@ -536,7 +549,6 @@ export const getInterestRequestsForListing = async (posterId, listingId, filters
 	};
 };
 
-
 export const getMyInterestRequests = async (studentId, filters) => {
 	const { status, cursorTime, cursorId, limit = 20 } = filters;
 
@@ -611,7 +623,6 @@ export const getMyInterestRequests = async (studentId, filters) => {
 		nextCursor,
 	};
 };
-
 
 export const expirePendingRequestsForListing = async (listingId, client = pool, excludeRequestId = null) => {
 	const params = [listingId];
