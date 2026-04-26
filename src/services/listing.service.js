@@ -411,7 +411,7 @@ export const searchListings = async (userId, filters) => {
 	}
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
-	if (hasCursor) {
+	if (hasCursor && sortBy === "recent") {
 		clauses.push(`(l.created_at < $${p} OR (l.created_at = $${p} AND l.listing_id > $${p + 1}::uuid))`);
 		params.push(cursorTime, cursorId);
 		p += 2;
@@ -675,29 +675,10 @@ export const deleteListing = async (posterId, listingId) => {
 	return { listingId, deleted: true };
 };
 
-// ─── Status transition table ──────────────────────────────────────────────────
-//
-// 'filled' → 'active' is now permitted so that a listing can be re-activated
-// after a tenant moves out.  When this transition fires, current_occupants is
-// reset to 0 — the room is genuinely vacant again and must accept new interest
-// requests from scratch.
-//
-// Why not keep current_occupants as-is?  Because:
-//   1. We have no way of knowing which individual tenant left.
-//   2. The interest request / connection model doesn't track which confirmed
-//      connections map to which physical occupancy slot.
-//   3. Setting it to 0 is the safe default: the owner re-activates the listing
-//      specifically because there is a vacancy to fill.
-//
-// 'expired' → 'active' is intentionally NOT here: that path already goes
-// through `renewListing` (POST /:listingId/renew), which also resets expires_at.
-// Allowing it here without resetting expires_at would produce a listing that is
-// active but immediately re-expires on the next cron tick — confusing and wrong.
-
 const ALLOWED_STATUS_TRANSITIONS = {
 	active: ["filled", "deactivated"],
 	deactivated: ["active"],
-	filled: ["active"], // ← re-listing after vacancy
+	filled: ["active"],
 };
 
 export const updateListingStatus = async (posterId, listingId, newStatus) => {
@@ -727,16 +708,12 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 	}
 
 	const deactivating = newStatus === "filled" || newStatus === "deactivated";
-
-	// When transitioning filled → active we need to reset occupancy.
 	const reactivatingFromFilled = currentStatus === "filled" && newStatus === "active";
 
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
 
-		// Build the SET clause dynamically so we only touch current_occupants
-		// when this is a filled→active reactivation.
 		const occupancyReset = reactivatingFromFilled ? `, current_occupants = 0` : "";
 
 		const { rows: updatedRows } = await client.query(

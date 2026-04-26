@@ -23,6 +23,8 @@ export const listingParamsSchema = z.object({
 
 export const searchListingsSchema = z.object({
 	query: buildKeysetPaginationQuerySchema({
+		sortBy: z.enum(["recent", "compatibility"]).default("recent"),
+
 		city: z.string().min(1).max(100).optional(),
 
 		minRent: z.coerce.number().int().min(0).optional(),
