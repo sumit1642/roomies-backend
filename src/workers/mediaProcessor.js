@@ -98,7 +98,7 @@ export const startMediaWorker = () => {
 	worker.on("failed", async (job, err) => {
 		logger.error({ jobId: job?.id, photoId: job?.data?.photoId, err }, "Media worker: job failed");
 
-		if (job && job.attemptsMade >= job.opts.attempts) {
+		if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
 			const { photoId, listingId } = job.data ?? {};
 			if (!photoId || !listingId) {
 				logger.error({ jobId: job.id }, "Media worker: missing photoId or listingId in job data");

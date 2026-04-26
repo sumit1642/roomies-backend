@@ -215,8 +215,17 @@ const drainOutbox = async () => {
 
 		await client.query("COMMIT");
 
-		for (const fn of pendingSideEffects) {
-			fn();
+		if (pendingSideEffects.length > 0) {
+			const promises = pendingSideEffects.map((fn) => fn());
+			const results = await Promise.allSettled(promises);
+			for (const result of results) {
+				if (result.status === "rejected") {
+					logger.error(
+						{ err: result.reason },
+						"verificationEventWorker: side effect (enqueueNotification/enqueueEmail) failed",
+					);
+				}
+			}
 		}
 	} catch (err) {
 		try {
@@ -236,12 +245,9 @@ export const startVerificationEventWorker = () => {
 		"Verification event worker started",
 	);
 
-	drainOutbox().catch((err) => {
-		logger.error({ err }, "verificationEventWorker: error during initial startup drain");
-	});
-
 	let draining = false;
-	const interval = setInterval(() => {
+
+	const runDrainCycle = () => {
 		if (draining) return;
 		draining = true;
 		drainOutbox()
@@ -251,7 +257,12 @@ export const startVerificationEventWorker = () => {
 			.finally(() => {
 				draining = false;
 			});
-	}, POLL_INTERVAL_MS);
+	};
+
+	// Run immediately on startup, protected by the same draining flag.
+	runDrainCycle();
+
+	const interval = setInterval(runDrainCycle, POLL_INTERVAL_MS);
 
 	return {
 		close: () => {

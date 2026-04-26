@@ -59,6 +59,10 @@ const runHardDeleteCleanup = async () => {
 
 	let client;
 	const results = {};
+	// Collected inside the transaction so we know exactly which rows were
+	// deleted; blob deletion happens after COMMIT so storage errors never
+	// interfere with the DB transaction.
+	let photoUrlsToDelete = [];
 
 	try {
 		client = await pool.connect();
@@ -171,6 +175,9 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.pg_owner_profiles = pop;
 
+		// Collect blob URLs before deleting rows so we know what to clean up
+		// from storage. The actual storageService.delete calls happen after
+		// COMMIT — storage errors must not roll back the DB transaction.
 		const { rows: photoRows } = await client.query(
 			`SELECT profile_photo_url FROM student_profiles
        WHERE deleted_at IS NOT NULL
@@ -178,6 +185,7 @@ const runHardDeleteCleanup = async () => {
          AND profile_photo_url IS NOT NULL`,
 			p,
 		);
+		photoUrlsToDelete = photoRows.map((r) => r.profile_photo_url);
 
 		const { rowCount: sp } = await client.query(
 			`DELETE FROM student_profiles
@@ -186,17 +194,6 @@ const runHardDeleteCleanup = async () => {
 			p,
 		);
 		results.student_profiles = sp;
-
-		for (const { profile_photo_url } of photoRows) {
-			try {
-				await storageService.delete(profile_photo_url);
-			} catch (storageErr) {
-				logger.error(
-					{ storageErr, profile_photo_url },
-					"cron:hardDeleteCleanup — failed to delete profile photo blob",
-				);
-			}
-		}
 
 		const { rowCount: pr } = await client.query(
 			`DELETE FROM properties
@@ -297,9 +294,24 @@ const runHardDeleteCleanup = async () => {
 			{ err, retentionDays: RETENTION_DAYS, durationMs: Date.now() - startedAt },
 			"cron:hardDeleteCleanup — run failed",
 		);
+		return; // skip blob cleanup if the transaction failed
 	} finally {
 		if (client) {
 			client.release();
+		}
+	}
+
+	// Delete blobs after the transaction has committed. Storage errors are
+	// logged but do not affect the DB state — the rows are already gone and
+	// orphaned blobs can be reconciled manually or by a future storage audit.
+	for (const url of photoUrlsToDelete) {
+		try {
+			await storageService.delete(url);
+		} catch (storageErr) {
+			logger.error(
+				{ storageErr, profile_photo_url: url },
+				"cron:hardDeleteCleanup — failed to delete profile photo blob",
+			);
 		}
 	}
 };
