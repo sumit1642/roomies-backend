@@ -1,23 +1,4 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// src/routes/listing.js
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { optionalAuthenticate } from "../middleware/optionalAuthenticate.js";
@@ -44,11 +25,9 @@ import {
 } from "../validators/photo.validators.js";
 import * as photoController from "../controllers/photo.controller.js";
 import { UPLOAD_FIELD_NAME } from "../config/constants.js";
+import { renewListingHandler } from "../controllers/listingRenewal.controller.js";
 
 export const listingRouter = Router();
-
-
-
 
 listingRouter.get(
 	"/me/saved",
@@ -58,10 +37,6 @@ listingRouter.get(
 	listingController.getSavedListings,
 );
 
-
-
-
-
 listingRouter.get(
 	"/",
 	optionalAuthenticate,
@@ -70,11 +45,7 @@ listingRouter.get(
 	listingController.searchListings,
 );
 
-
 listingRouter.post("/", authenticate, validate(createListingSchema), listingController.createListing);
-
-
-
 
 listingRouter.get(
 	"/:listingId",
@@ -83,7 +54,6 @@ listingRouter.get(
 	guestListingGate,
 	listingController.getListing,
 );
-
 
 listingRouter.put("/:listingId", authenticate, validate(updateListingSchema), listingController.updateListing);
 
@@ -96,7 +66,17 @@ listingRouter.patch(
 	listingController.updateListingStatus,
 );
 
-
+// ── Renewal ───────────────────────────────────────────────────────────────────
+//
+// POST /:listingId/renew
+//
+// Resets expires_at to NOW() + 60 days and re-activates the listing if it was
+// expired or deactivated. No request body needed — the only input is the
+// listingId param and the authenticated user's identity.
+//
+// Intentionally POST (not PATCH): renewal is an action/command, not a field
+// update. It has side effects beyond just changing a field value.
+listingRouter.post("/:listingId/renew", authenticate, validate(listingParamsSchema), renewListingHandler);
 
 listingRouter.get(
 	"/:listingId/preferences",
@@ -128,8 +108,6 @@ listingRouter.delete(
 	listingController.unsaveListing,
 );
 
-
-
 listingRouter.get("/:listingId/photos", authenticate, validate(listingParamsSchema), photoController.getPhotos);
 
 listingRouter.post(
@@ -160,8 +138,6 @@ listingRouter.put(
 	validate(reorderPhotosSchema),
 	photoController.reorderPhotos,
 );
-
-
 
 import { createInterestSchema, getListingInterestsSchema } from "../validators/interest.validators.js";
 import * as interestController from "../controllers/interest.controller.js";
