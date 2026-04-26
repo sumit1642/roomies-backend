@@ -1,4 +1,4 @@
-
+// src/routes/index.js
 
 import { Router } from "express";
 import { healthRouter } from "./health.js";
@@ -13,6 +13,7 @@ import { notificationRouter } from "./notification.js";
 import { ratingRouter } from "./rating.js";
 import { preferencesRouter } from "./preferences.js";
 import { amenitiesRouter } from "./amenities.js";
+import { rentIndexRouter } from "./rentIndex.js";
 import { testUtilsRouter } from "./testUtils.js";
 import { config } from "../config/env.js";
 
@@ -30,6 +31,7 @@ rootRouter.use("/notifications", notificationRouter);
 rootRouter.use("/ratings", ratingRouter);
 rootRouter.use("/preferences", preferencesRouter);
 rootRouter.use("/amenities", amenitiesRouter);
+rootRouter.use("/rent-index", rentIndexRouter);
 
 if (config.NODE_ENV !== "production") {
 	rootRouter.use("/test-utils", testUtilsRouter);

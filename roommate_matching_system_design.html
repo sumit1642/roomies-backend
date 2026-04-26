@@ -1,0 +1,491 @@
+
+<h2 class="sr-only">Roommate matching and proper rent system design for Roomies backend</h2>
+
+<style>
+:root { --accent: #1D9E75; --accent-bg: #E1F5EE; --accent-text: #085041; --warn: #BA7517; --warn-bg: #FAEEDA; --warn-text: #412402; --info: #185FA5; --info-bg: #E6F1FB; --info-text: #042C53; }
+body { margin: 0; font-size: 14px; line-height: 1.7; color: var(--color-text-primary); }
+.nav { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 28px; border-bottom: 0.5px solid var(--color-border-tertiary); padding-bottom: 12px; }
+.nav button { font-size: 13px; padding: 5px 13px; border-radius: var(--border-radius-md); border: 0.5px solid var(--color-border-tertiary); background: transparent; color: var(--color-text-secondary); cursor: pointer; transition: all .15s; }
+.nav button:hover { background: var(--color-background-secondary); }
+.nav button.active { background: var(--color-background-secondary); color: var(--color-text-primary); border-color: var(--color-border-primary); font-weight: 500; }
+.section { display: none; } .section.active { display: block; }
+h3 { font-size: 15px; font-weight: 500; margin: 24px 0 8px; color: var(--color-text-primary); }
+h4 { font-size: 13px; font-weight: 500; margin: 18px 0 6px; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: .05em; }
+p { margin: 0 0 12px; color: var(--color-text-secondary); font-size: 13px; }
+.card { background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); padding: 16px 20px; margin-bottom: 12px; }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.badge { display: inline-block; font-size: 11px; font-weight: 500; padding: 2px 9px; border-radius: 99px; margin-right: 4px; }
+.badge-green { background: var(--accent-bg); color: var(--accent-text); }
+.badge-amber { background: var(--warn-bg); color: var(--warn-text); }
+.badge-blue { background: var(--info-bg); color: var(--info-text); }
+.badge-gray { background: var(--color-background-secondary); color: var(--color-text-secondary); }
+code { font-family: var(--font-mono); font-size: 12px; background: var(--color-background-secondary); padding: 1px 6px; border-radius: 4px; color: var(--color-text-primary); }
+pre { font-family: var(--font-mono); font-size: 12px; background: var(--color-background-secondary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-md); padding: 14px 16px; overflow-x: auto; line-height: 1.6; color: var(--color-text-primary); margin: 0 0 16px; }
+.row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 12px; }
+.pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.rule { border: none; border-top: 0.5px solid var(--color-border-tertiary); margin: 20px 0; }
+.callout { border-left: 3px solid var(--accent); border-radius: 0 var(--border-radius-md) var(--border-radius-md) 0; background: var(--accent-bg); padding: 10px 14px; margin-bottom: 14px; font-size: 13px; color: var(--accent-text); }
+.callout-warn { border-left-color: var(--warn); background: var(--warn-bg); color: var(--warn-text); }
+.callout-blue { border-left-color: var(--info); background: var(--info-bg); color: var(--info-text); }
+.step { display: flex; gap: 12px; margin-bottom: 14px; align-items: flex-start; }
+.step-num { min-width: 22px; height: 22px; border-radius: 50%; background: var(--color-background-secondary); border: 0.5px solid var(--color-border-secondary); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 500; color: var(--color-text-secondary); flex-shrink: 0; margin-top: 2px; }
+.step-body { flex: 1; font-size: 13px; color: var(--color-text-secondary); }
+.step-body strong { color: var(--color-text-primary); font-weight: 500; }
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-bottom: 16px; }
+.metric { background: var(--color-background-secondary); border-radius: var(--border-radius-md); padding: 12px; }
+.metric-val { font-size: 22px; font-weight: 500; color: var(--color-text-primary); }
+.metric-label { font-size: 11px; color: var(--color-text-secondary); margin-top: 2px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 16px; }
+th { font-weight: 500; text-align: left; padding: 6px 10px; border-bottom: 0.5px solid var(--color-border-secondary); color: var(--color-text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+td { padding: 7px 10px; border-bottom: 0.5px solid var(--color-border-tertiary); color: var(--color-text-secondary); vertical-align: top; }
+td:first-child { color: var(--color-text-primary); font-weight: 500; }
+tr:last-child td { border-bottom: none; }
+</style>
+
+<div class="nav">
+  <button class="active" onclick="show('overview')">Overview</button>
+  <button onclick="show('schema')">DB schema</button>
+  <button onclick="show('scoring')">Scoring engine</button>
+  <button onclick="show('api')">API surface</button>
+  <button onclick="show('rent')">Rent system</button>
+  <button onclick="show('jobs')">Background jobs</button>
+  <button onclick="show('files')">File map</button>
+</div>
+
+<!-- OVERVIEW -->
+<div id="s-overview" class="section active">
+  <div class="callout">Two orthogonal features. The roommate matcher surfaces user-to-user preference compatibility so students find people to share with. The proper rent system adds a verified rent layer — crowdsourced fair-market rent data for a city/locality so users know if a listing is priced fairly.</div>
+
+  <h3>Roommate matching — what we're building</h3>
+  <p>Currently <code>scoreListingsForUser</code> counts how many listing preferences overlap a student's own preferences — user-vs-listing matching. We now need <strong>user-vs-user</strong> matching: "which other students have preferences close to mine?" This powers a "Find a Roommate" feed separate from the listing search.</p>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="badge badge-green">New</div>
+      <h3 style="margin-top:8px">User-vs-user scoring</h3>
+      <p>Jaccard similarity on <code>user_preferences</code>. Both the preference key and value must match. Score = shared / total union preferences.</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-green">New</div>
+      <h3 style="margin-top:8px">Roommate feed</h3>
+      <p>Paginated list of students sorted by compatibility. Only shows users who have opted in and have a profile set to "looking". Cursor-based, same pattern as listing search.</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-amber">Extend existing</div>
+      <h3 style="margin-top:8px">Listing search enrichment</h3>
+      <p>Existing <code>compatibilityScore</code> stays unchanged. Listing cards can also expose a "co-tenants" field showing compatibility with accepted co-tenants on shared rooms.</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-blue">New</div>
+      <h3 style="margin-top:8px">Proper rent layer</h3>
+      <p>Crowdsourced fair-market rent for city+locality+room_type. Listings get a <code>rentDeviation</code> field: how far the posted rent is from the locality median.</p>
+    </div>
+  </div>
+
+  <h3>Design principles — unchanged from existing codebase</h3>
+  <div class="pill-row">
+    <span class="badge badge-gray">Keyset pagination everywhere</span>
+    <span class="badge badge-gray">Zod validators at the boundary</span>
+    <span class="badge badge-gray">Service layer owns business logic</span>
+    <span class="badge badge-gray">No raw process.env — config/env.js</span>
+    <span class="badge badge-gray">BullMQ for async work</span>
+    <span class="badge badge-gray">Soft-delete, never hard-delete from app code</span>
+    <span class="badge badge-gray">pg pool, transactions via pool.connect()</span>
+  </div>
+</div>
+
+<!-- SCHEMA -->
+<div id="s-schema" class="section">
+  <h3>New tables</h3>
+
+  <h4>005_roommate_matching.sql</h4>
+  <pre>-- Opt-in flag on student profiles (add column, no new table)
+ALTER TABLE student_profiles
+  ADD COLUMN IF NOT EXISTS looking_for_roommate BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS roommate_bio TEXT,            -- "I'm a 2nd-year CSE student..."
+  ADD COLUMN IF NOT EXISTS looking_updated_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_student_roommate_lookup
+  ON student_profiles (user_id)
+  WHERE looking_for_roommate = TRUE AND deleted_at IS NULL;
+
+-- Blocked users (student can hide from feed)
+CREATE TABLE IF NOT EXISTS roommate_blocks (
+  blocker_id UUID NOT NULL REFERENCES users(user_id) ON DELETE RESTRICT,
+  blocked_id UUID NOT NULL REFERENCES users(user_id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (blocker_id, blocked_id)
+);</pre>
+
+  <h4>006_rent_index.sql</h4>
+  <pre>-- Crowdsourced rent observations — one row per listing per snapshot
+CREATE TABLE IF NOT EXISTS rent_observations (
+  observation_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  listing_id     UUID NOT NULL REFERENCES listings(listing_id) ON DELETE CASCADE,
+  city           VARCHAR(100) NOT NULL,
+  locality       VARCHAR(100),
+  room_type      room_type_enum NOT NULL,
+  rent_per_month INTEGER NOT NULL,          -- paise, same as listings
+  observed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- source: 'listing_created' | 'listing_renewed' | 'manual'
+  source         VARCHAR(30) NOT NULL DEFAULT 'listing_created'
+);
+
+CREATE INDEX IF NOT EXISTS idx_rent_obs_lookup
+  ON rent_observations (city, locality, room_type, observed_at DESC)
+  WHERE observed_at > NOW() - INTERVAL '180 days';
+
+-- Materialised summary refreshed by cron (city+locality+room_type median)
+CREATE TABLE IF NOT EXISTS rent_index (
+  rent_index_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  city          VARCHAR(100) NOT NULL,
+  locality      VARCHAR(100),              -- NULL = city-wide fallback
+  room_type     room_type_enum NOT NULL,
+  p25           INTEGER NOT NULL,          -- 25th percentile, paise
+  p50           INTEGER NOT NULL,          -- median
+  p75           INTEGER NOT NULL,          -- 75th percentile
+  sample_count  INTEGER NOT NULL,
+  computed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_rent_index UNIQUE (city, locality, room_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rent_index_lookup
+  ON rent_index (city, locality, room_type);</pre>
+
+  <div class="callout callout-warn">Rent is stored in paise throughout (same as <code>listings.rent_per_month</code>). Division by 100 happens only at the service layer when building the JSON response. Never store rupees in the DB.</div>
+
+  <h3>Existing tables — no structural changes needed</h3>
+  <table>
+    <thead><tr><th>Table</th><th>Used by</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>user_preferences</td><td>Roommate scoring</td><td>Already has (user_id, preference_key, preference_value). The matcher JOINs two copies of this table.</td></tr>
+      <tr><td>student_profiles</td><td>Roommate feed</td><td>Gets two new columns via migration 005.</td></tr>
+      <tr><td>listings</td><td>Rent observations</td><td>Trigger on INSERT + status change populates rent_observations automatically.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- SCORING -->
+<div id="s-scoring" class="section">
+  <h3>User-vs-user similarity</h3>
+  <p>We use Jaccard similarity: <code>|A ∩ B| / |A ∪ B|</code> where A and B are sets of (preference_key, preference_value) pairs. Both key and value must match — having <code>smoking=smoker</code> vs <code>smoking=non_smoker</code> is a mismatch, not a half-match.</p>
+
+  <div class="callout callout-blue">Jaccard is cheap at this scale (7 preference keys max per user). No vector embeddings needed. The SQL self-join runs in milliseconds for a page of 20 candidates.</div>
+
+  <h4>Core query — <code>src/db/utils/roommateCompatibility.js</code></h4>
+  <pre>export const scoreUsersForUser = async (requestingUserId, candidateIds, client = pool) => {
+  if (!candidateIds.length) return {};
+
+  // Count matching (key, value) pairs — the intersection |A ∩ B|
+  const { rows: intersectRows } = await client.query(
+    `SELECT
+       up_b.user_id,
+       COUNT(*)::int AS shared_count
+     FROM user_preferences up_a
+     JOIN user_preferences up_b
+       ON up_b.preference_key   = up_a.preference_key
+      AND up_b.preference_value = up_a.preference_value
+     WHERE up_a.user_id = $1
+       AND up_b.user_id = ANY($2::uuid[])
+       AND up_b.user_id <> $1
+     GROUP BY up_b.user_id`,
+    [requestingUserId, candidateIds]
+  );
+
+  // Count total unique keys per user — the union |A ∪ B|
+  // union = |A| + |B| - |A ∩ B|
+  const { rows: countRows } = await client.query(
+    `SELECT user_id, COUNT(*)::int AS pref_count
+     FROM user_preferences
+     WHERE user_id = ANY($1::uuid[])
+     GROUP BY user_id`,
+    [[requestingUserId, ...candidateIds]]
+  );
+
+  const myCount = countRows.find(r => r.user_id === requestingUserId)?.pref_count ?? 0;
+  const countMap = Object.fromEntries(countRows.map(r => [r.user_id, r.pref_count]));
+  const sharedMap = Object.fromEntries(intersectRows.map(r => [r.user_id, r.shared_count]));
+
+  return candidateIds.reduce((acc, id) => {
+    const shared = sharedMap[id] ?? 0;
+    const theirCount = countMap[id] ?? 0;
+    const union = myCount + theirCount - shared;
+    // Score 0 when both users have no preferences (union = 0)
+    acc[id] = union === 0 ? 0 : Math.round((shared / union) * 100);
+    return acc;
+  }, {});
+};</pre>
+
+  <h3>Compatibility label mapping</h3>
+  <div class="card-grid">
+    <div class="card"><div class="metric-val" style="color:var(--accent)">80–100</div><div class="metric-label">Excellent match</div></div>
+    <div class="card"><div class="metric-val" style="color:var(--warn)">50–79</div><div class="metric-label">Good match</div></div>
+    <div class="card"><div class="metric-val">20–49</div><div class="metric-label">Partial match</div></div>
+    <div class="card"><div class="metric-val" style="color:var(--color-text-secondary)">0–19</div><div class="metric-label">Low compatibility</div></div>
+  </div>
+  <p>Label computed in the service layer. Score is an integer 0–100. <code>compatibilityAvailable</code> is <code>false</code> when either user has zero preferences set — same pattern as existing listing compatibility field.</p>
+
+  <h3>Rent deviation score</h3>
+  <pre>// In listing.service.js — enrichListing() helper
+const rentDeviationPct = (rentPaise, p50Paise) => {
+  if (!p50Paise) return null;
+  return Math.round(((rentPaise - p50Paise) / p50Paise) * 100);
+};
+// Result: -15 means 15% below median. +30 means 30% above.
+// null means no rent index data for this city/locality/room_type yet.</pre>
+
+  <p>The front-end can render this as "15% below typical rent for singles in Koramangala" without exposing raw paise values from the index.</p>
+</div>
+
+<!-- API -->
+<div id="s-api" class="section">
+  <h3>New endpoints</h3>
+
+  <table>
+    <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/api/v1/students/roommates</code></td><td>student</td><td>Paginated feed of students looking for roommates, sorted by compatibility with caller.</td></tr>
+      <tr><td>PUT</td><td><code>/api/v1/students/:userId/roommate-profile</code></td><td>student (own)</td><td>Toggle <code>looking_for_roommate</code> and update <code>roommate_bio</code>.</td></tr>
+      <tr><td>POST</td><td><code>/api/v1/students/:userId/block</code></td><td>student (own)</td><td>Block a user from appearing in caller's roommate feed.</td></tr>
+      <tr><td>DELETE</td><td><code>/api/v1/students/:userId/block</code></td><td>student (own)</td><td>Unblock.</td></tr>
+      <tr><td>GET</td><td><code>/api/v1/rent-index</code></td><td>optional</td><td>Query rent index for a city+locality+room_type. Returns p25/p50/p75.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Existing endpoints — enriched responses only</h3>
+  <table>
+    <thead><tr><th>Endpoint</th><th>New field(s)</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET /listings/:listingId</code></td><td><code>rentDeviation</code>, <code>rentIndex</code> (p25/p50/p75 for context)</td></tr>
+      <tr><td><code>GET /listings</code> (search)</td><td><code>rentDeviation</code> on each item (JOIN rent_index, single extra column)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>GET /api/v1/students/roommates — full spec</h3>
+  <div class="card">
+    <h4>Query params</h4>
+    <table>
+      <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>city</td><td>string</td><td>—</td><td>Filter to students whose last-active listing city matches. Optional.</td></tr>
+        <tr><td>cursorTime</td><td>ISO datetime</td><td>—</td><td>Pair with cursorId for pagination.</td></tr>
+        <tr><td>cursorId</td><td>UUID</td><td>—</td><td></td></tr>
+        <tr><td>limit</td><td>int 1–50</td><td>20</td><td>Max 50 for roommate feed (tighter than listing search).</td></tr>
+      </tbody>
+    </table>
+    <h4>Response item shape</h4>
+    <pre>{
+  "userId": "uuid",
+  "fullName": "Arjun Mehta",
+  "profilePhotoUrl": "https://...",
+  "bio": "2nd year CSE at BITS Pilani, Goa...",
+  "roomateBio": "Looking to split a 2BHK near campus...",
+  "course": "B.Tech CSE",
+  "yearOfStudy": 2,
+  "institution": { "name": "BITS Pilani Goa", "city": "Goa" },
+  "averageRating": 4.7,
+  "compatibilityScore": 83,         // Jaccard × 100, integer
+  "compatibilityAvailable": true,   // false if either party has no preferences
+  "preferences": [                  // their preferences (full list so UI can highlight matches)
+    { "preferenceKey": "smoking",   "preferenceValue": "non_smoker" },
+    { "preferenceKey": "food_habit","preferenceValue": "vegetarian" }
+  ]
+}</pre>
+  </div>
+
+  <h3>PUT /api/v1/students/:userId/roommate-profile — full spec</h3>
+  <div class="card">
+    <pre>// Zod body schema — src/validators/student.validators.js (add export)
+export const updateRoommateProfileSchema = z.object({
+  params: z.object({ userId: z.uuid() }),
+  body: z.object({
+    lookingForRoommate: z.boolean(),
+    roommateBio: z.string().max(500).optional(),
+  }),
+});</pre>
+    <p>Service checks <code>requestingUserId === targetUserId</code> (same pattern as <code>updateStudentProfile</code>). Updates <code>looking_for_roommate</code>, <code>roommate_bio</code>, and <code>looking_updated_at = NOW()</code>.</p>
+  </div>
+</div>
+
+<!-- RENT -->
+<div id="s-rent" class="section">
+  <h3>Proper rent system — how data flows</h3>
+
+  <div class="step"><div class="step-num">1</div><div class="step-body"><strong>Observation capture (DB trigger).</strong> When a listing is created or renewed (status → active), a trigger inserts a row into <code>rent_observations</code>. This is zero-latency and happens inside the same transaction — no async risk. Source = <code>'listing_created'</code> or <code>'listing_renewed'</code>.</div></div>
+  <div class="step"><div class="step-num">2</div><div class="step-body"><strong>Index refresh (cron, nightly at 03:00).</strong> A new cron job reads observations from the last 180 days, computes <code>percentile_cont(0.25/0.5/0.75)</code> in PostgreSQL, and upserts into <code>rent_index</code>. Uses advisory lock (same pattern as <code>expiryWarning.js</code>).</div></div>
+  <div class="step"><div class="step-num">3</div><div class="step-body"><strong>Listing response enrichment.</strong> <code>getListing</code> and <code>searchListings</code> LEFT JOIN <code>rent_index</code> on <code>(city, LOWER(locality), room_type)</code>. Falls back to city-wide (NULL locality) if no locality data exists. Deviation computed at service layer.</div></div>
+  <div class="step"><div class="step-num">4</div><div class="step-body"><strong>Public query endpoint.</strong> <code>GET /api/v1/rent-index?city=Pune&locality=Kothrud&roomType=single</code> returns the raw percentiles for the front-end to display a distribution bar.</div></div>
+
+  <hr class="rule">
+
+  <h4>DB trigger — migration 006 (append to the file)</h4>
+  <pre>CREATE OR REPLACE FUNCTION capture_rent_observation()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Fire on INSERT (new listing) or UPDATE where status flips to active
+  IF (TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND NEW.status = 'active' AND OLD.status <> 'active'))
+     AND NEW.deleted_at IS NULL
+  THEN
+    INSERT INTO rent_observations
+      (listing_id, city, locality, room_type, rent_per_month, source)
+    VALUES (
+      NEW.listing_id,
+      NEW.city,
+      LOWER(TRIM(COALESCE(NEW.locality, ''))),  -- normalise
+      NEW.room_type,
+      NEW.rent_per_month,
+      CASE WHEN TG_OP = 'INSERT' THEN 'listing_created' ELSE 'listing_renewed' END
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trg_capture_rent_observation
+  AFTER INSERT OR UPDATE OF status ON listings
+  FOR EACH ROW EXECUTE FUNCTION capture_rent_observation();</pre>
+
+  <h4>Cron job — <code>src/cron/rentIndexRefresh.js</code> (new file)</h4>
+  <pre>const SCHEDULE = process.env.CRON_RENT_INDEX ?? '0 3 * * *';
+const ADVISORY_LOCK_KEY = 7002;
+const WINDOW_DAYS = 180;
+
+const runRentIndexRefresh = async () => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [{ acquired }] } = await client.query(
+      'SELECT pg_try_advisory_xact_lock($1) AS acquired', [ADVISORY_LOCK_KEY]
+    );
+    if (!acquired) { await client.query('ROLLBACK'); return; }
+
+    // Upsert locality-level rows
+    await client.query(`
+      INSERT INTO rent_index (city, locality, room_type, p25, p50, p75, sample_count)
+      SELECT
+        city,
+        locality,
+        room_type,
+        ROUND(percentile_cont(0.25) WITHIN GROUP (ORDER BY rent_per_month))::int,
+        ROUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY rent_per_month))::int,
+        ROUND(percentile_cont(0.75) WITHIN GROUP (ORDER BY rent_per_month))::int,
+        COUNT(*)::int
+      FROM rent_observations
+      WHERE observed_at > NOW() - ($1::int * INTERVAL '1 day')
+        AND locality IS NOT NULL AND locality <> ''
+      GROUP BY city, locality, room_type
+      HAVING COUNT(*) >= 3          -- need at least 3 data points
+      ON CONFLICT (city, locality, room_type)
+      DO UPDATE SET
+        p25 = EXCLUDED.p25, p50 = EXCLUDED.p50,
+        p75 = EXCLUDED.p75, sample_count = EXCLUDED.sample_count,
+        computed_at = NOW()
+    `, [WINDOW_DAYS]);
+
+    // Upsert city-wide fallback rows (locality = NULL)
+    await client.query(`
+      INSERT INTO rent_index (city, locality, room_type, p25, p50, p75, sample_count)
+      SELECT city, NULL, room_type,
+        ROUND(percentile_cont(0.25) WITHIN GROUP (ORDER BY rent_per_month))::int,
+        ROUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY rent_per_month))::int,
+        ROUND(percentile_cont(0.75) WITHIN GROUP (ORDER BY rent_per_month))::int,
+        COUNT(*)::int
+      FROM rent_observations
+      WHERE observed_at > NOW() - ($1::int * INTERVAL '1 day')
+      GROUP BY city, room_type
+      HAVING COUNT(*) >= 5
+      ON CONFLICT (city, NULL, room_type)
+      DO UPDATE SET
+        p25 = EXCLUDED.p25, p50 = EXCLUDED.p50,
+        p75 = EXCLUDED.p75, sample_count = EXCLUDED.sample_count,
+        computed_at = NOW()
+    `, [WINDOW_DAYS]);
+
+    await client.query('COMMIT');
+  } finally { client.release(); }
+};</pre>
+
+  <div class="callout callout-warn">The <code>HAVING COUNT(*) >= 3</code> guard prevents the index from reporting misleading medians when a locality has only 1–2 listings. Below the threshold the city-wide fallback is used instead, and <code>rentDeviation</code> will be null if neither has data.</div>
+</div>
+
+<!-- JOBS -->
+<div id="s-jobs" class="section">
+  <h3>Background job changes</h3>
+
+  <h4>New cron jobs</h4>
+  <table>
+    <thead><tr><th>Job</th><th>Schedule</th><th>Advisory lock</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>rentIndexRefresh</code></td><td>03:00 daily</td><td>7002</td><td>Recomputes p25/p50/p75 in rent_index from last 180 days of observations.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Existing jobs — no change required</h4>
+  <table>
+    <thead><tr><th>Job</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>listingExpiry</code></td><td>Already handles status transitions — the rent observation trigger fires on those too.</td></tr>
+      <tr><td><code>hardDeleteCleanup</code></td><td>Add <code>rent_observations</code> to the cleanup batch: delete rows where <code>listing_id</code> has <code>deleted_at &lt; cutoff</code> AND observation is older than retention window.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>BullMQ — no new queues needed</h4>
+  <p>The roommate feed query is fast enough (keyset-paginated, indexed) to run synchronously per request. The rent index refresh is infrequent enough for a cron. Neither needs a BullMQ worker.</p>
+
+  <hr class="rule">
+  <h3>server.js additions</h3>
+  <pre>import { registerRentIndexRefreshCron } from './cron/rentIndexRefresh.js';
+
+// Inside start():
+const cronTasks = [
+  registerListingExpiryCron(),
+  registerExpiryWarningCron(),
+  registerHardDeleteCleanupCron(),
+  registerRentIndexRefreshCron(),   // ← add
+];</pre>
+</div>
+
+<!-- FILE MAP -->
+<div id="s-files" class="section">
+  <h3>New files</h3>
+  <table>
+    <thead><tr><th>Path</th><th>What goes in it</th></tr></thead>
+    <tbody>
+      <tr><td><code>migrations/005_roommate_matching.sql</code></td><td>ALTER student_profiles (2 columns), CREATE roommate_blocks</td></tr>
+      <tr><td><code>migrations/006_rent_index.sql</code></td><td>CREATE rent_observations, rent_index, trigger</td></tr>
+      <tr><td><code>src/db/utils/roommateCompatibility.js</code></td><td><code>scoreUsersForUser(requestingUserId, candidateIds)</code> — Jaccard query</td></tr>
+      <tr><td><code>src/services/roommate.service.js</code></td><td><code>getRoommateFeed</code>, <code>updateRoommateProfile</code>, <code>blockUser</code>, <code>unblockUser</code></td></tr>
+      <tr><td><code>src/services/rentIndex.service.js</code></td><td><code>getRentIndex(city, locality, roomType)</code></td></tr>
+      <tr><td><code>src/controllers/roommate.controller.js</code></td><td>Thin controllers delegating to roommate.service</td></tr>
+      <tr><td><code>src/controllers/rentIndex.controller.js</code></td><td>Single handler for GET /rent-index</td></tr>
+      <tr><td><code>src/validators/roommate.validators.js</code></td><td>getRoommateFeedSchema, updateRoommateProfileSchema, blockParamsSchema</td></tr>
+      <tr><td><code>src/routes/roommate.js</code></td><td>GET /students/roommates, PUT /:userId/roommate-profile, POST/DELETE /:userId/block</td></tr>
+      <tr><td><code>src/routes/rentIndex.js</code></td><td>GET /rent-index</td></tr>
+      <tr><td><code>src/cron/rentIndexRefresh.js</code></td><td>Nightly rent index recomputation</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Modified files</h3>
+  <table>
+    <thead><tr><th>Path</th><th>Change</th></tr></thead>
+    <tbody>
+      <tr><td><code>src/routes/index.js</code></td><td>Mount <code>roommateRouter</code> on <code>/students</code> (or as sub-router), <code>rentIndexRouter</code> on <code>/rent-index</code></td></tr>
+      <tr><td><code>src/routes/student.js</code></td><td>Add GET /roommates, PUT /:userId/roommate-profile, POST/DELETE /:userId/block — or delegate to roommate.js sub-router</td></tr>
+      <tr><td><code>src/services/listing.service.js</code></td><td><code>getListing</code>: add LEFT JOIN rent_index + compute rentDeviation. <code>searchListings</code>: add rentDeviation column to SELECT.</td></tr>
+      <tr><td><code>src/validators/student.validators.js</code></td><td>Add <code>updateRoommateProfileSchema</code> export</td></tr>
+      <tr><td><code>src/server.js</code></td><td>Register <code>registerRentIndexRefreshCron</code></td></tr>
+      <tr><td><code>src/cron/hardDeleteCleanup.js</code></td><td>Add DELETE from rent_observations for aged listing cascades</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">Mount order matters. In <code>student.js</code>, the new <code>GET /roommates</code> route must be registered <strong>before</strong> <code>GET /:userId/profile</code> — otherwise Express matches "roommates" as a userId param.</div>
+</div>
+
+<script>
+function show(id) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('s-' + id).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>

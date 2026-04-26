@@ -30,6 +30,22 @@ const toRupees = (listing) => {
 	};
 };
 
+const rentDeviationPct = (rentPaise, p50Paise) => {
+	if (p50Paise == null || p50Paise === 0) return null;
+	return Math.round(((rentPaise - p50Paise) / p50Paise) * 100);
+};
+// Helper that converts paise rent-index fields to rupees for the JSON response.
+const formatRentIndex = (row) => {
+	if (row.ri_p50 == null) return null;
+	return {
+		p25: Math.round(row.ri_p25 / 100),
+		p50: Math.round(row.ri_p50 / 100),
+		p75: Math.round(row.ri_p75 / 100),
+		sampleCount: row.ri_sample_count,
+		resolution: row.ri_resolution, // 'locality' | 'city' | null
+	};
+};
+
 const bulkInsertListingAmenities = async (client, listingId, amenityIds) => {
 	if (!amenityIds.length) return;
 	const placeholders = amenityIds.map((_, i) => `($1, $${i + 2})`).join(", ");
@@ -300,13 +316,47 @@ export const getListing = async (listingId) => {
 	const listing = await fetchListingDetail(listingId);
 	if (!listing) throw new AppError("Listing not found", 404);
 
+	// Increment view count fire-and-forget — unchanged.
 	void pool
 		.query(`UPDATE listings SET views_count = views_count + 1 WHERE listing_id = $1`, [listingId])
 		.catch((err) => {
 			logger.warn({ err, listingId }, "Failed to increment listing view count");
 		});
 
-	return toRupees(listing);
+	// Fetch rent index for this listing's city / locality / room_type.
+	// Two LEFT JOINs: locality-specific first, city-wide fallback second.
+	const { rows: riRows } = await pool.query(
+		`SELECT
+       COALESCE(ri_loc.p25,          ri_city.p25)         AS ri_p25,
+       COALESCE(ri_loc.p50,          ri_city.p50)         AS ri_p50,
+       COALESCE(ri_loc.p75,          ri_city.p75)         AS ri_p75,
+       COALESCE(ri_loc.sample_count, ri_city.sample_count) AS ri_sample_count,
+       CASE
+         WHEN ri_loc.rent_index_id IS NOT NULL THEN 'locality'
+         WHEN ri_city.rent_index_id IS NOT NULL THEN 'city'
+         ELSE NULL
+       END AS ri_resolution
+     FROM listings l
+     LEFT JOIN rent_index ri_loc
+       ON ri_loc.city      = l.city
+      AND ri_loc.locality  = NULLIF(LOWER(TRIM(COALESCE(l.locality, ''))), '')
+      AND ri_loc.room_type = l.room_type
+     LEFT JOIN rent_index ri_city
+       ON ri_city.city      = l.city
+      AND ri_city.locality  IS NULL
+      AND ri_city.room_type = l.room_type
+     WHERE l.listing_id = $1`,
+		[listingId],
+	);
+
+	const ri = riRows[0] ?? {};
+	const converted = toRupees(listing);
+
+	return {
+		...converted,
+		rentDeviation: rentDeviationPct(listing.rent_per_month, ri.ri_p50),
+		rentIndex: formatRentIndex(ri),
+	};
 };
 
 export const searchListings = async (userId, filters) => {
@@ -420,6 +470,7 @@ export const searchListings = async (userId, filters) => {
 	params.push(limit + 1);
 	const limitParam = p;
 
+	// ── CHANGED: added rent_index LEFT JOINs and ri_p50 / ri_resolution columns ──
 	const { rows } = await pool.query(
 		`SELECT
       l.listing_id,
@@ -446,15 +497,31 @@ export const searchListings = async (userId, filters) => {
           AND ph.deleted_at IS NULL
           AND ph.photo_url NOT LIKE 'processing:%'
         LIMIT 1
-      ) AS cover_photo_url
+      ) AS cover_photo_url,
+      -- Rent index (locality-level preferred, city-wide fallback)
+      COALESCE(ri_loc.p50,  ri_city.p50)  AS ri_p50,
+      CASE
+        WHEN ri_loc.rent_index_id  IS NOT NULL THEN 'locality'
+        WHEN ri_city.rent_index_id IS NOT NULL THEN 'city'
+        ELSE NULL
+      END AS ri_resolution
     FROM listings l
     JOIN users u ON u.user_id = l.posted_by
     LEFT JOIN properties p ON p.property_id = l.property_id AND p.deleted_at IS NULL
+    LEFT JOIN rent_index ri_loc
+      ON ri_loc.city      = l.city
+     AND ri_loc.locality  = NULLIF(LOWER(TRIM(COALESCE(l.locality, ''))), '')
+     AND ri_loc.room_type = l.room_type
+    LEFT JOIN rent_index ri_city
+      ON ri_city.city      = l.city
+     AND ri_city.locality  IS NULL
+     AND ri_city.room_type = l.room_type
     WHERE ${clauses.join(" AND ")}
     ORDER BY l.created_at DESC, l.listing_id ASC
     LIMIT $${limitParam}`,
 		params,
 	);
+	// ── END CHANGED section ───────────────────────────────────────────────────
 
 	const hasNextPage = rows.length > limit;
 	const items = hasNextPage ? rows.slice(0, limit) : rows;
@@ -490,6 +557,7 @@ export const searchListings = async (userId, filters) => {
 		}
 	}
 
+	// ── CHANGED: added rentDeviation to each enriched item ───────────────────
 	const enrichedItems = items.map((row) => ({
 		...row,
 		rentPerMonth: row.rent_per_month / 100,
@@ -499,7 +567,12 @@ export const searchListings = async (userId, filters) => {
 		compatibilityScore: userId !== null ? (scoreMap[row.listing_id] ?? 0) : 0,
 		compatibilityAvailable:
 			userId !== null && userHasPreferences && (listingPreferenceCounts.get(row.listing_id) ?? 0) > 0,
+		// New: rent deviation as a percentage relative to local median
+		rentDeviation: rentDeviationPct(row.rent_per_month, row.ri_p50),
+		ri_p50: undefined,
+		ri_resolution: undefined,
 	}));
+	// ── END CHANGED section ───────────────────────────────────────────────────
 
 	if (sortBy === "compatibility") {
 		enrichedItems.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
