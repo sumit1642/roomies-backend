@@ -1,23 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
@@ -26,7 +6,6 @@ import { scoreListingsForUser } from "../db/utils/compatibility.js";
 import { expirePendingRequestsForListing } from "./interest.service.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 import { dedupePreferencesByKey } from "../config/preferences.js";
-
 
 const PROPERTY_OWNED_LOCATION_FIELDS = new Set([
 	"addressLine",
@@ -134,7 +113,7 @@ const fetchListingDetail = async (listingId, client = pool) => {
         '[]'
       ) AS preferences,
 
-      (
+(
         SELECT COALESCE(
           JSON_AGG(
             JSONB_BUILD_OBJECT(
@@ -149,6 +128,7 @@ const fetchListingDetail = async (listingId, client = pool) => {
         FROM listing_photos ph
         WHERE ph.listing_id = l.listing_id
           AND ph.deleted_at IS NULL
+          AND ph.photo_url NOT LIKE 'processing:%'
       ) AS photos,
 
       CASE WHEN p.property_id IS NOT NULL THEN
@@ -314,7 +294,6 @@ export const createListing = async (posterId, posterRoles, body) => {
 	}
 };
 
-
 export const getListing = async (listingId) => {
 	const listing = await fetchListingDetail(listingId);
 	if (!listing) throw new AppError("Listing not found", 404);
@@ -327,7 +306,6 @@ export const getListing = async (listingId) => {
 
 	return toRupees(listing);
 };
-
 
 export const searchListings = async (userId, filters) => {
 	const {
@@ -457,12 +435,13 @@ export const searchListings = async (userId, filters) => {
       l.created_at,
       COALESCE(p.property_name, NULL) AS property_name,
       COALESCE(p.average_rating, u.average_rating) AS average_rating,
-      (
+	  (
         SELECT ph.photo_url
         FROM listing_photos ph
         WHERE ph.listing_id = l.listing_id
           AND ph.is_cover   = TRUE
           AND ph.deleted_at IS NULL
+          AND ph.photo_url NOT LIKE 'processing:%'
         LIMIT 1
       ) AS cover_photo_url
     FROM listings l
@@ -551,7 +530,6 @@ export const updateListing = async (posterId, listingId, body) => {
 		longitude: "longitude",
 	};
 
-	
 	const enumCasts = {
 		room_type: "::room_type_enum",
 		bed_type: "::bed_type_enum",
@@ -694,8 +672,6 @@ const ALLOWED_STATUS_TRANSITIONS = {
 	deactivated: ["active"],
 };
 
-
-
 export const updateListingStatus = async (posterId, listingId, newStatus) => {
 	const { rows: listingRows } = await pool.query(
 		`SELECT status, expires_at, (expires_at <= NOW()) AS is_expired
@@ -728,8 +704,6 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 	try {
 		await client.query("BEGIN");
 
-		
-		
 		const { rows: updatedRows } = await client.query(
 			`UPDATE listings l
        SET status     = $1::listing_status_enum,
@@ -928,6 +902,7 @@ export const getSavedListings = async (userId, { cursorTime, cursorId, limit = 2
         WHERE ph.listing_id = l.listing_id
           AND ph.is_cover   = TRUE
           AND ph.deleted_at IS NULL
+          AND ph.photo_url NOT LIKE 'processing:%'
         LIMIT 1
       ) AS cover_photo_url
     FROM saved_listings sl

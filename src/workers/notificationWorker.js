@@ -1,59 +1,9 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import { Worker } from "bullmq";
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { bullConnection } from "./bullConnection.js";
 
 export const NOTIFICATION_QUEUE_NAME = "notification-delivery";
-
-
-
-
-
-
-
-
-
 
 const NOTIFICATION_MESSAGES = {
 	interest_request_received: "Someone expressed interest in your listing",
@@ -74,10 +24,10 @@ const NOTIFICATION_MESSAGES = {
 
 	verification_rejected: "Your verification request was rejected",
 
-	
+	verification_pending: "Your verification documents have been received and are under review",
+
 	new_message: "You have a new message",
 
-	
 	connection_requested: "You have a new connection request",
 };
 
@@ -95,11 +45,6 @@ export const startNotificationWorker = () => {
 			const message = NOTIFICATION_MESSAGES[type] ?? null;
 
 			if (!message) {
-				
-				
-				
-				
-				
 				logger.warn(
 					{ type, jobId: job.id },
 					"Notification worker: no message template for this type — inserting with NULL message. " +
@@ -107,8 +52,6 @@ export const startNotificationWorker = () => {
 				);
 			}
 
-			
-			
 			const res = await pool.query(
 				`INSERT INTO notifications
            (recipient_id, notification_type, entity_type, entity_id, message, idempotency_key)
@@ -120,9 +63,6 @@ export const startNotificationWorker = () => {
 			if (res.rowCount === 1) {
 				logger.debug({ recipientId, type, entityId }, "Notification worker: notification inserted");
 			} else {
-				
-				
-				
 				logger.debug(
 					{ recipientId, type, entityId, jobId: job.id },
 					"Notification worker: notification skipped (idempotent replay)",

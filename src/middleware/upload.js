@@ -5,8 +5,6 @@ import fs from "fs/promises";
 import { AppError } from "./errorHandler.js";
 import { MAX_UPLOAD_SIZE_BYTES } from "../config/constants.js";
 
-
-
 const MIME_TO_EXTENSIONS = {
 	"image/jpeg": [".jpg", ".jpeg"],
 	"image/png": [".png"],
@@ -16,13 +14,10 @@ const MIME_TO_EXTENSIONS = {
 const ALLOWED_MIME_TYPES = new Set(Object.keys(MIME_TO_EXTENSIONS));
 
 const storage = multer.diskStorage({
-	destination: async (_req, _file, cb) => {
-		try {
-			await fs.mkdir("uploads/staging", { recursive: true });
-			cb(null, "uploads/staging");
-		} catch (err) {
-			cb(err);
-		}
+	destination: (_req, _file, cb) => {
+		fs.mkdir("uploads/staging", { recursive: true })
+			.then(() => cb(null, "uploads/staging"))
+			.catch((err) => cb(err));
 	},
 	filename: (_req, file, cb) => {
 		const ext = path.extname(file.originalname).toLowerCase() || ".jpg";
@@ -36,9 +31,6 @@ const fileFilter = (_req, file, cb) => {
 		return cb(new AppError(`Unsupported file type: ${file.mimetype}. Accepted types: JPEG, PNG, WebP`, 400));
 	}
 
-	
-	
-	
 	const ext = path.extname(file.originalname).toLowerCase();
 	const allowedExts = MIME_TO_EXTENSIONS[file.mimetype];
 	if (!allowedExts.includes(ext)) {

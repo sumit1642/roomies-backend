@@ -1,18 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import path from "path";
 import crypto from "crypto";
 import { pool } from "../db/client.js";
@@ -23,46 +8,7 @@ import { MEDIA_QUEUE_NAME } from "../workers/mediaProcessor.js";
 import { getQueue } from "../workers/queue.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
+export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displayOrder) => {
 	const client = await pool.connect();
 	let photoId = null;
 	let transactionOpen = false;
@@ -70,10 +16,6 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 		await client.query("BEGIN");
 		transactionOpen = true;
 
-		
-		
-		
-		
 		const { rows: listingRows } = await client.query(
 			`SELECT listing_id
        FROM listings
@@ -88,24 +30,17 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 			throw new AppError("Listing not found", 404);
 		}
 
-		
-		
-		
-		
-		
-		
-		const { rows: orderRows } = await client.query(
-			`SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order
+		let order = displayOrder;
+		if (order === undefined || order === null) {
+			const { rows: orderRows } = await client.query(
+				`SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order
          FROM listing_photos
          WHERE listing_id = $1
            AND deleted_at IS NULL`,
-			[listingId],
-		);
-		const order = orderRows[0].next_order;
-
-		
-		
-		
+				[listingId],
+			);
+			order = orderRows[0].next_order;
+		}
 		photoId = crypto.randomUUID();
 		const placeholderUrl = `processing:${photoId}`;
 
@@ -119,12 +54,6 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 		await client.query("COMMIT");
 		transactionOpen = false;
 
-		
-		
-		
-		
-		
-		
 		const queue = getQueue(MEDIA_QUEUE_NAME);
 		try {
 			await queue.add(
@@ -153,6 +82,16 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 				"Photo queue enqueue failed; provisional row soft-deleted",
 			);
 
+			try {
+				await import("fs/promises").then((fs) => fs.unlink(stagingPath));
+				
+			} catch (unlinkErr) {
+				logger.warn(
+					{ unlinkErr, stagingPath },
+					"enqueuePhotoUpload: failed to clean staging file after queue failure",
+				);
+			}
+
 			throw new AppError("Photo processing queue is temporarily unavailable. Please retry.", 503);
 		}
 
@@ -160,9 +99,6 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 
 		return { photoId, status: "processing" };
 	} catch (err) {
-		
-		
-		
 		if (transactionOpen) {
 			try {
 				await client.query("ROLLBACK");
@@ -176,20 +112,11 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath) => {
 	}
 };
 
-
-
-
-
-
-
-
-
-
 export const getListingPhotos = async (listingId, options = {}) => {
-	const { skipValidation = false } = options;
+	const { skipValidation = false, ownerId } = options;
 
 	const { rows: listingRows } = await pool.query(
-		`SELECT status, expires_at, (expires_at <= NOW()) AS is_expired
+		`SELECT posted_by, status, expires_at, (expires_at <= NOW()) AS is_expired
      FROM listings
      WHERE listing_id = $1
        AND deleted_at IS NULL`,
@@ -200,11 +127,13 @@ export const getListingPhotos = async (listingId, options = {}) => {
 		throw new AppError("Listing not found", 404);
 	}
 
-	if (!skipValidation && listingRows[0].is_expired) {
+	const isOwner = ownerId && listingRows[0].posted_by === ownerId;
+
+	if (!skipValidation && !isOwner && listingRows[0].is_expired) {
 		throw new AppError(EXPIRED_LISTING_MESSAGE, 422);
 	}
 
-	if (!skipValidation && listingRows[0].status !== "active") {
+	if (!skipValidation && !isOwner && listingRows[0].status !== "active") {
 		throw new AppError(UNAVAILABLE_LISTING_MESSAGE, 422);
 	}
 
@@ -225,46 +154,33 @@ export const getListingPhotos = async (listingId, options = {}) => {
 	return rows;
 };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 export const deletePhoto = async (posterId, listingId, photoId) => {
-	
-	
-	const { rows } = await pool.query(
-		`SELECT lp.photo_url, lp.is_cover
-     FROM listing_photos lp
-     JOIN listings l ON l.listing_id = lp.listing_id
-     WHERE lp.photo_id   = $1
-       AND lp.listing_id = $2
-       AND l.posted_by   = $3
-       AND lp.deleted_at IS NULL`,
-		[photoId, listingId, posterId],
-	);
-
-	if (!rows.length) throw new AppError("Photo not found", 404);
-	const { photo_url: photoUrl, is_cover: wasCover } = rows[0];
-
 	const client = await pool.connect();
+	let photoUrl, wasCover;
 	try {
 		await client.query("BEGIN");
 
-		
+		const { rows } = await client.query(
+			`SELECT lp.photo_url, lp.is_cover
+       FROM listing_photos lp
+       JOIN listings l ON l.listing_id = lp.listing_id
+       WHERE lp.photo_id   = $1
+         AND lp.listing_id = $2
+         AND l.posted_by   = $3
+         AND lp.deleted_at IS NULL
+       FOR UPDATE OF lp`,
+			[photoId, listingId, posterId],
+		);
+
+		if (!rows.length) {
+			await client.query("ROLLBACK");
+			throw new AppError("Photo not found", 404);
+		}
+
+		({ photo_url: photoUrl, is_cover: wasCover } = rows[0]);
+
 		await client.query(`UPDATE listing_photos SET deleted_at = NOW() WHERE photo_id = $1`, [photoId]);
 
-		
-		
 		if (wasCover) {
 			await client.query(
 				`UPDATE listing_photos
@@ -274,9 +190,9 @@ export const deletePhoto = async (posterId, listingId, photoId) => {
            WHERE listing_id = $1
              AND deleted_at IS NULL
              AND photo_url  NOT LIKE 'processing:%'
-	           ORDER BY display_order ASC, photo_id ASC
-	           LIMIT 1
-	         )`,
+             ORDER BY display_order ASC, photo_id ASC
+             LIMIT 1
+         )`,
 				[listingId],
 			);
 		}
@@ -289,10 +205,6 @@ export const deletePhoto = async (posterId, listingId, photoId) => {
 		client.release();
 	}
 
-	
-	
-	
-	
 	if (!photoUrl.startsWith("processing:")) {
 		try {
 			await storageService.delete(photoUrl);
@@ -308,21 +220,11 @@ export const deletePhoto = async (posterId, listingId, photoId) => {
 	return { photoId, deleted: true };
 };
 
-
-
-
-
-
-
-
-
-
 export const setCoverPhoto = async (posterId, listingId, photoId) => {
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
 
-		
 		const { rows } = await client.query(
 			`SELECT lp.is_cover
        FROM listing_photos lp
@@ -344,15 +246,14 @@ export const setCoverPhoto = async (posterId, listingId, photoId) => {
 			return { photoId, isCover: true };
 		}
 
-		
 		await client.query(
 			`UPDATE listing_photos
        SET is_cover = FALSE
-       WHERE listing_id = $1 AND is_cover = TRUE AND deleted_at IS NULL`,
-			[listingId],
+       WHERE listing_id = $1 AND is_cover = TRUE AND deleted_at IS NULL
+         AND photo_id != $2`,
+			[listingId, photoId],
 		);
 
-		
 		const { rowCount } = await client.query(
 			`UPDATE listing_photos
        SET is_cover = TRUE
@@ -377,15 +278,7 @@ export const setCoverPhoto = async (posterId, listingId, photoId) => {
 	}
 };
 
-
-
-
-
-
-
-
 export const reorderPhotos = async (posterId, listingId, photos) => {
-	
 	const { rows: ownerCheck } = await pool.query(
 		`SELECT 1 FROM listings
      WHERE listing_id = $1 AND posted_by = $2 AND deleted_at IS NULL`,
@@ -434,6 +327,7 @@ export const reorderPhotos = async (posterId, listingId, photos) => {
        FROM listing_photos
        WHERE listing_id = $1
          AND deleted_at IS NULL
+         AND photo_url NOT LIKE 'processing:%'
          AND photo_id = ANY($2::uuid[])`,
 			[listingId, uniqueSubmittedPhotoIds],
 		);
@@ -444,13 +338,12 @@ export const reorderPhotos = async (posterId, listingId, photos) => {
 			throw new AppError(`Invalid photo IDs for this listing: ${invalidPhotoIds.join(", ")}`, 422);
 		}
 
-		
-		
 		const { rows: countRows } = await client.query(
 			`SELECT COUNT(*)::int AS total_count
        FROM listing_photos
        WHERE listing_id = $1
-         AND deleted_at IS NULL`,
+         AND deleted_at IS NULL
+         AND photo_url NOT LIKE 'processing:%'`,
 			[listingId],
 		);
 		const currentPhotoCount = countRows[0].total_count;
@@ -462,8 +355,6 @@ export const reorderPhotos = async (posterId, listingId, photos) => {
 		}
 
 		for (const { photoId, displayOrder } of photos) {
-			
-			
 			await client.query(
 				`UPDATE listing_photos
          SET display_order = $1

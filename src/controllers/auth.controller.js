@@ -1,21 +1,8 @@
-
-
 import * as authService from "../services/auth.service.js";
 import { parseTtlSeconds } from "../services/auth.service.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { config } from "../config/env.js";
 import { ACCESS_COOKIE_OPTIONS, REFRESH_COOKIE_OPTIONS } from "../middleware/authenticate.js";
-
-
-
-
-const isBearerTransport = (req) => req.headers["x-client-transport"] === "bearer";
-
-
-const buildSafeBody = (tokens) => ({
-	user: tokens.user,
-	sid: tokens.sid,
-});
 
 const setAuthCookies = (res, accessToken, refreshToken) => {
 	res.cookie("accessToken", accessToken, ACCESS_COOKIE_OPTIONS);
@@ -23,7 +10,6 @@ const setAuthCookies = (res, accessToken, refreshToken) => {
 };
 
 const clearAuthCookies = (res) => {
-	
 	res.clearCookie("accessToken", {
 		httpOnly: true,
 		secure: ACCESS_COOKIE_OPTIONS.secure,
@@ -36,16 +22,11 @@ const clearAuthCookies = (res) => {
 	});
 };
 
-
-
 export const register = async (req, res, next) => {
 	try {
 		const tokens = await authService.register(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-		
-		
-		
 		res.status(201).json({ status: "success", data: tokens });
 	} catch (err) {
 		next(err);
@@ -57,7 +38,6 @@ export const login = async (req, res, next) => {
 		const tokens = await authService.login(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-		
 		res.json({ status: "success", data: tokens });
 	} catch (err) {
 		next(err);
@@ -104,7 +84,6 @@ export const refresh = async (req, res, next) => {
 
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
 
-		
 		res.json({ status: "success", data: tokens });
 	} catch (err) {
 		next(err);

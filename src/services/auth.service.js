@@ -1,5 +1,3 @@
-
-
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
@@ -55,8 +53,6 @@ const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
 const legacyRefreshKey = (userId) => `refreshToken:${userId}`;
 const userSessionsKey = (userId) => `userSessions:${userId}`;
 
-export const parseTtlSeconds_EXPORTED = parseTtlSeconds;
-
 const buildTokenResponse = (userId, sid, email, roles, isEmailVerified) => {
 	const accessToken = issueAccessToken(userId, email, roles, sid);
 	const refreshToken = issueRefreshToken(userId, sid);
@@ -102,29 +98,6 @@ export const casRefreshToken = async (
 	return result === 1;
 };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 	let payload;
 	try {
@@ -137,12 +110,10 @@ export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 		throw new AppError("Refresh token payload is invalid", 401);
 	}
 
-	
 	if (payload.sid) {
 		return { userId: payload.userId, sid: payload.sid };
 	}
 
-	
 	logger.warn(
 		{ userId: payload.userId },
 		"verifyRefreshTokenPayload: legacy token without sid — attempting migration",
@@ -197,8 +168,6 @@ export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
 
 	return { userId: payload.userId, sid: newSid };
 };
-
-
 
 const _verifyRefreshTokenPayloadSync = (incomingRefreshToken) => {
 	let payload;
@@ -503,18 +472,8 @@ export const sendOtp = async (userId, email) => {
 	const otp = generateOtp();
 	const hash = await bcrypt.hash(otp, 10);
 
-	
-	
-	
-	
-	
-	
 	await Promise.all([redis.setEx(`otp:${userId}`, OTP_TTL, hash), redis.del(`otpAttempts:${userId}`)]);
 
-	
-	
-	
-	
 	enqueueEmail({ type: "otp", to: email, data: { otp } });
 
 	logger.info({ userId }, "OTP enqueued for delivery");
@@ -528,12 +487,11 @@ export const verifyOtp = async (userId, otp, ipAddress) => {
 		const ipAttemptsKey = `ipAttempts:${ipAddress}`;
 		let ipAttempts;
 		try {
-			ipAttempts = await redis.incr(ipAttemptsKey);
-
-			const ttl = await redis.ttl(ipAttemptsKey);
-			if (ttl < 0) {
-				await redis.expire(ipAttemptsKey, OTP_IP_WINDOW_SECONDS);
-			}
+			const multi = redis.multi();
+			multi.incr(ipAttemptsKey);
+			multi.expire(ipAttemptsKey, OTP_IP_WINDOW_SECONDS, "NX");
+			const results = await multi.exec();
+			ipAttempts = results[0];
 		} catch (err) {
 			logger.error({ err: err.message, userId, ipAddress }, "OTP verify IP limiter failed closed");
 			throw new AppError("OTP verification is temporarily unavailable", 429);
@@ -605,7 +563,6 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 		throw new AppError("Google account does not have a verified email address", 400);
 	}
 
-	
 	const existingByGoogleId = await findUserByGoogleId(googleId);
 
 	if (existingByGoogleId) {
@@ -632,9 +589,6 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 		return tokens;
 	}
 
-	
-	
-	
 	const existingByEmail = await findUserByEmail(email);
 
 	if (existingByEmail) {
@@ -687,7 +641,6 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 		return tokens;
 	}
 
-	
 	if (!role) {
 		throw new AppError("Role is required for new account registration via Google", 400);
 	}

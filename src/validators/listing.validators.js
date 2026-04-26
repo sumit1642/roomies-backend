@@ -1,10 +1,6 @@
-
-
 import { z } from "zod";
 import { buildKeysetPaginationQuerySchema, keysetPaginationQuerySchema } from "./pagination.validators.js";
 import { preferencesSchema, requiredPreferencesSchema } from "./preferences.validators.js";
-
-
 
 const amenityIdsSchema = z.array(z.uuid({ error: "Each amenity ID must be a valid UUID" })).default([]);
 
@@ -19,15 +15,11 @@ const withCoordinateRefinement = (schema) =>
 			path: ["latitude"],
 		});
 
-
-
 export const listingParamsSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
 	}),
 });
-
-
 
 export const searchListingsSchema = z.object({
 	query: buildKeysetPaginationQuerySchema({
@@ -81,8 +73,6 @@ export const searchListingsSchema = z.object({
 			},
 		),
 });
-
-
 
 export const createListingSchema = z.object({
 	body: withCoordinateRefinement(
@@ -160,62 +150,68 @@ export const createListingSchema = z.object({
 					error: "Coordinates are not accepted for pg_room or hostel_bed listings — location is inherited from the property",
 					path: ["latitude"],
 				},
+			)
+			.refine(
+				(data) => !data.availableFrom || !data.availableUntil || data.availableFrom <= data.availableUntil,
+				{
+					error: "availableUntil must be on or after availableFrom",
+					path: ["availableUntil"],
+				},
 			),
 	),
 });
-
-
 
 export const updateListingSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
 	}),
 	body: withCoordinateRefinement(
-		z.object({
-			title: z.string().min(5).max(255).optional(),
-			description: z.string().max(2000).optional(),
+		z
+			.object({
+				title: z.string().min(5).max(255).optional(),
+				description: z.string().max(2000).optional(),
 
-			rentPerMonth: z.coerce.number().int().min(0).optional(),
-			depositAmount: z.coerce.number().int().min(0).optional(),
-			rentIncludesUtilities: z.boolean().optional(),
-			isNegotiable: z.boolean().optional(),
+				rentPerMonth: z.coerce.number().int().min(0).optional(),
+				depositAmount: z.coerce.number().int().min(0).optional(),
+				rentIncludesUtilities: z.boolean().optional(),
+				isNegotiable: z.boolean().optional(),
 
-			roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
-			bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
+				roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
+				bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
 
-			totalCapacity: z.coerce.number().int().min(1).max(20).optional(),
-			preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
+				totalCapacity: z.coerce.number().int().min(1).max(20).optional(),
+				preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
 
-			availableFrom: z.string().date({ error: "availableFrom must be a valid date (YYYY-MM-DD)" }).optional(),
-			availableUntil: z.string().date({ error: "availableUntil must be a valid date (YYYY-MM-DD)" }).optional(),
+				availableFrom: z.string().date({ error: "availableFrom must be a valid date (YYYY-MM-DD)" }).optional(),
+				availableUntil: z
+					.string()
+					.date({ error: "availableUntil must be a valid date (YYYY-MM-DD)" })
+					.optional(),
 
-			
-			
-			
-			addressLine: z.string().min(5).max(500).optional(),
-			city: z.string().min(2).max(100).optional(),
-			locality: z.string().max(100).optional(),
-			landmark: z.string().max(255).optional(),
-			pincode: z
-				.string()
-				.regex(/^\d{6}$/, { error: "Pincode must be exactly 6 digits" })
-				.optional(),
+				addressLine: z.string().min(5).max(500).optional(),
+				city: z.string().min(2).max(100).optional(),
+				locality: z.string().max(100).optional(),
+				landmark: z.string().max(255).optional(),
+				pincode: z
+					.string()
+					.regex(/^\d{6}$/, { error: "Pincode must be exactly 6 digits" })
+					.optional(),
 
-			latitude: z.coerce.number().min(-90).max(90).optional(),
-			longitude: z.coerce.number().min(-180).max(180).optional(),
+				latitude: z.coerce.number().min(-90).max(90).optional(),
+				longitude: z.coerce.number().min(-180).max(180).optional(),
 
-			amenityIds: amenityIdsSchema.optional(),
-			preferences: preferencesSchema.optional(),
-		}),
+				amenityIds: amenityIdsSchema.optional(),
+				preferences: preferencesSchema.optional(),
+			})
+			.refine(
+				(data) => !data.availableFrom || !data.availableUntil || data.availableFrom <= data.availableUntil,
+				{
+					error: "availableUntil must be on or after availableFrom",
+					path: ["availableUntil"],
+				},
+			),
 	),
 });
-
-
-
-
-
-
-
 
 export const updateListingStatusSchema = z.object({
 	params: z.object({
@@ -228,8 +224,6 @@ export const updateListingStatusSchema = z.object({
 	}),
 });
 
-
-
 export const updatePreferencesSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
@@ -239,15 +233,11 @@ export const updatePreferencesSchema = z.object({
 	}),
 });
 
-
-
 export const saveListingSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
 	}),
 });
-
-
 
 export const savedListingsSchema = z.object({
 	query: keysetPaginationQuerySchema,

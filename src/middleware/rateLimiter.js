@@ -61,10 +61,8 @@ rateLimitRedisClient.connect().catch((err) => {
 
 export const closeRateLimitRedisClient = async () => {
 	try {
-		if (rateLimitRedisClient.isOpen) {
-			await rateLimitRedisClient.quit();
-			logger.info("Rate limit Redis client closed");
-		}
+		await rateLimitRedisClient.quit();
+		logger.info("Rate limit Redis client closed");
 	} catch (err) {
 		logger.error({ err: err.message }, "Rate limit Redis: error during close — ignoring");
 	}

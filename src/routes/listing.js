@@ -130,7 +130,7 @@ listingRouter.delete(
 
 
 
-listingRouter.get("/:listingId/photos", authenticate, validate(uploadPhotoSchema), photoController.getPhotos);
+listingRouter.get("/:listingId/photos", authenticate, validate(listingParamsSchema), photoController.getPhotos);
 
 listingRouter.post(
 	"/:listingId/photos",

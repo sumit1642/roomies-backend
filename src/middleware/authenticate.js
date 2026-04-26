@@ -10,33 +10,6 @@ const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
 const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
 const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 const IS_PROD = config.NODE_ENV === "production";
 
 export const ACCESS_COOKIE_OPTIONS = {
@@ -56,16 +29,14 @@ export const REFRESH_COOKIE_OPTIONS = {
 const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
 
 const extractToken = (req) => {
-	
-	
-	const authHeader = req.headers.authorization;
-	if (authHeader && authHeader.startsWith("Bearer ")) {
-		return { token: authHeader.slice(7), source: "header" };
-	}
-
 	const cookieToken = req.cookies?.accessToken;
 	if (cookieToken) {
 		return { token: cookieToken, source: "cookie" };
+	}
+
+	const authHeader = req.headers.authorization;
+	if (authHeader && authHeader.startsWith("Bearer ")) {
+		return { token: authHeader.slice(7), source: "header" };
 	}
 
 	return null;
@@ -148,8 +119,6 @@ export const authenticate = async (req, res, next) => {
 		try {
 			payload = jwt.verify(token, config.JWT_SECRET);
 		} catch (err) {
-			
-			
 			if (err.name === "TokenExpiredError" && source === "cookie") {
 				const session = await attemptSilentRefresh(req, res);
 				if (!session?.userId) {

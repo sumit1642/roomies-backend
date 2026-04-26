@@ -1,86 +1,12 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import cron from "node-cron";
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
+import { storageService } from "../storage/index.js";
 
-const SCHEDULE = process.env.CRON_HARD_DELETE ?? "0 4 * * 0"; 
+const SCHEDULE = process.env.CRON_HARD_DELETE ?? "0 4 * * 0";
 const DEFAULT_RETENTION_DAYS = 90;
 const MIN_RETENTION_DAYS = 1;
-const MAX_RETENTION_DAYS = 3650; 
-
+const MAX_RETENTION_DAYS = 3650;
 
 const _envRetention = process.env.SOFT_DELETE_RETENTION_DAYS;
 const _trimmed = typeof _envRetention === "string" ? _envRetention.trim() : undefined;
@@ -138,14 +64,9 @@ const runHardDeleteCleanup = async () => {
 		client = await pool.connect();
 		await client.query("BEGIN");
 
-		
-		
-		
 		const cutoffExpr = `NOW() - ($1::int * INTERVAL '1 day')`;
 		const p = [RETENTION_DAYS];
 
-		
-		
 		const { rowCount: rr } = await client.query(
 			`DELETE FROM rating_reports
        WHERE deleted_at IS NOT NULL
@@ -154,9 +75,6 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.rating_reports = rr;
 
-		
-		
-		
 		const { rowCount: ra } = await client.query(
 			`DELETE FROM ratings
        WHERE deleted_at IS NOT NULL
@@ -165,9 +83,6 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.ratings = ra;
 
-		
-		
-		
 		const { rowCount: no } = await client.query(
 			`DELETE FROM notifications
        WHERE deleted_at IS NOT NULL
@@ -176,16 +91,6 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.notifications = no;
 
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
 		const { rowCount: co } = await client.query(
 			`DELETE FROM connections
        WHERE deleted_at IS NOT NULL
@@ -199,8 +104,6 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.connections = co;
 
-		
-		
 		const { rowCount: ir } = await client.query(
 			`DELETE FROM interest_requests
        WHERE deleted_at IS NOT NULL
@@ -209,7 +112,6 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.interest_requests = ir;
 
-		
 		const { rowCount: sl } = await client.query(
 			`DELETE FROM saved_listings
        WHERE deleted_at IS NOT NULL
@@ -218,7 +120,6 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.saved_listings = sl;
 
-		
 		const { rowCount: lp } = await client.query(
 			`DELETE FROM listing_photos
        WHERE deleted_at IS NOT NULL
@@ -227,19 +128,6 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.listing_photos = lp;
 
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
 		const { rowCount: li } = await client.query(
 			`DELETE FROM listings
        WHERE deleted_at IS NOT NULL
@@ -262,14 +150,11 @@ const runHardDeleteCleanup = async () => {
              AND sl.deleted_at  IS NOT NULL
              AND sl.deleted_at  >= ${cutoffExpr}
          )`,
-			
-			
-			
+
 			p,
 		);
 		results.listings = li;
 
-		
 		const { rowCount: vr } = await client.query(
 			`DELETE FROM verification_requests
        WHERE deleted_at IS NOT NULL
@@ -278,8 +163,6 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.verification_requests = vr;
 
-		
-		
 		const { rowCount: pop } = await client.query(
 			`DELETE FROM pg_owner_profiles
        WHERE deleted_at IS NOT NULL
@@ -287,6 +170,14 @@ const runHardDeleteCleanup = async () => {
 			p,
 		);
 		results.pg_owner_profiles = pop;
+
+		const { rows: photoRows } = await client.query(
+			`SELECT profile_photo_url FROM student_profiles
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}
+         AND profile_photo_url IS NOT NULL`,
+			p,
+		);
 
 		const { rowCount: sp } = await client.query(
 			`DELETE FROM student_profiles
@@ -296,15 +187,17 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.student_profiles = sp;
 
-		
-		
-		
-		
-		
-		
-		
-		
-		
+		for (const { profile_photo_url } of photoRows) {
+			try {
+				await storageService.delete(profile_photo_url);
+			} catch (storageErr) {
+				logger.error(
+					{ storageErr, profile_photo_url },
+					"cron:hardDeleteCleanup — failed to delete profile photo blob",
+				);
+			}
+		}
+
 		const { rowCount: pr } = await client.query(
 			`DELETE FROM properties
        WHERE deleted_at IS NOT NULL
@@ -319,9 +212,6 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.properties = pr;
 
-		
-		
-		
 		const { rowCount: ins } = await client.query(
 			`DELETE FROM institutions
        WHERE deleted_at IS NOT NULL
@@ -330,23 +220,6 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.institutions = ins;
 
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
 		const { rowCount: us } = await client.query(
 			`DELETE FROM users
        WHERE deleted_at IS NOT NULL

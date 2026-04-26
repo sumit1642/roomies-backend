@@ -1,6 +1,3 @@
-
-
-
 import fs from "fs/promises";
 import sharp from "sharp";
 import { Worker } from "bullmq";
@@ -25,8 +22,6 @@ export const startMediaWorker = () => {
 				"Media worker: processing job",
 			);
 
-			
-			
 			const outputBuffer = await sharp(stagingPath)
 				.resize(MAX_DIMENSION_PX, MAX_DIMENSION_PX, { fit: "inside", withoutEnlargement: true })
 				.webp({ quality: WEBP_QUALITY })
@@ -50,8 +45,6 @@ export const startMediaWorker = () => {
 					"Media worker: photo row deleted before processing completed — cleaning up uploaded file",
 				);
 
-				
-				
 				try {
 					await storageService.delete(finalUrl);
 				} catch (deleteErr) {
@@ -63,14 +56,10 @@ export const startMediaWorker = () => {
 
 				try {
 					await fs.unlink(stagingPath);
-				} catch (_) {
-					
-				}
+				} catch (_) {}
 				return;
 			}
 
-			
-			
 			await pool.query(
 				`UPDATE listing_photos
          SET is_cover = TRUE
@@ -106,8 +95,36 @@ export const startMediaWorker = () => {
 		logger.info({ jobId: job.id, photoId: job.data.photoId }, "Media worker: job completed");
 	});
 
-	worker.on("failed", (job, err) => {
+	worker.on("failed", async (job, err) => {
 		logger.error({ jobId: job?.id, photoId: job?.data?.photoId, err }, "Media worker: job failed");
+
+		if (job && job.attemptsMade >= job.opts.attempts) {
+			const { photoId, listingId } = job.data ?? {};
+			if (!photoId || !listingId) {
+				logger.error({ jobId: job.id }, "Media worker: missing photoId or listingId in job data");
+				return;
+			}
+			try {
+				await pool.query(
+					`UPDATE listing_photos
+           SET deleted_at = NOW()
+           WHERE photo_id  = $1
+             AND listing_id = $2
+             AND deleted_at IS NULL
+             AND photo_url LIKE 'processing:%'`,
+					[photoId, listingId],
+				);
+				logger.warn(
+					{ photoId, listingId },
+					"Media worker: provisional photo row soft-deleted after permanent job failure",
+				);
+			} catch (cleanupErr) {
+				logger.error(
+					{ cleanupErr, photoId, listingId },
+					"Media worker: failed to clean provisional row after permanent failure",
+				);
+			}
+		}
 	});
 
 	worker.on("error", (err) => {

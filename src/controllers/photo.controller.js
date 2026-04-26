@@ -41,7 +41,7 @@ export const uploadPhoto = async (req, res, next) => {
 
 export const getPhotos = async (req, res, next) => {
 	try {
-		const photos = await photoService.getListingPhotos(req.params.listingId);
+		const photos = await photoService.getListingPhotos(req.params.listingId, { ownerId: req.user?.userId });
 		res.json({ status: "success", data: photos });
 	} catch (err) {
 		next(err);

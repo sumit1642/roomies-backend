@@ -18,20 +18,7 @@ pool.on("connect", () => {
 	logger.debug("pg pool: new client connected");
 });
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+const fatalCodes = new Set(["ECONNREFUSED", "ENOTFOUND"]);
 
 pool.on("error", (err) => {
 	logger.error({ err }, "pg pool: unexpected error on idle client");
@@ -41,10 +28,4 @@ pool.on("error", (err) => {
 		process.exit(1);
 	}
 });
-
-
-
-
-const fatalCodes = new Set(["ECONNREFUSED", "ENOTFOUND"]);
-
 export const query = (text, params) => pool.query(text, params);
