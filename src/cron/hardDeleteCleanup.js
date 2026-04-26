@@ -1,3 +1,5 @@
+// src/cron/hardDeleteCleanup.js
+
 import cron from "node-cron";
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
@@ -59,6 +61,7 @@ const runHardDeleteCleanup = async () => {
 
 	let client;
 	const results = {};
+
 	// Collected inside the transaction so we know exactly which rows were
 	// deleted; blob deletion happens after COMMIT so storage errors never
 	// interfere with the DB transaction.
@@ -71,6 +74,7 @@ const runHardDeleteCleanup = async () => {
 		const cutoffExpr = `NOW() - ($1::int * INTERVAL '1 day')`;
 		const p = [RETENTION_DAYS];
 
+		// ── rating_reports ────────────────────────────────────────────────────────
 		const { rowCount: rr } = await client.query(
 			`DELETE FROM rating_reports
        WHERE deleted_at IS NOT NULL
@@ -79,6 +83,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.rating_reports = rr;
 
+		// ── ratings ───────────────────────────────────────────────────────────────
 		const { rowCount: ra } = await client.query(
 			`DELETE FROM ratings
        WHERE deleted_at IS NOT NULL
@@ -87,6 +92,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.ratings = ra;
 
+		// ── notifications ─────────────────────────────────────────────────────────
 		const { rowCount: no } = await client.query(
 			`DELETE FROM notifications
        WHERE deleted_at IS NOT NULL
@@ -95,6 +101,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.notifications = no;
 
+		// ── connections ───────────────────────────────────────────────────────────
 		const { rowCount: co } = await client.query(
 			`DELETE FROM connections
        WHERE deleted_at IS NOT NULL
@@ -108,6 +115,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.connections = co;
 
+		// ── interest_requests ─────────────────────────────────────────────────────
 		const { rowCount: ir } = await client.query(
 			`DELETE FROM interest_requests
        WHERE deleted_at IS NOT NULL
@@ -116,6 +124,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.interest_requests = ir;
 
+		// ── saved_listings ────────────────────────────────────────────────────────
 		const { rowCount: sl } = await client.query(
 			`DELETE FROM saved_listings
        WHERE deleted_at IS NOT NULL
@@ -124,6 +133,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.saved_listings = sl;
 
+		// ── listing_photos ────────────────────────────────────────────────────────
 		const { rowCount: lp } = await client.query(
 			`DELETE FROM listing_photos
        WHERE deleted_at IS NOT NULL
@@ -132,19 +142,11 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.listing_photos = lp;
 
-		
-		const { rowCount: ro } = await client.query(
-			`DELETE FROM rent_observations
-     WHERE listing_id IN (
-       SELECT listing_id FROM listings
-       WHERE deleted_at IS NOT NULL
-         AND deleted_at < ${cutoffExpr}
-     )`,
-			p,
-		);
-		results.rent_observations = ro;
-
-		const { rowCount: li } = await client.query(
+		// ── listings — capture IDs of actually-deleted rows ───────────────────────
+		// rent_observations are deleted AFTER this using the returned IDs so we
+		// only remove observations for listings that were truly hard-deleted (not
+		// ones blocked by the NOT EXISTS guards).
+		const { rows: deletedListingRows } = await client.query(
 			`DELETE FROM listings
        WHERE deleted_at IS NOT NULL
          AND deleted_at < ${cutoffExpr}
@@ -165,12 +167,28 @@ const runHardDeleteCleanup = async () => {
            WHERE sl.listing_id  = listings.listing_id
              AND sl.deleted_at  IS NOT NULL
              AND sl.deleted_at  >= ${cutoffExpr}
-         )`,
-
+         )
+       RETURNING listing_id`,
 			p,
 		);
-		results.listings = li;
+		results.listings = deletedListingRows.length;
 
+		// ── rent_observations — scoped to actually-deleted listings only ───────────
+		// Deleting before the listings DELETE (as the original code did) would
+		// remove observations for listings that the NOT EXISTS guards then keep
+		// alive, producing orphaned rows / incorrect data loss.
+		let ro = 0;
+		if (deletedListingRows.length > 0) {
+			const deletedListingIds = deletedListingRows.map((r) => r.listing_id);
+			const { rowCount: roCount } = await client.query(
+				`DELETE FROM rent_observations WHERE listing_id = ANY($1::uuid[])`,
+				[deletedListingIds],
+			);
+			ro = roCount;
+		}
+		results.rent_observations = ro;
+
+		// ── verification_requests ─────────────────────────────────────────────────
 		const { rowCount: vr } = await client.query(
 			`DELETE FROM verification_requests
        WHERE deleted_at IS NOT NULL
@@ -179,6 +197,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.verification_requests = vr;
 
+		// ── pg_owner_profiles ─────────────────────────────────────────────────────
 		const { rowCount: pop } = await client.query(
 			`DELETE FROM pg_owner_profiles
        WHERE deleted_at IS NOT NULL
@@ -187,8 +206,8 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.pg_owner_profiles = pop;
 
-		// Collect blob URLs before deleting rows so we know what to clean up
-		// from storage. The actual storageService.delete calls happen after
+		// Collect blob URLs before deleting student_profiles rows so we know what
+		// to clean up from storage. Actual storageService.delete calls happen after
 		// COMMIT — storage errors must not roll back the DB transaction.
 		const { rows: photoRows } = await client.query(
 			`SELECT profile_photo_url FROM student_profiles
@@ -199,6 +218,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		photoUrlsToDelete = photoRows.map((r) => r.profile_photo_url);
 
+		// ── student_profiles ──────────────────────────────────────────────────────
 		const { rowCount: sp } = await client.query(
 			`DELETE FROM student_profiles
        WHERE deleted_at IS NOT NULL
@@ -207,6 +227,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.student_profiles = sp;
 
+		// ── properties ────────────────────────────────────────────────────────────
 		const { rowCount: pr } = await client.query(
 			`DELETE FROM properties
        WHERE deleted_at IS NOT NULL
@@ -221,6 +242,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.properties = pr;
 
+		// ── institutions ──────────────────────────────────────────────────────────
 		const { rowCount: ins } = await client.query(
 			`DELETE FROM institutions
        WHERE deleted_at IS NOT NULL
@@ -229,6 +251,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.institutions = ins;
 
+		// ── users ─────────────────────────────────────────────────────────────────
 		const { rowCount: us } = await client.query(
 			`DELETE FROM users
        WHERE deleted_at IS NOT NULL
@@ -271,7 +294,7 @@ const runHardDeleteCleanup = async () => {
          )
          AND NOT EXISTS (
            SELECT 1 FROM pg_owner_profiles pop
-           WHERE pop.user_id   = users.user_id
+           WHERE pop.user_id    = users.user_id
              AND pop.deleted_at IS NOT NULL
              AND pop.deleted_at >= ${cutoffExpr}
          )`,

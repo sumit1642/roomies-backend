@@ -15,6 +15,7 @@
 // should set compatibilityAvailable = false in that case.
 
 import { pool } from "../client.js";
+import { logger } from "../../logger/index.js";
 
 // scoreUsersForUser
 //
@@ -23,58 +24,79 @@ import { pool } from "../client.js";
 //                   Already filtered for opt-in, blocks, and city before this call.
 //
 // Returns: { [userId]: score 0–100 }
+// On DB failure: logs the error and returns {} so the feed still renders
+// without compatibility scores rather than crashing the request.
 export const scoreUsersForUser = async (requestingUserId, candidateIds, client = pool) => {
 	if (!candidateIds.length) return {};
 
-	// Step 1 — intersection: pairs where BOTH users have the same key+value.
-	const { rows: intersectRows } = await client.query(
-		`SELECT
-       up_b.user_id,
-       COUNT(*)::int AS shared_count
-     FROM user_preferences up_a
-     JOIN user_preferences up_b
-       ON up_b.preference_key   = up_a.preference_key
-      AND up_b.preference_value = up_a.preference_value
-     WHERE up_a.user_id = $1
-       AND up_b.user_id = ANY($2::uuid[])
-       AND up_b.user_id <> $1
-     GROUP BY up_b.user_id`,
-		[requestingUserId, candidateIds],
-	);
+	try {
+		// Step 1 — intersection: pairs where BOTH users have the same key+value.
+		const { rows: intersectRows } = await client.query(
+			`SELECT
+         up_b.user_id,
+         COUNT(*)::int AS shared_count
+       FROM user_preferences up_a
+       JOIN user_preferences up_b
+         ON up_b.preference_key   = up_a.preference_key
+        AND up_b.preference_value = up_a.preference_value
+       WHERE up_a.user_id = $1
+         AND up_b.user_id = ANY($2::uuid[])
+         AND up_b.user_id <> $1
+       GROUP BY up_b.user_id`,
+			[requestingUserId, candidateIds],
+		);
 
-	// Step 2 — individual preference counts for union computation.
-	// We fetch the requesting user alongside the candidates in one query.
-	const { rows: countRows } = await client.query(
-		`SELECT user_id, COUNT(*)::int AS pref_count
-     FROM user_preferences
-     WHERE user_id = ANY($1::uuid[])
-     GROUP BY user_id`,
-		[[requestingUserId, ...candidateIds]],
-	);
+		// Step 2 — individual preference counts for union computation.
+		// We fetch the requesting user alongside the candidates in one query.
+		const { rows: countRows } = await client.query(
+			`SELECT user_id, COUNT(*)::int AS pref_count
+       FROM user_preferences
+       WHERE user_id = ANY($1::uuid[])
+       GROUP BY user_id`,
+			[[requestingUserId, ...candidateIds]],
+		);
 
-	const myCount = countRows.find((r) => r.user_id === requestingUserId)?.pref_count ?? 0;
-	const countMap = Object.fromEntries(countRows.map((r) => [r.user_id, r.pref_count]));
-	const sharedMap = Object.fromEntries(intersectRows.map((r) => [r.user_id, r.shared_count]));
+		const myCount = countRows.find((r) => r.user_id === requestingUserId)?.pref_count ?? 0;
+		const countMap = Object.fromEntries(countRows.map((r) => [r.user_id, r.pref_count]));
+		const sharedMap = Object.fromEntries(intersectRows.map((r) => [r.user_id, r.shared_count]));
 
-	return candidateIds.reduce((acc, id) => {
-		const shared = sharedMap[id] ?? 0;
-		const theirCount = countMap[id] ?? 0;
-		const union = myCount + theirCount - shared;
-		// When union is 0 both users have no preferences — score 0, caller sets
-		// compatibilityAvailable = false so the UI can hide the score badge.
-		acc[id] = union === 0 ? 0 : Math.round((shared / union) * 100);
-		return acc;
-	}, {});
+		return candidateIds.reduce((acc, id) => {
+			const shared = sharedMap[id] ?? 0;
+			const theirCount = countMap[id] ?? 0;
+			const union = myCount + theirCount - shared;
+			// When union is 0 both users have no preferences — score 0, caller sets
+			// compatibilityAvailable = false so the UI can hide the score badge.
+			acc[id] = union === 0 ? 0 : Math.round((shared / union) * 100);
+			return acc;
+		}, {});
+	} catch (err) {
+		logger.error(
+			{ err, requestingUserId, candidateCount: candidateIds.length },
+			"scoreUsersForUser: DB error computing compatibility scores — returning empty scores",
+		);
+		// Return safe default so the feed still renders without scores
+		return {};
+	}
 };
 
 // hasPreferences
 //
 // Quick check: does the given user have at least one preference row?
 // Used to set compatibilityAvailable on the requesting user's own side.
+// On DB failure: logs the error and returns false so the feed degrades
+// gracefully (no compatibility scores shown) rather than crashing.
 export const hasPreferences = async (userId, client = pool) => {
-	const { rows } = await client.query(
-		`SELECT EXISTS (SELECT 1 FROM user_preferences WHERE user_id = $1) AS has_prefs`,
-		[userId],
-	);
-	return rows[0].has_prefs === true;
+	try {
+		const { rows } = await client.query(
+			`SELECT EXISTS (SELECT 1 FROM user_preferences WHERE user_id = $1) AS has_prefs`,
+			[userId],
+		);
+		return rows[0].has_prefs === true;
+	} catch (err) {
+		logger.error(
+			{ err, userId },
+			"hasPreferences: DB error checking user preferences — returning false",
+		);
+		return false;
+	}
 };

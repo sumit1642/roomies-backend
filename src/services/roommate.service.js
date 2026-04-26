@@ -1,18 +1,5 @@
 // src/services/roommate.service.js
 //
-// Business logic for the roommate-matching feed.
-//
-// Feed strategy:
-//   1. Fetch a page of candidate student IDs (opt-in, not blocked, optional city
-//      filter) ordered by looking_updated_at DESC with keyset cursor.
-//   2. Score those IDs against the requesting user via Jaccard similarity.
-//   3. Merge scores into the candidate rows and return.
-//
-// We do NOT sort by score at the DB level — that would require loading all
-// candidates before paginating, which kills performance. Instead we surface
-// recency-ordered candidates with score as a display field. A future
-// "sortBy=compatibility" mode can fetch a larger batch (e.g. 200), sort in
-// memory, and slice — same tradeoff as the existing listing search.
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
@@ -27,15 +14,8 @@ export const getRoommateFeed = async (requestingUserId, filters) => {
 	const { city, cursorTime, cursorId, limit = 20 } = filters;
 	const safeLimit = Math.min(Math.max(1, Number(limit) || 20), 50);
 
-	// Whether the requesting user has any preferences set — needed to decide
-	// whether to expose compatibility scores at all.
 	const callerHasPrefs = await hasPreferences(requestingUserId);
 
-	// Build the candidate query dynamically.
-	// We exclude:
-	//   • the requesting user themselves
-	//   • users blocked BY the caller (blocker_id = caller)
-	//   • users who have blocked the caller (blocked_id = caller)
 	const clauses = [
 		`sp.looking_for_roommate = TRUE`,
 		`sp.deleted_at IS NULL`,
@@ -54,9 +34,7 @@ export const getRoommateFeed = async (requestingUserId, filters) => {
 
 	if (city) {
 		const escaped = city.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-		// Match against the city stored on their most-recent active listing, falling
-		// back to a simple city column on student_profiles if we add one later.
-		// For now we check listings — a student has at least one active listing in that city.
+
 		clauses.push(
 			`EXISTS (
          SELECT 1 FROM listings l
@@ -115,6 +93,7 @@ export const getRoommateFeed = async (requestingUserId, filters) => {
 	// Fetch all preferences for candidates in one query (avoids N+1).
 	let preferenceMap = {};
 	let candidateHasPrefSet = {};
+
 	if (items.length) {
 		const candidateIds = items.map((r) => r.user_id);
 
@@ -135,8 +114,6 @@ export const getRoommateFeed = async (requestingUserId, filters) => {
 			candidateHasPrefSet[row.user_id] = true;
 		}
 
-		// Score only if the caller has preferences — otherwise every score is 0
-		// and we just mark compatibilityAvailable = false.
 		if (callerHasPrefs && candidateIds.length) {
 			const scores = await scoreUsersForUser(requestingUserId, candidateIds);
 			for (const item of items) {
@@ -145,11 +122,12 @@ export const getRoommateFeed = async (requestingUserId, filters) => {
 		}
 	}
 
+	const lastItem = hasNextPage ? items[items.length - 1] : null;
 	const nextCursor =
-		hasNextPage ?
+		hasNextPage && lastItem?.looking_updated_at != null ?
 			{
-				cursorTime: items[items.length - 1].looking_updated_at.toISOString(),
-				cursorId: items[items.length - 1].user_id,
+				cursorTime: lastItem.looking_updated_at.toISOString(),
+				cursorId: lastItem.user_id,
 			}
 		:	null;
 
@@ -206,40 +184,63 @@ export const updateRoommateProfile = async (requestingUserId, targetUserId, { lo
 	};
 };
 
-// ─── blockUser ────────────────────────────────────────────────────────────────
-
 export const blockUser = async (requestingUserId, targetUserId) => {
 	if (requestingUserId === targetUserId) {
 		throw new AppError("You cannot block yourself", 422);
 	}
 
-	// Verify the target user exists and is a student
-	const { rows: targetRows } = await pool.query(
-		`SELECT u.user_id FROM users u
-     WHERE u.user_id    = $1
-       AND u.deleted_at IS NULL
-       AND u.account_status = 'active'`,
-		[targetUserId],
-	);
-	if (!targetRows.length) {
-		throw new AppError("User not found", 404);
-	}
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
 
-	// Soft cap — prevent bloat
-	const { rows: countRows } = await pool.query(
-		`SELECT COUNT(*)::int AS cnt FROM roommate_blocks WHERE blocker_id = $1`,
-		[requestingUserId],
-	);
-	if (countRows[0].cnt >= MAX_BLOCKS_PER_USER) {
-		throw new AppError(`You can block at most ${MAX_BLOCKS_PER_USER} users`, 422);
-	}
+		// Serialize concurrent block operations for the same blocker.
+		await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [requestingUserId]);
 
-	await pool.query(
-		`INSERT INTO roommate_blocks (blocker_id, blocked_id)
-     VALUES ($1, $2)
-     ON CONFLICT (blocker_id, blocked_id) DO NOTHING`,
-		[requestingUserId, targetUserId],
-	);
+		// Verify target is an active student (join student_profiles).
+		const { rows: targetRows } = await client.query(
+			`SELECT u.user_id
+       FROM users u
+       JOIN student_profiles sp
+         ON sp.user_id    = u.user_id
+        AND sp.deleted_at IS NULL
+       WHERE u.user_id        = $1
+         AND u.deleted_at     IS NULL
+         AND u.account_status = 'active'`,
+			[targetUserId],
+		);
+		if (!targetRows.length) {
+			await client.query("ROLLBACK");
+			throw new AppError("User not found", 404);
+		}
+
+		// Soft cap — re-checked inside the transaction to prevent TOCTOU race.
+		const { rows: countRows } = await client.query(
+			`SELECT COUNT(*)::int AS cnt FROM roommate_blocks WHERE blocker_id = $1`,
+			[requestingUserId],
+		);
+		if (countRows[0].cnt >= MAX_BLOCKS_PER_USER) {
+			await client.query("ROLLBACK");
+			throw new AppError(`You can block at most ${MAX_BLOCKS_PER_USER} users`, 422);
+		}
+
+		await client.query(
+			`INSERT INTO roommate_blocks (blocker_id, blocked_id)
+       VALUES ($1, $2)
+       ON CONFLICT (blocker_id, blocked_id) DO NOTHING`,
+			[requestingUserId, targetUserId],
+		);
+
+		await client.query("COMMIT");
+	} catch (err) {
+		try {
+			await client.query("ROLLBACK");
+		} catch (rollbackErr) {
+			logger.error({ rollbackErr, err }, "blockUser: rollback failed");
+		}
+		throw err;
+	} finally {
+		client.release();
+	}
 
 	logger.info({ blockerId: requestingUserId, blockedId: targetUserId }, "Roommate block added");
 	return { blockedUserId: targetUserId, blocked: true };

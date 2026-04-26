@@ -25,14 +25,6 @@ export const updateRoommateProfileSchema = z.object({
 	}),
 });
 
-export const roommateBlockParamsSchema = z.object({
-	params: z.object({
-		userId: z.uuid({ error: "Invalid user ID" }), // requesting user
-		targetUserId: z.uuid({ error: "Invalid target user ID" }),
-	}),
-});
-
-// Used for block/unblock endpoints where only the target user ID matters
 export const blockTargetParamsSchema = z.object({
 	params: z.object({
 		userId: z.uuid({ error: "Invalid user ID" }),

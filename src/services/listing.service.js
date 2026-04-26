@@ -163,7 +163,18 @@ const fetchListingDetail = async (listingId, client = pool) => {
           'averageRating', p.average_rating,
           'ratingCount',   p.rating_count
         )
-      ELSE NULL END AS property
+      ELSE NULL END AS property,
+
+      -- Rent index (locality-level preferred, city-wide fallback)
+      COALESCE(ri_loc.p25,          ri_city.p25)          AS ri_p25,
+      COALESCE(ri_loc.p50,          ri_city.p50)          AS ri_p50,
+      COALESCE(ri_loc.p75,          ri_city.p75)          AS ri_p75,
+      COALESCE(ri_loc.sample_count, ri_city.sample_count) AS ri_sample_count,
+      CASE
+        WHEN ri_loc.rent_index_id  IS NOT NULL THEN 'locality'
+        WHEN ri_city.rent_index_id IS NOT NULL THEN 'city'
+        ELSE NULL
+      END AS ri_resolution
 
     FROM listings l
     JOIN users u ON u.user_id = l.posted_by
@@ -173,6 +184,14 @@ const fetchListingDetail = async (listingId, client = pool) => {
     LEFT JOIN amenities a           ON a.amenity_id  = la.amenity_id
     LEFT JOIN listing_preferences lp ON lp.listing_id = l.listing_id
     LEFT JOIN properties p          ON p.property_id  = l.property_id AND p.deleted_at IS NULL
+    LEFT JOIN rent_index ri_loc
+      ON ri_loc.city      = l.city
+     AND ri_loc.locality  = NULLIF(LOWER(TRIM(COALESCE(l.locality, ''))), '')
+     AND ri_loc.room_type = l.room_type
+    LEFT JOIN rent_index ri_city
+      ON ri_city.city      = l.city
+     AND ri_city.locality  IS NULL
+     AND ri_city.room_type = l.room_type
     WHERE l.listing_id = $1
       AND l.deleted_at IS NULL
     GROUP BY
@@ -180,7 +199,9 @@ const fetchListingDetail = async (listingId, client = pool) => {
       sp.full_name, pop.owner_full_name, p.property_id,
       p.property_name, p.property_type, p.address_line, p.city,
       p.locality, p.latitude, p.longitude, p.house_rules,
-      p.average_rating, p.rating_count`,
+      p.average_rating, p.rating_count,
+      ri_loc.p25, ri_loc.p50, ri_loc.p75, ri_loc.sample_count, ri_loc.rent_index_id,
+      ri_city.p25, ri_city.p50, ri_city.p75, ri_city.sample_count, ri_city.rent_index_id`,
 		[listingId],
 	);
 
@@ -316,46 +337,19 @@ export const getListing = async (listingId) => {
 	const listing = await fetchListingDetail(listingId);
 	if (!listing) throw new AppError("Listing not found", 404);
 
-	// Increment view count fire-and-forget — unchanged.
+	// Increment view count fire-and-forget
 	void pool
 		.query(`UPDATE listings SET views_count = views_count + 1 WHERE listing_id = $1`, [listingId])
 		.catch((err) => {
 			logger.warn({ err, listingId }, "Failed to increment listing view count");
 		});
 
-	// Fetch rent index for this listing's city / locality / room_type.
-	// Two LEFT JOINs: locality-specific first, city-wide fallback second.
-	const { rows: riRows } = await pool.query(
-		`SELECT
-       COALESCE(ri_loc.p25,          ri_city.p25)         AS ri_p25,
-       COALESCE(ri_loc.p50,          ri_city.p50)         AS ri_p50,
-       COALESCE(ri_loc.p75,          ri_city.p75)         AS ri_p75,
-       COALESCE(ri_loc.sample_count, ri_city.sample_count) AS ri_sample_count,
-       CASE
-         WHEN ri_loc.rent_index_id IS NOT NULL THEN 'locality'
-         WHEN ri_city.rent_index_id IS NOT NULL THEN 'city'
-         ELSE NULL
-       END AS ri_resolution
-     FROM listings l
-     LEFT JOIN rent_index ri_loc
-       ON ri_loc.city      = l.city
-      AND ri_loc.locality  = NULLIF(LOWER(TRIM(COALESCE(l.locality, ''))), '')
-      AND ri_loc.room_type = l.room_type
-     LEFT JOIN rent_index ri_city
-       ON ri_city.city      = l.city
-      AND ri_city.locality  IS NULL
-      AND ri_city.room_type = l.room_type
-     WHERE l.listing_id = $1`,
-		[listingId],
-	);
-
-	const ri = riRows[0] ?? {};
 	const converted = toRupees(listing);
 
 	return {
 		...converted,
-		rentDeviation: rentDeviationPct(listing.rent_per_month, ri.ri_p50),
-		rentIndex: formatRentIndex(ri),
+		rentDeviation: rentDeviationPct(listing.rent_per_month, listing.ri_p50),
+		rentIndex: formatRentIndex(listing),
 	};
 };
 
