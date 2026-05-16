@@ -378,13 +378,12 @@ export const searchListings = async (userId, filters) => {
 	let p = 1;
 
 	if (lat !== undefined && lng !== undefined) {
-		clauses.push(
-			`ST_DWithin(
-        COALESCE(l.location, p.location)::geography,
-        ST_SetSRID(ST_MakePoint($${p + 1}, $${p}), 4326)::geography,
-        $${p + 2}
-      )`,
-		);
+		const pointExpr = `ST_SetSRID(ST_MakePoint($${p + 1}, $${p}), 4326)::geography`;
+		clauses.push(`(
+			(l.location IS NOT NULL AND ST_DWithin(l.location::geography, ${pointExpr}, $${p + 2}))
+			OR
+			(l.location IS NULL AND p.location IS NOT NULL AND ST_DWithin(p.location::geography, ${pointExpr}, $${p + 2}))
+		)`);
 		params.push(lat, lng, radius);
 		p += 3;
 	}
@@ -464,7 +463,6 @@ export const searchListings = async (userId, filters) => {
 	params.push(limit + 1);
 	const limitParam = p;
 
-	// ── CHANGED: added rent_index LEFT JOINs and ri_p50 / ri_resolution columns ──
 	const { rows } = await pool.query(
 		`SELECT
       l.listing_id,
@@ -481,6 +479,8 @@ export const searchListings = async (userId, filters) => {
       l.available_from,
       l.status,
       l.created_at,
+      COALESCE(l.latitude,  p.latitude)  AS latitude,
+      COALESCE(l.longitude, p.longitude) AS longitude,
       COALESCE(p.property_name, NULL) AS property_name,
       COALESCE(p.average_rating, u.average_rating) AS average_rating,
       (
@@ -492,7 +492,6 @@ export const searchListings = async (userId, filters) => {
           AND ph.photo_url NOT LIKE 'processing:%'
         LIMIT 1
       ) AS cover_photo_url,
-      -- Rent index (locality-level preferred, city-wide fallback)
       COALESCE(ri_loc.p50,  ri_city.p50)  AS ri_p50,
       CASE
         WHEN ri_loc.rent_index_id  IS NOT NULL THEN 'locality'
@@ -515,7 +514,6 @@ export const searchListings = async (userId, filters) => {
     LIMIT $${limitParam}`,
 		params,
 	);
-	// ── END CHANGED section ───────────────────────────────────────────────────
 
 	const hasNextPage = rows.length > limit;
 	const items = hasNextPage ? rows.slice(0, limit) : rows;
@@ -544,14 +542,12 @@ export const searchListings = async (userId, filters) => {
          GROUP BY listing_id`,
 				[listingIds],
 			);
-
 			listingPreferenceCounts = new Map(
 				listingPreferenceRows.map((row) => [row.listing_id, Number(row.preference_count)]),
 			);
 		}
 	}
 
-	// ── CHANGED: added rentDeviation to each enriched item ───────────────────
 	const enrichedItems = items.map((row) => ({
 		...row,
 		rentPerMonth: row.rent_per_month / 100,
@@ -561,12 +557,10 @@ export const searchListings = async (userId, filters) => {
 		compatibilityScore: userId !== null ? (scoreMap[row.listing_id] ?? 0) : 0,
 		compatibilityAvailable:
 			userId !== null && userHasPreferences && (listingPreferenceCounts.get(row.listing_id) ?? 0) > 0,
-		// New: rent deviation as a percentage relative to local median
 		rentDeviation: rentDeviationPct(row.rent_per_month, row.ri_p50),
 		ri_p50: undefined,
 		ri_resolution: undefined,
 	}));
-	// ── END CHANGED section ───────────────────────────────────────────────────
 
 	if (sortBy === "compatibility") {
 		enrichedItems.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
