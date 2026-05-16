@@ -1,5 +1,3 @@
-// src/routes/index.js
-
 import { Router } from "express";
 import { healthRouter } from "./health.js";
 import { authRouter } from "./auth.js";
@@ -14,6 +12,7 @@ import { ratingRouter } from "./rating.js";
 import { preferencesRouter } from "./preferences.js";
 import { amenitiesRouter } from "./amenities.js";
 import { rentIndexRouter } from "./rentIndex.js";
+import { savedSearchRouter } from "./savedSearch.js";
 import { testUtilsRouter } from "./testUtils.js";
 import { config } from "../config/env.js";
 
@@ -32,6 +31,7 @@ rootRouter.use("/ratings", ratingRouter);
 rootRouter.use("/preferences", preferencesRouter);
 rootRouter.use("/amenities", amenitiesRouter);
 rootRouter.use("/rent-index", rentIndexRouter);
+rootRouter.use("/saved-searches", savedSearchRouter);
 
 if (config.NODE_ENV !== "production") {
 	rootRouter.use("/test-utils", testUtilsRouter);
