@@ -14,6 +14,8 @@ import { amenitiesRouter } from "./amenities.js";
 import { rentIndexRouter } from "./rentIndex.js";
 import { savedSearchRouter } from "./savedSearch.js";
 import { testUtilsRouter } from "./testUtils.js";
+import { verificationRouter } from "./verification.js";
+import { reportRouter } from "./report.js";
 import { config } from "../config/env.js";
 
 export const rootRouter = Router();
@@ -32,6 +34,8 @@ rootRouter.use("/preferences", preferencesRouter);
 rootRouter.use("/amenities", amenitiesRouter);
 rootRouter.use("/rent-index", rentIndexRouter);
 rootRouter.use("/saved-searches", savedSearchRouter);
+rootRouter.use("/verification", verificationRouter);
+rootRouter.use("/reports", reportRouter);
 
 if (config.NODE_ENV !== "production") {
 	rootRouter.use("/test-utils", testUtilsRouter);
