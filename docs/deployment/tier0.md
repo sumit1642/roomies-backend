@@ -12,6 +12,10 @@
 
 > **Operational note:** the checked-in `.env.render` currently mirrors deployed values and includes `TRUST_PROXY=false`.
 > For Render this is a misconfiguration. Set `TRUST_PROXY=1` in the Render dashboard.
+>
+> **Secret rotation note:** if production credentials are pasted into chat, logs, tickets, screenshots, or docs, rotate
+> those credentials before relying on production security. Never commit full database URLs, storage keys, API keys,
+> OAuth client secrets, JWT secrets, or Redis passwords.
 
 ---
 
@@ -49,8 +53,20 @@ owns your repository. Render connects to GitHub to deploy your code automaticall
 **Azure** — You already have this at [portal.azure.com](https://portal.azure.com) with your student credits. You only
 need it for Blob Storage, which uses the always-free 5 GB tier.
 
-**Brevo** — [brevo.com](https://brevo.com) You already have this configured locally. You just need to find your API key
-(the `xkeysib-` one), not the SMTP key.
+**Brevo** — [brevo.com](https://brevo.com) You already have this configured locally. You just need to find your REST
+API key, not the SMTP key.
+
+### Current Tier 0 Resource Names
+
+| Resource              | Name              | URL/Endpoint                                                 |
+| --------------------- | ----------------- | ------------------------------------------------------------ |
+| Render Web Service    | `roomies-api`     | `https://roomies-api.onrender.com`                           |
+| Neon Project          | `roomies`         | `ep-XXXXX.ap-southeast-1.aws.neon.tech`                      |
+| Upstash Redis         | `roomies-redis`   | `upward-mule-75729.upstash.io:6379`                          |
+| Azure Resource Group  | `roomies-rg`      | Azure Portal resource group                                  |
+| Azure Storage Account | `roomiesblob`     | `roomiesblob.blob.core.windows.net`                          |
+| Blob Container        | `roomies-uploads` | `https://roomiesblob.blob.core.windows.net/roomies-uploads/` |
+| Email Provider        | Brevo API         | HTTPS API                                                    |
 
 ---
 
@@ -91,14 +107,14 @@ if (parsed.data.EMAIL_PROVIDER === "brevo-api") {
 		console.error(
 			`❌  EMAIL_PROVIDER is "brevo-api" but these required variables are missing:\n` +
 				missing.map((v) => `   ${v}`).join("\n") +
-				`\n\nBREVO_API_KEY starts with "xkeysib-". Find it in Brevo → Settings → SMTP & API → API Keys.\n`,
+				`\n\nFind BREVO_API_KEY in Brevo → Settings → SMTP & API → API Keys.\n`,
 		);
 		process.exit(1);
 	}
 	if (parsed.data.BREVO_API_KEY?.startsWith("xsmtpsib-")) {
 		console.error(
 			`❌  BREVO_API_KEY starts with "xsmtpsib-" which is an SMTP key, not an API key.\n` +
-				`   The API key starts with "xkeysib-". Find it in Brevo → Settings → SMTP & API → API Keys.\n`,
+				`   Find the API key in Brevo → Settings → SMTP & API → API Keys.\n`,
 		);
 		process.exit(1);
 	}
@@ -451,8 +467,8 @@ The REST API uses port 443 (standard HTTPS) which is always open.
 
 You already have a Brevo account. Log in at [app.brevo.com](https://app.brevo.com).
 
-Go to **Settings** (top right menu) → **API Keys** → find your existing API key or click **Generate a new API key**. The
-API key starts with `xkeysib-`. Copy it — this is your `BREVO_API_KEY`.
+Go to **Settings** (top right menu) → **API Keys** → find your existing REST API key or click **Generate a new API key**.
+Copy it — this is your `BREVO_API_KEY`.
 
 This is different from your SMTP key (which starts with `xsmtpsib-`). The API key is what the REST API uses.
 
@@ -489,9 +505,10 @@ ENV_FILE=.env.render
 
 # ─── Neon PostgreSQL ───────────────────────────────────────────────────────────
 DATABASE_URL=postgresql://neondb_owner:YOUR_PASSWORD@ep-YOUR-ENDPOINT.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+DB_POOL_MAX=5
 
 # ─── Upstash Redis (TLS required — note the double-s in rediss://) ─────────────
-REDIS_URL=rediss://default:YOUR_UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6379
+REDIS_URL=rediss://default:REDACTED@upward-mule-75729.upstash.io:6379
 
 # ─── JWT ──────────────────────────────────────────────────────────────────────
 JWT_SECRET=YOUR_GENERATED_64_CHAR_SECRET
@@ -506,15 +523,15 @@ AZURE_STORAGE_CONTAINER=roomies-uploads
 
 # ─── Email via Brevo REST API (no SMTP, works on Render free tier) ─────────────
 EMAIL_PROVIDER=brevo-api
-BREVO_API_KEY=xkeysib-YOUR_API_KEY_HERE
-BREVO_SMTP_FROM=your-verified-sender@example.com
+BREVO_API_KEY=REDACTED
+BREVO_SMTP_FROM=sumity1642@gmail.com
 
-# ─── CORS (allow everything for local testing) ────────────────────────────────
-ALLOWED_ORIGINS=http://localhost:5173
+# ─── CORS ────────────────────────────────────────────────────────────────────
+ALLOWED_ORIGINS=https://roomies-lilac.vercel.app
 
 # ─── Google OAuth ─────────────────────────────────────────────────────────────
-GOOGLE_CLIENT_ID=xxxxxxxxxxxxxxxxxxxx
-GOOGLE_CLIENT_SECRET=xxxxxxxxxxxxxxxx
+GOOGLE_CLIENT_ID=535680244018-qbhv8r4iufvlh4qrlcro2g1n4et5uvh2.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=REDACTED
 
 # ─── Trust Proxy (Render must use 1 for real client IP extraction) ───────────
 TRUST_PROXY=1
@@ -619,7 +636,8 @@ Add these variables:
 | `NODE_ENV`                        | `production`                                         | No      |
 | `PORT`                            | `10000`                                              | No      |
 | `DATABASE_URL`                    | your Neon connection string                          | **Yes** |
-| `REDIS_URL`                       | `rediss://default:PASSWORD@ENDPOINT.upstash.io:6379` | **Yes** |
+| `DB_POOL_MAX`                     | `5`                                                  | No      |
+| `REDIS_URL`                       | `rediss://default:REDACTED@upward-mule-75729.upstash.io:6379` | **Yes** |
 | `JWT_SECRET`                      | your 64-char secret                                  | **Yes** |
 | `JWT_REFRESH_SECRET`              | your other 64-char secret                            | **Yes** |
 | `JWT_EXPIRES_IN`                  | `15m`                                                | No      |
@@ -628,20 +646,19 @@ Add these variables:
 | `AZURE_STORAGE_CONNECTION_STRING` | the full connection string from Azure                | **Yes** |
 | `AZURE_STORAGE_CONTAINER`         | `roomies-uploads`                                    | No      |
 | `EMAIL_PROVIDER`                  | `brevo-api`                                          | No      |
-| `BREVO_API_KEY`                   | your `xkeysib-` key                                  | **Yes** |
+| `BREVO_API_KEY`                   | your Brevo API key                                   | **Yes** |
 | `BREVO_SMTP_FROM`                 | your verified sender email                           | No      |
 | `GOOGLE_CLIENT_ID`                | your Google client ID                                | No      |
 | `GOOGLE_CLIENT_SECRET`            | your Google client secret                            | **Yes** |
-| `ALLOWED_ORIGINS`                 | `http://localhost:5173` (initial)                    | No      |
+| `ALLOWED_ORIGINS`                 | `https://roomies-lilac.vercel.app`                   | No      |
 | `TRUST_PROXY`                     | `1`                                                  | No      |
 
 `TRUST_PROXY=1` is security-relevant on Render. Without it, Express sees the proxy IP instead of the real client IP,
 which breaks OTP IP throttling, guest fingerprinting in `contactRevealGate`, and Redis-backed auth rate limits.
 
-`ALLOWED_ORIGINS` starts as `http://localhost:5173` during backend-only rollout. After frontend deployment, update it to
-production domains (comma-separated), for example:
+`ALLOWED_ORIGINS` should be the deployed frontend origin. For the current production frontend, use:
 
-`https://roomies.vercel.app,https://www.roomies.in`
+`https://roomies-lilac.vercel.app`
 
 **Important note about `PORT`:** Render injects its own PORT environment variable (usually 10000) into the process. Your
 `config/env.js` reads `PORT` and coerces it to a number. Setting `PORT=10000` here ensures the fallback is correct. In

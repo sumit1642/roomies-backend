@@ -313,9 +313,10 @@ ENV_FILE=.env.render
 
 # Neon PostgreSQL
 DATABASE_URL=postgresql://neondb_owner:PASSWORD@ep-ENDPOINT.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+DB_POOL_MAX=5
 
 # Upstash Redis
-REDIS_URL=rediss://default:YOUR_UPSTASH_PASSWORD@YOUR-ENDPOINT.upstash.io:6379
+REDIS_URL=rediss://default:REDACTED@upward-mule-75729.upstash.io:6379
 
 # JWT
 JWT_SECRET=YOUR_GENERATED_JWT_SECRET
@@ -328,21 +329,24 @@ STORAGE_ADAPTER=azure
 AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=roomiesblob;AccountKey=XXXX;EndpointSuffix=core.windows.net
 AZURE_STORAGE_CONTAINER=roomies-uploads
 
-# Email
-EMAIL_PROVIDER=brevo
-BREVO_SMTP_LOGIN=your-login@smtp-brevo.com
-BREVO_SMTP_KEY=xsmtpsib-xxxxxx
-BREVO_SMTP_FROM=noreply@yourdomain.com
+# Email via Brevo REST API
+EMAIL_PROVIDER=brevo-api
+BREVO_API_KEY=REDACTED
+BREVO_SMTP_FROM=sumity1642@gmail.com
 
-# CORS — allow everything for local testing
-ALLOWED_ORIGINS=http://localhost:5173
+# CORS
+ALLOWED_ORIGINS=https://roomies-lilac.vercel.app
 
-# Google OAuth (optional, skip if not ready)
-GOOGLE_CLIENT_ID=YOUR_CLIENT_ID
-GOOGLE_CLIENT_SECRET=YOUR_CLIENT_SECRET
+# Google OAuth
+GOOGLE_CLIENT_ID=535680244018-qbhv8r4iufvlh4qrlcro2g1n4et5uvh2.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=REDACTED
 
-TRUST_PROXY=false
+TRUST_PROXY=1
 ```
+
+If any production credential is pasted into chat, logs, tickets, screenshots, or docs, rotate it before relying on
+production security. Do not commit full database URLs, storage keys, API keys, OAuth client secrets, JWT secrets, or
+Redis passwords.
 
 Test locally:
 
@@ -386,7 +390,8 @@ In the Render dashboard → your web service → **Environment** tab → **Add E
 | `NODE_ENV`                        | `production`                                                |
 | `PORT`                            | `10000` (Render injects its own PORT; set this as fallback) |
 | `DATABASE_URL`                    | your Neon connection string                                 |
-| `REDIS_URL`                       | `rediss://default:PASSWORD@ENDPOINT.upstash.io:6379`        |
+| `DB_POOL_MAX`                     | `5`                                                         |
+| `REDIS_URL`                       | `rediss://default:REDACTED@upward-mule-75729.upstash.io:6379` |
 | `JWT_SECRET`                      | your generated secret                                       |
 | `JWT_REFRESH_SECRET`              | your second generated secret                                |
 | `JWT_EXPIRES_IN`                  | `15m`                                                       |
@@ -394,15 +399,16 @@ In the Render dashboard → your web service → **Environment** tab → **Add E
 | `STORAGE_ADAPTER`                 | `azure`                                                     |
 | `AZURE_STORAGE_CONNECTION_STRING` | your full connection string                                 |
 | `AZURE_STORAGE_CONTAINER`         | `roomies-uploads`                                           |
-| `EMAIL_PROVIDER`                  | `brevo`                                                     |
-| `BREVO_SMTP_LOGIN`                | your Brevo SMTP login                                       |
-| `BREVO_SMTP_KEY`                  | your `xsmtpsib-...` key                                     |
+| `EMAIL_PROVIDER`                  | `brevo-api`                                                 |
+| `BREVO_API_KEY`                   | your Brevo API key                                          |
 | `BREVO_SMTP_FROM`                 | your verified sender address                                |
-| `ALLOWED_ORIGINS`                 | `*` (tighten when frontend is deployed)                     |
+| `GOOGLE_CLIENT_ID`                | your Google client ID                                       |
+| `GOOGLE_CLIENT_SECRET`            | your Google client secret                                   |
+| `ALLOWED_ORIGINS`                 | `https://roomies-lilac.vercel.app`                          |
 | `TRUST_PROXY`                     | `1`                                                         |
 
-**Render tip:** Use the **Secret** checkbox on any sensitive value (JWT secrets, SMTP keys, DB password). These are
-stored encrypted and never shown in logs.
+**Render tip:** Use the **Secret** checkbox on any sensitive value (JWT secrets, API keys, OAuth client secrets, Redis
+password, DB password, storage connection string). These are stored encrypted and never shown in logs.
 
 #### 6.3 Deploy
 
@@ -735,10 +741,11 @@ With ₹9,480 credits: **~2.9 months** at full Tier 2. By then the project shoul
 | --------------------- | ----------------- | ------------------------------------------------------------ |
 | Render Web Service    | `roomies-api`     | `https://roomies-api.onrender.com`                           |
 | Neon Project          | `roomies`         | `ep-XXXXX.ap-southeast-1.aws.neon.tech`                      |
-| Upstash Redis         | `roomies-redis`   | `XXXXX.upstash.io:6379`                                      |
+| Upstash Redis         | `roomies-redis`   | `upward-mule-75729.upstash.io:6379`                          |
+| Azure Resource Group  | `roomies-rg`      | Azure Portal resource group                                  |
 | Azure Storage Account | `roomiesblob`     | `roomiesblob.blob.core.windows.net`                          |
 | Blob Container        | `roomies-uploads` | `https://roomiesblob.blob.core.windows.net/roomies-uploads/` |
-| Email Provider        | Brevo SMTP        | `smtp-relay.brevo.com:587`                                   |
+| Email Provider        | Brevo API         | HTTPS API                                                    |
 
 ---
 
