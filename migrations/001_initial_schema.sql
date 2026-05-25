@@ -2,7 +2,9 @@
 CREATE EXTENSION IF NOT EXISTS postgis;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
+CREATE EXTENSION IF NOT EXISTS postgis_topology;
+CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
+CREATE EXTENSION IF NOT EXISTS postgis_tiger_geocoder;
 DO $$ BEGIN CREATE TYPE account_status_enum AS ENUM ('active', 'suspended', 'banned', 'deactivated');
 
 EXCEPTION WHEN duplicate_object THEN NULL;
