@@ -11,8 +11,16 @@ import { submitDocumentSchema } from "../validators/verification.validators.js";
 import * as pgOwnerController from "../controllers/pgOwner.controller.js";
 import * as verificationController from "../controllers/verification.controller.js";
 import * as profilePhotoController from "../controllers/profilePhoto.controller.js";
+import { AppError } from "../middleware/errorHandler.js";
 
 export const pgOwnerRouter = Router();
+
+const requireSelf = (req, res, next) => {
+	if (req.user?.userId !== req.params.userId) {
+		return next(new AppError("Forbidden", 403));
+	}
+	next();
+};
 
 pgOwnerRouter.get("/:userId/profile", authenticate, validate(getPgOwnerParamsSchema), pgOwnerController.getProfile);
 
@@ -20,6 +28,7 @@ pgOwnerRouter.put(
 	"/:userId/photo",
 	authenticate,
 	authorize("pg_owner"),
+	requireSelf,
 	validate(getPgOwnerParamsSchema),
 	upload.single(UPLOAD_FIELD_NAME),
 	profilePhotoController.uploadPgOwnerPhoto,
@@ -29,6 +38,7 @@ pgOwnerRouter.delete(
 	"/:userId/photo",
 	authenticate,
 	authorize("pg_owner"),
+	requireSelf,
 	validate(getPgOwnerParamsSchema),
 	profilePhotoController.deletePgOwnerPhoto,
 );

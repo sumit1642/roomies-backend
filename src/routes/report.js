@@ -9,13 +9,15 @@
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
+import { validate } from "../middleware/validate.js";
+import { getReportQueueSchema, resolveReportSchema } from "../validators/report.validators.js";
 import * as rc from "../controllers/report.controller.js";
 
 export const reportRouter = Router();
 
 // GET /reports/queue — paginated list of open reports for admin review
-reportRouter.get("/queue", authenticate, ...requireAdmin, rc.getReportQueue);
+reportRouter.get("/queue", authenticate, ...requireAdmin, validate(getReportQueueSchema), rc.getReportQueue);
 
 // PATCH /reports/:reportId/resolve — admin marks a report as resolved
 // Body: { resolution: 'resolved_kept' | 'resolved_removed', adminNotes?: string }
-reportRouter.patch("/:reportId/resolve", authenticate, ...requireAdmin, rc.resolveReport);
+reportRouter.patch("/:reportId/resolve", authenticate, ...requireAdmin, validate(resolveReportSchema), rc.resolveReport);

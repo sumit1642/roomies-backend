@@ -1,66 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import nodemailer from "nodemailer";
 import { config } from "../config/env.js";
 import { logger } from "../logger/index.js";
@@ -68,27 +5,12 @@ import { AppError } from "../middleware/errorHandler.js";
 
 const activeEmailProvider = config.EMAIL_PROVIDER === "brevo" ? "brevo" : "ethereal";
 
-
-
-
-
-
-
-
-
 const maskEmail = (email) => {
 	const [local, domain] = email.split("@");
 	if (!domain) return "****";
 	const prefix = local?.length > 0 ? local[0] : "*";
 	return `${prefix}****@${domain}`;
 };
-
-
-
-
-
-
-
 
 const createEmailTransport = () => {
 	if (config.EMAIL_PROVIDER === "brevo") {
@@ -104,26 +26,18 @@ const createEmailTransport = () => {
 		);
 
 		return nodemailer.createTransport({
-			
-			
 			host: "smtp-relay.brevo.com",
-			
-			
-			
+
 			port: 587,
 			secure: false,
 			auth: {
-				
 				user: config.BREVO_SMTP_LOGIN,
-				
+
 				pass: config.BREVO_SMTP_KEY,
 			},
 		});
 	}
 
-	
-	
-	
 	logger.info(
 		{
 			provider: "ethereal",
@@ -136,8 +50,7 @@ const createEmailTransport = () => {
 	return nodemailer.createTransport({
 		host: config.SMTP_HOST,
 		port: config.SMTP_PORT,
-		
-		
+
 		secure: config.SMTP_PORT === 465,
 		auth: {
 			user: config.SMTP_USER,
@@ -146,39 +59,19 @@ const createEmailTransport = () => {
 	});
 };
 
-
-
-
-
 const transport = createEmailTransport();
 
 logger.info({ provider: activeEmailProvider }, `Email provider selected at startup: ${activeEmailProvider}`);
 
-
-
-
-
-
-
 const getSenderAddress = () => {
 	if (config.EMAIL_PROVIDER === "brevo") {
-		
-		
 		return `"Roomies" <${config.BREVO_SMTP_FROM}>`;
 	}
-	
+
 	return `"Roomies" <${config.SMTP_FROM}>`;
 };
 
-
-
-
-
-
-
 export const sendOtpEmail = async (to, otp) => {
-	
-	
 	if (!to || typeof to !== "string" || !to.includes("@")) {
 		throw new AppError("Invalid recipient email address", 400);
 	}
@@ -206,12 +99,9 @@ export const sendOtpEmail = async (to, otp) => {
 			from: fromAddress,
 			to,
 			subject: "Your Roomies verification code",
-			
-			
+
 			text: `Your Roomies verification code is: ${otp}\n\nThis code expires in 10 minutes. Do not share it with anyone.\n\nIf you did not request this code, you can safely ignore this email.`,
-			
-			
-			
+
 			html: `
 <!DOCTYPE html>
 <html lang="en">
@@ -277,10 +167,6 @@ export const sendOtpEmail = async (to, otp) => {
 			`,
 		});
 
-		
-		
-		
-		
 		const previewUrl = nodemailer.getTestMessageUrl(info);
 		if (previewUrl) {
 			logger.info(
@@ -288,21 +174,16 @@ export const sendOtpEmail = async (to, otp) => {
 				"OTP email sent — open preview URL to read the code",
 			);
 		} else {
-			
-			
 			logger.info({ to: maskedTo, messageId: info.messageId, provider: config.EMAIL_PROVIDER }, "OTP email sent");
 		}
 
 		return info.messageId;
 	} catch (err) {
-		
-		
 		logger.error(
 			{
 				to: maskedTo,
 				provider: config.EMAIL_PROVIDER,
-				
-				
+
 				errCode: err.code,
 				errMessage: err.message,
 			},
@@ -312,15 +193,6 @@ export const sendOtpEmail = async (to, otp) => {
 		throw new AppError("Failed to send OTP email — try again shortly", 502);
 	}
 };
-
-
-
-
-
-
-
-
-
 
 export const sendVerificationApprovedEmail = async (to, ownerName, businessName) => {
 	if (!to || typeof to !== "string" || !to.includes("@")) {
@@ -444,10 +316,6 @@ export const sendVerificationApprovedEmail = async (to, ownerName, businessName)
 		throw new AppError("Failed to send verification approved email — try again shortly", 502);
 	}
 };
-
-
-
-
 
 export const sendVerificationRejectedEmail = async (to, ownerName, rejectionReason) => {
 	if (!to || typeof to !== "string" || !to.includes("@")) {
@@ -583,12 +451,6 @@ export const sendVerificationRejectedEmail = async (to, ownerName, rejectionReas
 	}
 };
 
-
-
-
-
-
-
 export const sendVerificationPendingEmail = async (to, ownerName, businessName) => {
 	if (!to || typeof to !== "string" || !to.includes("@")) {
 		throw new AppError("Invalid recipient email address", 400);
@@ -714,27 +576,34 @@ export const sendVerificationPendingEmail = async (to, ownerName, businessName) 
 	}
 };
 
-
-
-
 const sendViaBrevoAPI = async (to, subject, html, text) => {
 	const maskedTo = maskEmail(to);
 	logger.info({ to: maskedTo, provider: "brevo-api" }, "Sending email via Brevo REST API");
 
-	const response = await fetch("https://api.brevo.com/v3/smtp/email", {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			"api-key": config.BREVO_API_KEY,
-		},
-		body: JSON.stringify({
-			sender: { name: "Roomies", email: config.BREVO_SMTP_FROM },
-			to: [{ email: to }],
-			subject,
-			htmlContent: html,
-			textContent: text,
-		}),
-	});
+	let response;
+	try {
+		response = await fetch("https://api.brevo.com/v3/smtp/email", {
+			method: "POST",
+			signal: AbortSignal.timeout(15_000),
+			headers: {
+				"Content-Type": "application/json",
+				"api-key": config.BREVO_API_KEY,
+			},
+			body: JSON.stringify({
+				sender: { name: "Roomies", email: config.BREVO_SMTP_FROM },
+				to: [{ email: to }],
+				subject,
+				htmlContent: html,
+				textContent: text,
+			}),
+		});
+	} catch (err) {
+		if (err.name === "TimeoutError" || err.name === "AbortError") {
+			logger.error({ to: maskedTo }, "Brevo API: request timed out after 15s");
+			throw new AppError("Email delivery timed out — try again shortly", 504);
+		}
+		throw new AppError("Failed to send email via Brevo API — try again shortly", 502);
+	}
 
 	if (!response.ok) {
 		const errorBody = await response.json().catch(() => ({}));

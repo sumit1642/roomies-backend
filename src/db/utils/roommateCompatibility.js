@@ -53,7 +53,7 @@ export const scoreUsersForUser = async (requestingUserId, candidateIds, client =
        FROM user_preferences
        WHERE user_id = ANY($1::uuid[])
        GROUP BY user_id`,
-			[[requestingUserId, ...candidateIds]],
+			[requestingUserId, ...candidateIds],
 		);
 
 		const myCount = countRows.find((r) => r.user_id === requestingUserId)?.pref_count ?? 0;

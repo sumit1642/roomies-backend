@@ -4,9 +4,11 @@ import { logger } from "../logger/index.js";
 
 const { Pool } = pg;
 
+const DB_POOL_MAX = Number(process.env.DB_POOL_MAX) || 10;
+
 export const pool = new Pool({
 	connectionString: config.DATABASE_URL,
-	max: 5,
+	max: DB_POOL_MAX,
 	idleTimeoutMillis: 30_000,
 	connectionTimeoutMillis: 5_000,
 });

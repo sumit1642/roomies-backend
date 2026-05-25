@@ -1,19 +1,5 @@
-
-
-
-
-
-
-
-
-
 import { z } from "zod";
 import { keysetPaginationQuerySchema } from "./pagination.validators.js";
-
-
-
-
-
 
 export const submitReportSchema = z.object({
 	params: z.object({
@@ -27,21 +13,9 @@ export const submitReportSchema = z.object({
 	}),
 });
 
-
-
-
-
-
 export const getReportQueueSchema = z.object({
 	query: keysetPaginationQuerySchema,
 });
-
-
-
-
-
-
-
 
 export const resolveReportSchema = z.object({
 	params: z.object({
