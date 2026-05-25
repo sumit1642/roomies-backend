@@ -20,4 +20,10 @@ reportRouter.get("/queue", authenticate, ...requireAdmin, validate(getReportQueu
 
 // PATCH /reports/:reportId/resolve — admin marks a report as resolved
 // Body: { resolution: 'resolved_kept' | 'resolved_removed', adminNotes?: string }
-reportRouter.patch("/:reportId/resolve", authenticate, ...requireAdmin, validate(resolveReportSchema), rc.resolveReport);
+reportRouter.patch(
+	"/:reportId/resolve",
+	authenticate,
+	...requireAdmin,
+	validate(resolveReportSchema),
+	rc.resolveReport,
+);

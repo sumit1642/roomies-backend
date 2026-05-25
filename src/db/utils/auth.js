@@ -1,5 +1,3 @@
-
-
 import { pool } from "../client.js";
 
 export const findUserById = async (id, client = pool) => {
@@ -35,8 +33,6 @@ export const findUserById = async (id, client = pool) => {
 		user.roles = user.roles === "{}" ? [] : user.roles.replace(/^{|}$/g, "").split(",");
 	}
 	return user;
-
-	
 };
 
 export const findUserByEmail = async (email, client = pool) => {
@@ -56,21 +52,6 @@ export const findUserByEmail = async (email, client = pool) => {
 	);
 	return rows[0] ?? null;
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 export const findUserByGoogleId = async (googleId, client = pool) => {
 	const { rows } = await client.query(

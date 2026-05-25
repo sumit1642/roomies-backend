@@ -1,7 +1,6 @@
 // src/services/rentIndex.service.js
 //
 
-
 import { pool } from "../db/client.js";
 import { AppError } from "../middleware/errorHandler.js";
 

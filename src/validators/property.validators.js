@@ -1,13 +1,6 @@
-
-
 import { z } from "zod";
 
-
-
 const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/;
-
-
-
 
 const isValidISO8601 = (s) => {
 	if (!ISO_8601_RE.test(s)) return false;
@@ -15,15 +8,11 @@ const isValidISO8601 = (s) => {
 	return !Number.isNaN(ms);
 };
 
-
-
 const toOptionalNumber = (val) => {
 	if (val === null) return undefined;
 	if (typeof val === "string" && val.trim() === "") return undefined;
 	return val;
 };
-
-
 
 const coordinateSchema = (min, max, label) =>
 	z.preprocess(

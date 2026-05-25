@@ -1,27 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import { Worker } from "bullmq";
 import { logger } from "../logger/index.js";
 import { bullConnection } from "./bullConnection.js";
@@ -33,43 +9,23 @@ import {
 	sendVerificationPendingEmail,
 } from "../services/email.service.js";
 
-
-
-
-
-
-
-
-
-
 const EMAIL_HANDLERS = {
-	
 	otp: async ({ to, data }) => {
 		await sendOtpEmail(to, data.otp);
 	},
 
-	
-	
-	
 	verification_approved: async ({ to, data }) => {
 		await sendVerificationApprovedEmail(to, data.ownerName, data.businessName);
 	},
 
-	
-	
 	verification_rejected: async ({ to, data }) => {
 		await sendVerificationRejectedEmail(to, data.ownerName, data.rejectionReason);
 	},
 
-	
-	
-	
 	verification_pending: async ({ to, data }) => {
 		await sendVerificationPendingEmail(to, data.ownerName, data.businessName);
 	},
 };
-
-
 
 export const startEmailWorker = () => {
 	const worker = new Worker(
@@ -85,9 +41,6 @@ export const startEmailWorker = () => {
 			const handler = EMAIL_HANDLERS[type];
 
 			if (!handler) {
-				
-				
-				
 				logger.warn(
 					{ type, jobId: job.id },
 					"Email worker: no handler registered for this email type — job completed without sending. " +
@@ -96,7 +49,6 @@ export const startEmailWorker = () => {
 				return;
 			}
 
-			
 			await handler({ to, data: data ?? {} });
 
 			logger.info({ type, to: maskEmailForLog(to), jobId: job.id }, "Email worker: email sent successfully");
@@ -112,7 +64,6 @@ export const startEmailWorker = () => {
 	});
 
 	worker.on("failed", (job, err) => {
-		
 		logger.error(
 			{ jobId: job?.id, type: job?.data?.type, to: maskEmailForLog(job?.data?.to), err },
 			"Email worker: job failed after all retry attempts — email was not delivered",
@@ -126,10 +77,6 @@ export const startEmailWorker = () => {
 	logger.info("Email delivery worker started");
 	return worker;
 };
-
-
-
-
 
 const maskEmailForLog = (email) => {
 	if (!email || typeof email !== "string") return "unknown";

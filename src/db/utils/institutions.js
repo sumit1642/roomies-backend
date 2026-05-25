@@ -1,20 +1,5 @@
 import { pool } from "../client.js";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 export const findInstitutionByDomain = async (domain, client = pool) => {
 	const { rows } = await client.query(
 		`

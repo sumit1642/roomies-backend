@@ -1,15 +1,8 @@
-
-
 import { z } from "zod";
-
 
 export const getFeedSchema = z.object({
 	query: z
 		.object({
-			
-			
-			
-			
 			isRead: z
 				.preprocess((val) => {
 					if (typeof val === "string") {
@@ -39,12 +32,6 @@ export const getFeedSchema = z.object({
 			{ error: "cursorTime and cursorId must be provided together" },
 		),
 });
-
-
-
-
-
-
 
 export const markReadSchema = z.object({
 	body: z

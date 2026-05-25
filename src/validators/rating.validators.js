@@ -1,10 +1,5 @@
-
-
 import { z } from "zod";
 import { keysetPaginationQuerySchema } from "./pagination.validators.js";
-
-
-
 
 const dimensionScoreSchema = z.coerce
 	.number()
@@ -12,7 +7,6 @@ const dimensionScoreSchema = z.coerce
 	.min(1, { error: "Score must be between 1 and 5" })
 	.max(5, { error: "Score must be between 1 and 5" })
 	.optional();
-
 
 export const submitRatingSchema = z.object({
 	body: z.object({
@@ -44,13 +38,11 @@ export const submitRatingSchema = z.object({
 	}),
 });
 
-
 export const getRatingsForConnectionSchema = z.object({
 	params: z.object({
 		connectionId: z.uuid({ error: "Invalid connection ID" }),
 	}),
 });
-
 
 export const getPublicRatingsSchema = z.object({
 	params: z.object({
@@ -59,11 +51,9 @@ export const getPublicRatingsSchema = z.object({
 	query: keysetPaginationQuerySchema,
 });
 
-
 export const getMyGivenRatingsSchema = z.object({
 	query: keysetPaginationQuerySchema,
 });
-
 
 export const getPublicPropertyRatingsSchema = z.object({
 	params: z.object({

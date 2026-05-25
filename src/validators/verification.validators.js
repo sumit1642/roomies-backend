@@ -1,13 +1,5 @@
-
-
 import { z } from "zod";
 import { keysetPaginationQuerySchema } from "./pagination.validators.js";
-
-
-
-
-
-
 
 export const submitDocumentSchema = z.object({
 	params: z.object({
@@ -21,18 +13,9 @@ export const submitDocumentSchema = z.object({
 	}),
 });
 
-
-
-
-
-
-
 export const getQueueSchema = z.object({
 	query: keysetPaginationQuerySchema,
 });
-
-
-
 
 export const approveRequestSchema = z.object({
 	params: z.object({
@@ -42,9 +25,6 @@ export const approveRequestSchema = z.object({
 		adminNotes: z.string().max(1000).optional(),
 	}),
 });
-
-
-
 
 export const rejectRequestSchema = z.object({
 	params: z.object({

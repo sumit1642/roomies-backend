@@ -1,5 +1,3 @@
-
-
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { authorize } from "../middleware/authorize.js";
@@ -14,27 +12,7 @@ import * as propertyController from "../controllers/property.controller.js";
 
 export const propertyRouter = Router();
 
-
-
-
-
-
-
 propertyRouter.get("/:propertyId", authenticate, validate(propertyParamsSchema), propertyController.getProperty);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 propertyRouter.get(
 	"/",

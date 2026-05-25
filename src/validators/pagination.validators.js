@@ -1,4 +1,3 @@
-
 import { z } from "zod";
 
 export const strictCursorTimeSchema = z.iso.datetime({ offset: true }).optional();

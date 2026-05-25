@@ -1,7 +1,4 @@
-
-
 import * as notificationService from "../services/notification.service.js";
-
 
 export const getFeed = async (req, res, next) => {
 	try {
@@ -12,7 +9,6 @@ export const getFeed = async (req, res, next) => {
 	}
 };
 
-
 export const getUnreadCount = async (req, res, next) => {
 	try {
 		const result = await notificationService.getUnreadCount(req.user.userId);
@@ -21,7 +17,6 @@ export const getUnreadCount = async (req, res, next) => {
 		next(err);
 	}
 };
-
 
 export const markRead = async (req, res, next) => {
 	try {

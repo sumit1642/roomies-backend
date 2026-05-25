@@ -1,27 +1,17 @@
-
-
 import * as interestService from "../services/interest.service.js";
 
 export const createInterestRequest = async (req, res, next) => {
 	try {
-		
-		
-		
-		
 		const result = await interestService.createInterestRequest(
 			req.user.userId,
 			req.params.listingId,
-			req.body ?? {}, 
+			req.body ?? {},
 		);
 		res.status(201).json({ status: "success", data: result });
 	} catch (err) {
 		next(err);
 	}
 };
-
-
-
-
 
 export const getInterestRequest = async (req, res, next) => {
 	try {

@@ -1,5 +1,3 @@
-
-
 import * as listingService from "../services/listing.service.js";
 
 export const createListing = async (req, res, next) => {
@@ -19,8 +17,6 @@ export const getListing = async (req, res, next) => {
 		next(err);
 	}
 };
-
-
 
 export const searchListings = async (req, res, next) => {
 	try {

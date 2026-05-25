@@ -29,7 +29,7 @@ const NOTIFICATION_MESSAGES = {
 	new_message: "You have a new message",
 
 	connection_requested: "You have a new connection request",
-	
+
 	saved_search_alert: "A new listing matches your saved search",
 };
 

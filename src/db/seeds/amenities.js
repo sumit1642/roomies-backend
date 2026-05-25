@@ -1,61 +1,8 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-import "../../../src/config/env.js"; 
+import "../../../src/config/env.js";
 import { pool } from "../client.js";
 import { logger } from "../../logger/index.js";
 
-
-
-
-
-
-
-
-
-
-
-
 const AMENITIES = [
-	
 	{ name: "WiFi", category: "utility", icon_name: "wifi" },
 	{ name: "Power Backup", category: "utility", icon_name: "power-backup" },
 	{ name: "24-Hour Water Supply", category: "utility", icon_name: "water-supply" },
@@ -63,14 +10,12 @@ const AMENITIES = [
 	{ name: "Laundry", category: "utility", icon_name: "laundry" },
 	{ name: "Housekeeping", category: "utility", icon_name: "housekeeping" },
 
-	
 	{ name: "CCTV Surveillance", category: "safety", icon_name: "cctv" },
 	{ name: "Security Guard", category: "safety", icon_name: "security-guard" },
 	{ name: "Gated Entry", category: "safety", icon_name: "gated-entry" },
 	{ name: "Biometric / Key-Card Access", category: "safety", icon_name: "biometric-access" },
 	{ name: "Fire Safety Equipment", category: "safety", icon_name: "fire-safety" },
 
-	
 	{ name: "Air Conditioning", category: "comfort", icon_name: "air-conditioning" },
 	{ name: "Ceiling Fan", category: "comfort", icon_name: "ceiling-fan" },
 	{ name: "Attached Bathroom", category: "comfort", icon_name: "attached-bathroom" },
@@ -84,16 +29,10 @@ const AMENITIES = [
 const seed = async () => {
 	logger.info(`Seeding ${AMENITIES.length} amenities…`);
 
-	
-	
-	
 	const placeholders = AMENITIES.map((_, i) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`).join(", ");
 
 	const values = AMENITIES.flatMap(({ name, category, icon_name }) => [name, category, icon_name]);
 
-	
-	
-	
 	const result = await pool.query(
 		`INSERT INTO amenities (name, category, icon_name)
      VALUES ${placeholders}
@@ -106,11 +45,6 @@ const seed = async () => {
 
 	logger.info({ inserted, skipped }, "Amenity seed complete");
 };
-
-
-
-
-
 
 seed()
 	.catch((err) => {

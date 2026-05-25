@@ -1,32 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { authorize } from "../middleware/authorize.js";
@@ -40,11 +11,6 @@ import * as interestController from "../controllers/interest.controller.js";
 
 export const interestRouter = Router();
 
-
-
-
-
-
 interestRouter.get(
 	"/me",
 	authenticate,
@@ -53,20 +19,7 @@ interestRouter.get(
 	interestController.getMyInterestRequests,
 );
 
-
-
-
-
-
-
-
 interestRouter.get("/:interestId", authenticate, validate(interestParamsSchema), interestController.getInterestRequest);
-
-
-
-
-
-
 
 interestRouter.patch(
 	"/:interestId/status",

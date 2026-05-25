@@ -20,13 +20,11 @@ export class AppError extends Error {
 	}
 }
 
-
 export const errorHandler = (err, req, res, next) => {
 	if (res.headersSent) {
 		return next(err);
 	}
 
-	
 	if (err.name === "ZodError") {
 		logger.warn(
 			{
@@ -49,8 +47,6 @@ export const errorHandler = (err, req, res, next) => {
 		});
 	}
 
-	
-	
 	if (err.name === "MulterError") {
 		if (err.code === "LIMIT_FILE_SIZE") {
 			logger.warn(
@@ -87,7 +83,6 @@ export const errorHandler = (err, req, res, next) => {
 			});
 		}
 
-		
 		logger.warn(
 			{
 				req: { method: req.method, url: req.url },

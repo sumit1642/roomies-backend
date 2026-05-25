@@ -1,15 +1,7 @@
-
-
-
-
-
 import { Router } from "express";
 import { pool } from "../db/client.js";
 
 export const amenitiesRouter = Router();
-
-
-
 
 amenitiesRouter.get("/", async (req, res, next) => {
 	try {

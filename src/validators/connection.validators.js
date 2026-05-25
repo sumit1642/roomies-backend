@@ -1,53 +1,10 @@
-
-
-
-
-
-
-
-
-
-
-
-
 import { z } from "zod";
-
-
-
-
-
-
-
 
 export const connectionParamsSchema = z.object({
 	params: z.object({
 		connectionId: z.uuid({ error: "Invalid connection ID" }),
 	}),
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 export const getMyConnectionsSchema = z.object({
 	query: z

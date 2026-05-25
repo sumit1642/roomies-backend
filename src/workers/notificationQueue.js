@@ -1,20 +1,6 @@
-
-
-
-
-
-
-
-
-
-
-
-
 import { getQueue } from "./queue.js";
 import { logger } from "../logger/index.js";
 import { NOTIFICATION_QUEUE_NAME } from "./notificationWorker.js";
-
-
 
 const JOB_OPTIONS = {
 	attempts: 5,

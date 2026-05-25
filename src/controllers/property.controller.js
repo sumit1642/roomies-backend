@@ -1,5 +1,3 @@
-
-
 import * as propertyService from "../services/property.service.js";
 
 export const createProperty = async (req, res, next) => {

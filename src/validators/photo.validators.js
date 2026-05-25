@@ -1,19 +1,4 @@
-
-
-
-
-
-
-
-
-
 import { z } from "zod";
-
-
-
-
-
-
 
 export const uploadPhotoSchema = z.object({
 	params: z.object({
@@ -27,22 +12,12 @@ export const uploadPhotoSchema = z.object({
 		.default({}),
 });
 
-
-
-
-
 export const deletePhotoSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
 		photoId: z.uuid({ error: "Invalid photo ID" }),
 	}),
 });
-
-
-
-
-
-
 
 export const reorderPhotosSchema = z.object({
 	params: z.object({
@@ -87,9 +62,6 @@ export const reorderPhotosSchema = z.object({
 			}),
 	}),
 });
-
-
-
 
 export const setCoverSchema = z.object({
 	params: z.object({

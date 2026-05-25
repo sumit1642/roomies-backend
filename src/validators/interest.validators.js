@@ -1,22 +1,5 @@
-
-
-
-
-
-
-
-
-
-
-
 import { z } from "zod";
 import { buildKeysetPaginationQuerySchema } from "./pagination.validators.js";
-
-
-
-
-
-
 
 export const createInterestSchema = z.object({
 	params: z.object({
@@ -30,29 +13,11 @@ export const createInterestSchema = z.object({
 		.default({}),
 });
 
-
-
-
-
-
-
 export const interestParamsSchema = z.object({
 	params: z.object({
 		interestId: z.uuid({ error: "Invalid interest request ID" }),
 	}),
 });
-
-
-
-
-
-
-
-
-
-
-
-
 
 export const updateInterestStatusSchema = z.object({
 	params: z.object({
@@ -65,13 +30,6 @@ export const updateInterestStatusSchema = z.object({
 	}),
 });
 
-
-
-
-
-
-
-
 export const getListingInterestsSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
@@ -80,12 +38,6 @@ export const getListingInterestsSchema = z.object({
 		status: z.enum(["pending", "accepted", "declined", "withdrawn", "expired"]).optional(),
 	}),
 });
-
-
-
-
-
-
 
 export const getMyInterestsSchema = z.object({
 	query: buildKeysetPaginationQuerySchema({

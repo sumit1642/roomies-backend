@@ -1,22 +1,5 @@
-
-
- 
 import { pool } from "../client.js";
 import { AppError } from "../../middleware/errorHandler.js";
- 
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 export const assertPgOwnerVerified = async (userId, client = pool) => {
 	const { rows } = await client.query(

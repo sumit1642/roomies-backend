@@ -15,12 +15,7 @@ export const verificationRouter = Router();
 
 // ── PG owner routes ────────────────────────────────────────────────────────────
 // A PG owner submits verification documents for their own profile
-verificationRouter.post(
-	"/:userId/submit",
-	authenticate,
-	authorize("pg_owner"),
-	vc.submitDocument,
-);
+verificationRouter.post("/:userId/submit", authenticate, authorize("pg_owner"), vc.submitDocument);
 
 // ── Admin routes ───────────────────────────────────────────────────────────────
 // GET /verification/queue — paginated list of pending verification requests

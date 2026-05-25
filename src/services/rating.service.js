@@ -1,19 +1,7 @@
-
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { enqueueNotification } from "../workers/notificationQueue.js";
-
-
-
-
-
-
-
-
-
-
 
 export const submitRating = async (reviewerId, data) => {
 	const {
@@ -32,7 +20,6 @@ export const submitRating = async (reviewerId, data) => {
 		throw new AppError("Invalid revieweeType: must be 'user' or 'property'", 400);
 	}
 
-	
 	if (revieweeType === "user") {
 		const { rows } = await pool.query(`SELECT 1 FROM users WHERE user_id = $1 AND deleted_at IS NULL`, [
 			revieweeId,
@@ -45,9 +32,6 @@ export const submitRating = async (reviewerId, data) => {
 		if (!rows.length) throw new AppError("Reviewee property not found", 404);
 	}
 
-	
-	
-	
 	let result;
 	if (revieweeType === "user") {
 		result = await pool.query(
@@ -83,8 +67,6 @@ export const submitRating = async (reviewerId, data) => {
 			],
 		);
 	} else {
-		
-		
 		result = await pool.query(
 			`WITH gate AS (
          SELECT p.owner_id
@@ -125,10 +107,6 @@ export const submitRating = async (reviewerId, data) => {
 		);
 	}
 
-	
-	
-	
-	
 	if (result.rowCount === 0) {
 		const { rows: connRows } = await pool.query(
 			`SELECT connection_id, confirmation_status
@@ -167,7 +145,6 @@ export const submitRating = async (reviewerId, data) => {
 
 	logger.info({ reviewerId, connectionId, revieweeType, revieweeId, ratingId, overallScore }, "Rating submitted");
 
-	
 	if (revieweeType === "user") {
 		enqueueNotification({
 			recipientId: revieweeId,
@@ -189,9 +166,6 @@ export const submitRating = async (reviewerId, data) => {
 
 	return { ratingId, createdAt };
 };
-
-
-
 
 export const getRatingsForConnection = async (callerId, connectionId) => {
 	const { rows: connRows } = await pool.query(
@@ -277,8 +251,6 @@ const buildNextCursor = (fetchedRows, limit) => {
 	};
 };
 
-
-
 export const getPublicRatings = async (userId, filters) => {
 	const { cursorTime, cursorId, limit = 20 } = filters;
 
@@ -354,9 +326,6 @@ export const getPublicRatings = async (userId, filters) => {
 		nextCursor,
 	};
 };
-
-
-
 
 export const getMyGivenRatings = async (reviewerId, filters) => {
 	const { cursorTime, cursorId, limit = 20 } = filters;
@@ -460,8 +429,6 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
 		nextCursor,
 	};
 };
-
-
 
 export const getPublicPropertyRatings = async (propertyId, filters) => {
 	const { rows: propRows } = await pool.query(

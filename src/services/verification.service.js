@@ -1,18 +1,6 @@
-
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
-
-
-
-
-
-
-
-
-
-
 
 const handleRollbackFailure = (
 	rollbackErr,
@@ -23,13 +11,7 @@ const handleRollbackFailure = (
 	logger.error({ rollbackErr, originalErr, ...context }, message);
 };
 
-
-
 export const submitDocument = async (requestingUserId, targetUserId, { documentType, documentUrl }) => {
-	
-	
-	
-	
 	if (requestingUserId !== targetUserId) {
 		throw new AppError("Forbidden", 403);
 	}
@@ -110,8 +92,6 @@ export const submitDocument = async (requestingUserId, targetUserId, { documentT
 	}
 };
 
-
-
 export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 
@@ -158,8 +138,6 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 
 	return { items, nextCursor };
 };
-
-
 
 export const approveRequest = async (adminUserId, requestId, { adminNotes } = {}) => {
 	const client = await pool.connect();

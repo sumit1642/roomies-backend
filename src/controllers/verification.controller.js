@@ -1,5 +1,3 @@
-
-
 import * as verificationService from "../services/verification.service.js";
 
 export const submitDocument = async (req, res, next) => {

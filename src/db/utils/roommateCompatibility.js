@@ -93,10 +93,7 @@ export const hasPreferences = async (userId, client = pool) => {
 		);
 		return rows[0].has_prefs === true;
 	} catch (err) {
-		logger.error(
-			{ err, userId },
-			"hasPreferences: DB error checking user preferences — returning false",
-		);
+		logger.error({ err, userId }, "hasPreferences: DB error checking user preferences — returning false");
 		return false;
 	}
 };

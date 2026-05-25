@@ -16,21 +16,10 @@ import * as authController from "../controllers/auth.controller.js";
 
 export const authRouter = Router();
 
-
-
 authRouter.post("/register", authLimiter, validate(registerSchema), authController.register);
 authRouter.post("/login", authLimiter, validate(loginSchema), authController.login);
 
-
-
-
-
-
-
 authRouter.post("/logout", validate(logoutCurrentSchema), authController.logout);
-
-
-
 
 authRouter.post("/logout/current", authenticate, validate(logoutCurrentSchema), authController.logout);
 
@@ -44,12 +33,7 @@ authRouter.delete(
 	authController.revokeSession,
 );
 
-
-
 authRouter.post("/refresh", authLimiter, validate(refreshSchema), authController.refresh);
-
-
-
 
 authRouter.post("/otp/send", otpLimiter, authenticate, authController.sendOtp);
 authRouter.post("/otp/verify", authenticate, validate(otpVerifySchema), authController.verifyOtp);

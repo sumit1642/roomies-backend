@@ -1,18 +1,4 @@
-
-
-
-
-
-
-
 import * as ratingService from "../services/rating.service.js";
-
-
-
-
-
-
-
 
 export const submitRating = async (req, res, next) => {
 	try {
@@ -23,10 +9,6 @@ export const submitRating = async (req, res, next) => {
 	}
 };
 
-
-
-
-
 export const getRatingsForConnection = async (req, res, next) => {
 	try {
 		const result = await ratingService.getRatingsForConnection(req.user.userId, req.params.connectionId);
@@ -35,10 +17,6 @@ export const getRatingsForConnection = async (req, res, next) => {
 		next(err);
 	}
 };
-
-
-
-
 
 export const getPublicRatings = async (req, res, next) => {
 	try {
@@ -49,9 +27,6 @@ export const getPublicRatings = async (req, res, next) => {
 	}
 };
 
-
-
-
 export const getMyGivenRatings = async (req, res, next) => {
 	try {
 		const result = await ratingService.getMyGivenRatings(req.user.userId, req.query);
@@ -60,10 +35,6 @@ export const getMyGivenRatings = async (req, res, next) => {
 		next(err);
 	}
 };
-
-
-
-
 
 export const getPublicPropertyRatings = async (req, res, next) => {
 	try {

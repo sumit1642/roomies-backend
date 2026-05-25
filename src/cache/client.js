@@ -1,5 +1,3 @@
-
-
 import { createClient } from "redis";
 import { config } from "../config/env.js";
 import { logger } from "../logger/index.js";

@@ -1,57 +1,12 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 
 const UUID_V1_TO_V5_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-
-
-
-
-
-
-
-
-
-
-
-
 export const getFeed = async (userId, filters) => {
 	const { isRead, cursorTime, cursorId, limit: rawLimit = 20 } = filters;
-	const limit = Math.min(Math.max(1, rawLimit), 100); 
+	const limit = Math.min(Math.max(1, rawLimit), 100);
 
 	const clauses = [`n.recipient_id = $1`, `n.deleted_at IS NULL`];
 	const params = [userId];
@@ -65,10 +20,6 @@ export const getFeed = async (userId, filters) => {
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (hasCursor) {
-		
-		
-		
-		
 		clauses.push(`(n.created_at < $${p} OR (n.created_at = $${p} AND n.notification_id > $${p + 1}::uuid))`);
 		params.push(cursorTime, cursorId);
 		p += 2;
@@ -120,16 +71,6 @@ export const getFeed = async (userId, filters) => {
 	};
 };
 
-
-
-
-
-
-
-
-
-
-
 export const getUnreadCount = async (userId) => {
 	const { rows } = await pool.query(
 		`SELECT COUNT(*)::int AS count
@@ -142,24 +83,6 @@ export const getUnreadCount = async (userId) => {
 
 	return { count: rows[0].count };
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 export const markRead = async (userId, { notificationIds, all }) => {
 	if (all === true) {
@@ -186,8 +109,6 @@ export const markRead = async (userId, { notificationIds, all }) => {
 		}
 	}
 
-	
-	
 	const { rowCount } = await pool.query(
 		`UPDATE notifications
      SET is_read = TRUE

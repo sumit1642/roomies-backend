@@ -1,13 +1,8 @@
-
-
-
-
 import { pool } from "../client.js";
-
 
 export const scoreListingsForUser = async (userId, listingIds, client = pool) => {
 	if (!listingIds.length) return {};
- 
+
 	const { rows } = await client.query(
 		`SELECT
        lp.listing_id,
@@ -21,7 +16,7 @@ export const scoreListingsForUser = async (userId, listingIds, client = pool) =>
      GROUP BY lp.listing_id`,
 		[listingIds, userId],
 	);
- 
+
 	return rows.reduce((acc, row) => {
 		acc[row.listing_id] = row.match_count;
 		return acc;

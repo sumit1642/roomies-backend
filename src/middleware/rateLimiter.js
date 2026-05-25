@@ -1,26 +1,8 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import rateLimit from "express-rate-limit";
 import { RedisStore } from "rate-limit-redis";
 import { createClient } from "redis";
 import { config } from "../config/env.js";
 import { logger } from "../logger/index.js";
-
 
 const rateLimitRedisClient = createClient({
 	url: config.REDIS_URL,
@@ -54,11 +36,6 @@ rateLimitRedisClient.connect().catch((err) => {
 	);
 });
 
-
-
-
-
-
 export const closeRateLimitRedisClient = async () => {
 	try {
 		await rateLimitRedisClient.quit();
@@ -68,13 +45,11 @@ export const closeRateLimitRedisClient = async () => {
 	}
 };
 
-
 const makeRedisStore = (prefix) =>
 	new RedisStore({
 		sendCommand: (...args) => rateLimitRedisClient.sendCommand(args),
 		prefix,
 	});
-
 
 export const otpLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
@@ -89,7 +64,6 @@ export const otpLimiter = rateLimit({
 	},
 });
 
-
 export const authLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	max: 10,
@@ -102,10 +76,6 @@ export const authLimiter = rateLimit({
 		message: "Too many requests — please wait 15 minutes before trying again",
 	},
 });
-
-
-
-
 
 export const publicRatingsLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,

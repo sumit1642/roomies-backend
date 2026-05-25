@@ -1,20 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { publicRatingsLimiter } from "../middleware/rateLimiter.js";
@@ -32,12 +15,7 @@ import * as reportController from "../controllers/report.controller.js";
 
 export const ratingRouter = Router();
 
-
-
 ratingRouter.get("/me/given", authenticate, validate(getMyGivenRatingsSchema), ratingController.getMyGivenRatings);
-
-
-
 
 ratingRouter.get(
 	"/user/:userId",
@@ -61,16 +39,5 @@ ratingRouter.get(
 );
 
 ratingRouter.post("/", authenticate, validate(submitRatingSchema), ratingController.submitRating);
-
-
-
-
-
-
-
-
-
-
-
 
 ratingRouter.post("/:ratingId/report", authenticate, validate(submitReportSchema), reportController.submitReport);

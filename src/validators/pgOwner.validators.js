@@ -1,7 +1,4 @@
-
-
 import { z } from "zod";
-
 
 export const getPgOwnerParamsSchema = z.object({
 	params: z.object({
@@ -20,14 +17,12 @@ export const updatePgOwnerSchema = z.object({
 		businessPhone: z
 			.string()
 			.max(20)
-			
-			
-			
+
 			.regex(/^\+?[0-9]{7,15}$/, {
 				error: "Must be a valid phone number (digits only, 7–15 characters, optional leading +)",
 			})
 			.optional(),
-		
+
 		operatingSince: z.coerce
 			.number()
 			.int()

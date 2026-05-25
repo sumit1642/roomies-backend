@@ -1,13 +1,7 @@
-
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { enqueueNotification } from "../workers/notificationQueue.js";
-
-
-
-
 
 export const confirmConnection = async (callerId, connectionId) => {
 	let client;
@@ -18,9 +12,6 @@ export const confirmConnection = async (callerId, connectionId) => {
 		client = await pool.connect();
 		await client.query("BEGIN");
 
-		
-		
-		
 		const { rows: prevRows } = await client.query(
 			`SELECT confirmation_status
        FROM connections
@@ -38,8 +29,6 @@ export const confirmConnection = async (callerId, connectionId) => {
 
 		previousStatus = prevRows[0].confirmation_status;
 
-		
-		
 		const { rows } = await client.query(
 			`UPDATE connections
        SET
@@ -74,9 +63,6 @@ export const confirmConnection = async (callerId, connectionId) => {
 			[connectionId, callerId],
 		);
 
-		
-		
-		
 		if (!rows.length) {
 			await client.query("ROLLBACK");
 			throw new AppError("Connection not found", 404);
@@ -88,9 +74,7 @@ export const confirmConnection = async (callerId, connectionId) => {
 		if (client) {
 			try {
 				await client.query("ROLLBACK");
-			} catch (_) {
-				
-			}
+			} catch (_) {}
 		}
 		throw err;
 	} finally {
@@ -135,10 +119,6 @@ export const confirmConnection = async (callerId, connectionId) => {
 		updatedAt: conn.updated_at,
 	};
 };
-
-
-
-
 
 export const getConnection = async (callerId, connectionId) => {
 	const { rows } = await pool.query(
@@ -239,12 +219,9 @@ export const getConnection = async (callerId, connectionId) => {
 	};
 };
 
-
-
-
 export const getMyConnections = async (userId, filters) => {
 	const { confirmationStatus, connectionType, cursorTime, cursorId, limit: rawLimit = 20 } = filters;
-	const limit = Math.min(Math.max(1, rawLimit), 100); 
+	const limit = Math.min(Math.max(1, rawLimit), 100);
 
 	const clauses = [`(c.initiator_id = $1 OR c.counterpart_id = $1)`, `c.deleted_at IS NULL`];
 	const params = [userId];

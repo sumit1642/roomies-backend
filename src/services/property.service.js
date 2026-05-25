@@ -1,5 +1,3 @@
-
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
@@ -15,8 +13,6 @@ const bulkInsertAmenities = async (client, propertyId, amenityIds) => {
 		values,
 	);
 };
-
-
 
 const LOCATION_CASCADE_MAP = {
 	city: "city",
@@ -72,7 +68,6 @@ const fetchPropertyWithAmenities = async (propertyId, client = pool) => {
 	);
 	return rows[0] ?? null;
 };
-
 
 export const createProperty = async (ownerId, body) => {
 	await assertOwnerVerified(ownerId);
@@ -138,7 +133,6 @@ export const createProperty = async (ownerId, body) => {
 	}
 };
 
-
 export const getProperty = async (propertyId) => {
 	const property = await fetchPropertyWithAmenities(propertyId);
 	if (!property) {
@@ -146,7 +140,6 @@ export const getProperty = async (propertyId) => {
 	}
 	return property;
 };
-
 
 export const listProperties = async (ownerId, { cursorTime, cursorId, limit = 20 }) => {
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
@@ -205,9 +198,6 @@ export const listProperties = async (ownerId, { cursorTime, cursorId, limit = 20
 
 	return { items, nextCursor };
 };
-
-
-
 
 export const updateProperty = async (ownerId, propertyId, body) => {
 	await assertOwnerVerified(ownerId);
@@ -336,14 +326,6 @@ export const updateProperty = async (ownerId, propertyId, body) => {
 	}
 };
 
-
-
-
-
-
-
-
-
 export const deleteProperty = async (ownerId, propertyId) => {
 	await assertOwnerVerified(ownerId);
 
@@ -351,7 +333,6 @@ export const deleteProperty = async (ownerId, propertyId) => {
 	try {
 		await client.query("BEGIN");
 
-		
 		const { rows: propertyRows } = await client.query(
 			`SELECT property_id
        FROM properties
@@ -366,7 +347,6 @@ export const deleteProperty = async (ownerId, propertyId) => {
 			throw new AppError("Property not found", 404);
 		}
 
-		
 		await client.query(
 			`SELECT listing_id
        FROM listings
@@ -376,9 +356,6 @@ export const deleteProperty = async (ownerId, propertyId) => {
 			[propertyId],
 		);
 
-		
-		
-		
 		const { rows: activeListingRows } = await client.query(
 			`SELECT 1
        FROM listings
@@ -394,7 +371,6 @@ export const deleteProperty = async (ownerId, propertyId) => {
 			throw new AppError("Deactivate or remove all active listings before deleting this property", 409);
 		}
 
-		
 		await client.query(
 			`UPDATE properties
        SET deleted_at = NOW()

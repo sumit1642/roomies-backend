@@ -1,5 +1,3 @@
-
-
 import { Router } from "express";
 import { pool } from "../db/client.js";
 import { redis } from "../cache/client.js";
@@ -9,44 +7,23 @@ export const healthRouter = Router();
 
 const PROBE_TIMEOUT_MS = 3000;
 
-
-
-
-
-
-
-
-
-
-
-
-
 const isTimeoutError = (err) => {
 	if (!err) return false;
 
-	
 	if (err.code === "ETIMEDOUT" || err.code === "ECONNABORTED" || err.code === "ESOCKETTIMEDOUT") {
 		return true;
 	}
 
-	
 	if (err.name === "TimeoutError" || err.name === "AbortError") {
 		return true;
 	}
 
-	
-	
-	
 	if (typeof err.message === "string" && /timed?\s*out/i.test(err.message)) {
 		return true;
 	}
 
 	return false;
 };
-
-
-
-
 
 const withTimeout = (promise, label) => {
 	let timeoutId;
@@ -62,12 +39,6 @@ const withTimeout = (promise, label) => {
 
 	return Promise.race([guardedPromise, timeoutPromise]);
 };
-
-
-
-
-
-
 
 healthRouter.get("/", async (req, res) => {
 	const health = {

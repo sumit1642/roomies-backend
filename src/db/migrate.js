@@ -1,50 +1,9 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import pg from "pg";
 import dotenv from "dotenv";
-
-
-
 
 const envFile = process.env.ENV_FILE;
 if (envFile) {
@@ -60,23 +19,16 @@ if (!process.env.DATABASE_URL) {
 	process.exit(1);
 }
 
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.resolve(__dirname, "../../migrations");
-
 
 const args = new Set(process.argv.slice(2));
 const DRY_RUN = args.has("--dry-run");
 const STATUS_ONLY = args.has("--status");
 
-
-
 const sha256 = (content) => crypto.createHash("sha256").update(content, "utf8").digest("hex");
 
 const pad = (str, width) => str.toString().padEnd(width);
-
-
-
 
 const ENSURE_MIGRATIONS_TABLE = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -86,8 +38,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 `;
 
-
-
 const run = async () => {
 	const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
 
@@ -95,21 +45,17 @@ const run = async () => {
 		await client.connect();
 		console.log("✅  Connected to database");
 
-		
 		await client.query(ENSURE_MIGRATIONS_TABLE);
 
-		
 		const { rows: appliedRows } = await client.query(
 			`SELECT filename, checksum FROM schema_migrations ORDER BY filename`,
 		);
 		const applied = new Map(appliedRows.map((r) => [r.filename, r.checksum]));
 
-		
-		
 		let files;
 		try {
 			const entries = await fs.readdir(MIGRATIONS_DIR);
-			files = entries.filter((f) => f.endsWith(".sql")).sort(); 
+			files = entries.filter((f) => f.endsWith(".sql")).sort();
 		} catch (err) {
 			console.error(`❌  Cannot read migrations directory: ${MIGRATIONS_DIR}`);
 			console.error(`    Make sure the migrations/ folder exists at the project root.`);
@@ -121,12 +67,9 @@ const run = async () => {
 			return;
 		}
 
-		
-		
-		
 		let checksumViolation = false;
 		for (const file of files) {
-			if (!applied.has(file)) continue; 
+			if (!applied.has(file)) continue;
 
 			const filePath = path.join(MIGRATIONS_DIR, file);
 			const content = await fs.readFile(filePath, "utf8");
@@ -144,7 +87,6 @@ const run = async () => {
 		}
 		if (checksumViolation) process.exit(1);
 
-		
 		if (STATUS_ONLY) {
 			console.log("\nMigration status:\n");
 			console.log(`${pad("File", 45)} ${pad("Status", 12)} Applied at`);
@@ -159,7 +101,6 @@ const run = async () => {
 			return;
 		}
 
-		
 		const pending = files.filter((f) => !applied.has(f));
 
 		if (pending.length === 0) {
@@ -176,7 +117,6 @@ const run = async () => {
 			return;
 		}
 
-		
 		for (const file of pending) {
 			const filePath = path.join(MIGRATIONS_DIR, file);
 			const content = await fs.readFile(filePath, "utf8");
@@ -185,9 +125,6 @@ const run = async () => {
 			process.stdout.write(`  Applying ${file} ... `);
 
 			try {
-				
-				
-				
 				await client.query("BEGIN");
 				await client.query(content);
 				await client.query(
@@ -199,12 +136,9 @@ const run = async () => {
 
 				console.log("✅");
 			} catch (err) {
-				
 				try {
 					await client.query("ROLLBACK");
-				} catch (_) {
-					
-				}
+				} catch (_) {}
 
 				console.log("❌");
 				console.error(`\nMigration failed: ${file}`);

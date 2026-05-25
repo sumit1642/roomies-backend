@@ -1,13 +1,4 @@
-
-
 import * as connectionService from "../services/connection.service.js";
-
-
-
-
-
-
-
 
 export const confirmConnection = async (req, res, next) => {
 	try {
@@ -18,11 +9,6 @@ export const confirmConnection = async (req, res, next) => {
 	}
 };
 
-
-
-
-
-
 export const getConnection = async (req, res, next) => {
 	try {
 		const result = await connectionService.getConnection(req.user.userId, req.params.connectionId);
@@ -31,10 +17,6 @@ export const getConnection = async (req, res, next) => {
 		next(err);
 	}
 };
-
-
-
-
 
 export const getMyConnections = async (req, res, next) => {
 	try {

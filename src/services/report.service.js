@@ -1,12 +1,6 @@
-
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
-
-
-
-
 
 export const submitReport = async (reporterId, ratingId, { reason, explanation }) => {
 	const { rows } = await pool.query(
@@ -40,9 +34,6 @@ export const submitReport = async (reporterId, ratingId, { reason, explanation }
 		createdAt: report.created_at,
 	};
 };
-
-
-
 
 export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
@@ -202,15 +193,6 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	};
 };
 
-
-
-
-
-
-
-
-
-
 export const resolveReport = async (adminId, reportId, { resolution, adminNotes }) => {
 	const validResolutions = ["resolved_removed", "resolved_kept"];
 	if (!validResolutions.includes(resolution)) {
@@ -224,8 +206,7 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 	const client = await pool.connect();
 
 	let ratingId;
-	
-	
+
 	let ratingWasAlreadySoftDeleted = false;
 
 	try {
@@ -251,8 +232,6 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 		ratingId = reportRows[0].rating_id;
 
 		if (resolution === "resolved_removed") {
-			
-			
 			const { rowCount: ratingRowCount } = await client.query(
 				`UPDATE ratings
          SET is_visible = FALSE
@@ -262,9 +241,6 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 			);
 
 			if (ratingRowCount === 0) {
-				
-				
-				
 				const { rows: ratingCheck } = await client.query(
 					`SELECT deleted_at FROM ratings WHERE rating_id = $1`,
 					[ratingId],
@@ -277,16 +253,12 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 					);
 				}
 
-				
-				
 				ratingWasAlreadySoftDeleted = true;
 			}
 		}
 
 		await client.query("COMMIT");
 
-		
-		
 		if (ratingWasAlreadySoftDeleted) {
 			logger.info(
 				{ adminId, reportId, ratingId },

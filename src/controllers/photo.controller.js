@@ -1,5 +1,3 @@
-
-
 import * as photoService from "../services/photo.service.js";
 import { rm } from "node:fs/promises";
 import { UPLOAD_FIELD_NAME } from "../config/constants.js";
@@ -9,7 +7,6 @@ const cleanupStagedFile = async (filePath) => {
 	try {
 		await rm(filePath, { force: true });
 	} catch (cleanupErr) {
-		
 		logger.warn({ msg: "Failed to cleanup staged file", filePath, err: cleanupErr });
 	}
 };
@@ -26,12 +23,10 @@ export const uploadPhoto = async (req, res, next) => {
 		const result = await photoService.enqueuePhotoUpload(
 			req.user.userId,
 			req.params.listingId,
-			req.file.path, 
-			req.body.displayOrder, 
+			req.file.path,
+			req.body.displayOrder,
 		);
 
-		
-		
 		res.status(202).json({ status: "success", data: result });
 	} catch (err) {
 		await cleanupStagedFile(req.file?.path);

@@ -1,31 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 const GUEST_MAX_LISTINGS_PER_REQUEST = 20;
 
 export const guestListingGate = (req, res, next) => {

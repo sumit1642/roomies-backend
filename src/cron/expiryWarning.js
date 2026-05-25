@@ -1,5 +1,3 @@
-
-
 import cron from "node-cron";
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
@@ -7,10 +5,7 @@ import { enqueueNotification } from "../workers/notificationQueue.js";
 
 const SCHEDULE = process.env.CRON_EXPIRY_WARNING ?? "0 1 * * *";
 const WARNING_WINDOW_DAYS = 7;
-const ADVISORY_LOCK_KEY = 7001; 
-
-
-
+const ADVISORY_LOCK_KEY = 7001;
 
 const buildIdempotencyKey = (listingId, utcDateStr) => `expiry_warning:${listingId}:${utcDateStr}`;
 
@@ -18,15 +13,10 @@ const runExpiryWarning = async () => {
 	const startedAt = Date.now();
 	logger.info("cron:expiryWarning — starting run");
 
-	
 	const today = new Date().toISOString().slice(0, 10);
 
 	const client = await pool.connect();
 	try {
-		
-		
-		
-		
 		await client.query("BEGIN");
 
 		const { rows: lockRows } = await client.query("SELECT pg_try_advisory_xact_lock($1) AS acquired", [
@@ -42,11 +32,6 @@ const runExpiryWarning = async () => {
 			return;
 		}
 
-		
-		
-		
-		
-		
 		const { rows: candidates } = await client.query(
 			`SELECT l.listing_id, l.posted_by, l.expires_at
        FROM listings l
@@ -68,12 +53,6 @@ const runExpiryWarning = async () => {
 			return;
 		}
 
-		
-		
-		
-		
-		
-		
 		const insertedListings = [];
 
 		for (const row of candidates) {
@@ -87,18 +66,10 @@ const runExpiryWarning = async () => {
 			);
 
 			if (rowCount === 1) {
-				
 				insertedListings.push(row);
 			}
 		}
 
-		
-		
-		
-		
-		
-		
-		
 		await client.query("COMMIT");
 
 		if (insertedListings.length > 0) {
@@ -120,15 +91,12 @@ const runExpiryWarning = async () => {
 				"cron:expiryWarning — expiry warnings enqueued",
 			);
 		} else {
-			
-			
 			logger.debug(
 				{ candidateCount: candidates.length, durationMs: Date.now() - startedAt },
 				"cron:expiryWarning — all candidates already warned; nothing enqueued",
 			);
 		}
 	} catch (err) {
-		
 		try {
 			await client.query("ROLLBACK");
 		} catch (rollbackErr) {
@@ -136,7 +104,6 @@ const runExpiryWarning = async () => {
 		}
 		logger.error({ err, durationMs: Date.now() - startedAt }, "cron:expiryWarning — run failed");
 	} finally {
-		
 		client.release();
 	}
 };

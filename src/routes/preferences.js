@@ -1,5 +1,3 @@
-
-
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import * as preferencesController from "../controllers/preferences.controller.js";

@@ -1,5 +1,3 @@
-
-
 import * as studentService from "../services/student.service.js";
 import { AppError } from "../middleware/errorHandler.js";
 
@@ -45,20 +43,10 @@ export const updatePreferences = async (req, res, next) => {
 
 export const revealContact = async (req, res, next) => {
 	try {
-		
-		
-		
-		
-		
-		
 		if (!req.contactReveal) {
 			return next(new AppError("Contact reveal gate context is missing — internal configuration error", 500));
 		}
 
-		
-		
-		
-		
 		const contact = await studentService.getStudentContactReveal(req.params.userId, req.contactReveal.emailOnly);
 
 		res.json({ status: "success", data: contact });

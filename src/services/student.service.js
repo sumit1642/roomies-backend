@@ -1,5 +1,3 @@
-
-
 import { pool } from "../db/client.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { logger } from "../logger/index.js";
@@ -50,24 +48,6 @@ export const getStudentProfile = async (requestingUserId, targetUserId) => {
 	return rows[0];
 };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 export const getStudentContactReveal = async (targetUserId, emailOnly = false) => {
 	const { rows } = await pool.query(
 		`SELECT
@@ -89,8 +69,6 @@ export const getStudentContactReveal = async (targetUserId, emailOnly = false) =
 	const row = rows[0];
 
 	if (emailOnly) {
-		
-		
 		return {
 			user_id: row.user_id,
 			full_name: row.full_name,

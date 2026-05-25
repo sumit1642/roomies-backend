@@ -1,5 +1,3 @@
-
-
 import { z } from "zod";
 import { PREFERENCE_DEFINITIONS, getAllowedPreferenceValues } from "../config/preferences.js";
 
@@ -26,7 +24,5 @@ export const preferencePairSchema = z
 	});
 
 export const preferencesSchema = z.array(preferencePairSchema).default([]);
-
-
 
 export const requiredPreferencesSchema = z.array(preferencePairSchema);
