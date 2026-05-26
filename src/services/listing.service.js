@@ -4,7 +4,6 @@ import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { assertPgOwnerVerified } from "../db/utils/pgOwner.js";
-import { scoreListingsForUser } from "../db/utils/compatibility.js";
 import { expirePendingRequestsForListing } from "./interest.service.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 import { dedupePreferencesByKey } from "../config/preferences.js";
@@ -369,6 +368,7 @@ export const searchListings = async (userId, filters) => {
 		radius,
 		amenityIds = [],
 		cursorTime,
+		cursorScore,
 		cursorId,
 		limit = 20,
 	} = filters;
@@ -460,8 +460,25 @@ export const searchListings = async (userId, filters) => {
 		p += 2;
 	}
 
+	if (sortBy === "compatibility" && cursorScore !== undefined && cursorId !== undefined) {
+		clauses.push(`(
+      compatibility_score.score < $${p}
+      OR (compatibility_score.score = $${p} AND l.listing_id > $${p + 1}::uuid)
+    )`);
+		params.push(cursorScore, cursorId);
+		p += 2;
+	}
+
+	const userIdParam = p;
+	params.push(userId);
+	p++;
+
 	params.push(limit + 1);
 	const limitParam = p;
+	const orderBy =
+		sortBy === "compatibility" ?
+			`compatibility_score.score DESC, l.listing_id ASC`
+		:	`l.created_at DESC, l.listing_id ASC`;
 
 	const { rows } = await pool.query(
 		`SELECT
@@ -497,10 +514,32 @@ export const searchListings = async (userId, filters) => {
         WHEN ri_loc.rent_index_id  IS NOT NULL THEN 'locality'
         WHEN ri_city.rent_index_id IS NOT NULL THEN 'city'
         ELSE NULL
-      END AS ri_resolution
+      END AS ri_resolution,
+      compatibility_score.score AS compatibility_score,
+      listing_preference_count.preference_count AS listing_preference_count,
+      EXISTS (
+        SELECT 1 FROM user_preferences up_exists WHERE up_exists.user_id = $${userIdParam}::uuid
+      ) AS user_has_preferences
     FROM listings l
     JOIN users u ON u.user_id = l.posted_by
     LEFT JOIN properties p ON p.property_id = l.property_id AND p.deleted_at IS NULL
+    CROSS JOIN LATERAL (
+      SELECT CASE
+        WHEN $${userIdParam}::uuid IS NULL THEN 0
+        ELSE COUNT(*)::int
+      END AS score
+      FROM listing_preferences lp_score
+      JOIN user_preferences up_score
+        ON up_score.preference_key   = lp_score.preference_key
+       AND up_score.preference_value = lp_score.preference_value
+       AND up_score.user_id          = $${userIdParam}::uuid
+      WHERE lp_score.listing_id = l.listing_id
+    ) compatibility_score
+    CROSS JOIN LATERAL (
+      SELECT COUNT(*)::int AS preference_count
+      FROM listing_preferences lp_count
+      WHERE lp_count.listing_id = l.listing_id
+    ) listing_preference_count
     LEFT JOIN rent_index ri_loc
       ON ri_loc.city      = l.city
      AND ri_loc.locality  = NULLIF(LOWER(TRIM(COALESCE(l.locality, ''))), '')
@@ -510,7 +549,7 @@ export const searchListings = async (userId, filters) => {
      AND ri_city.locality  IS NULL
      AND ri_city.room_type = l.room_type
     WHERE ${clauses.join(" AND ")}
-    ORDER BY l.created_at DESC, l.listing_id ASC
+    ORDER BY ${orderBy}
     LIMIT $${limitParam}`,
 		params,
 	);
@@ -518,53 +557,33 @@ export const searchListings = async (userId, filters) => {
 	const hasNextPage = rows.length > limit;
 	const items = hasNextPage ? rows.slice(0, limit) : rows;
 
-	let scoreMap = {};
-	let userHasPreferences = false;
-	let listingPreferenceCounts = new Map();
-
-	if (userId !== null) {
-		const listingIds = items.map((r) => r.listing_id);
-		scoreMap = await scoreListingsForUser(userId, listingIds);
-
-		const { rows: preferenceRows } = await pool.query(
-			`SELECT EXISTS (
-        SELECT 1 FROM user_preferences WHERE user_id = $1
-      ) AS has_preferences`,
-			[userId],
-		);
-		userHasPreferences = preferenceRows[0]?.has_preferences === true;
-
-		if (listingIds.length) {
-			const { rows: listingPreferenceRows } = await pool.query(
-				`SELECT listing_id, COUNT(*)::int AS preference_count
-         FROM listing_preferences
-         WHERE listing_id = ANY($1::uuid[])
-         GROUP BY listing_id`,
-				[listingIds],
-			);
-			listingPreferenceCounts = new Map(
-				listingPreferenceRows.map((row) => [row.listing_id, Number(row.preference_count)]),
-			);
-		}
-	}
-
 	const enrichedItems = items.map((row) => ({
 		...row,
 		rentPerMonth: row.rent_per_month / 100,
 		depositAmount: row.deposit_amount / 100,
 		rent_per_month: undefined,
 		deposit_amount: undefined,
-		compatibilityScore: userId !== null ? (scoreMap[row.listing_id] ?? 0) : 0,
+		compatibilityScore: userId !== null ? Number(row.compatibility_score ?? 0) : 0,
 		compatibilityAvailable:
-			userId !== null && userHasPreferences && (listingPreferenceCounts.get(row.listing_id) ?? 0) > 0,
+			userId !== null && row.user_has_preferences === true && Number(row.listing_preference_count ?? 0) > 0,
 		rentDeviation: rentDeviationPct(row.rent_per_month, row.ri_p50),
+		compatibility_score: undefined,
+		listing_preference_count: undefined,
+		user_has_preferences: undefined,
 		ri_p50: undefined,
 		ri_resolution: undefined,
 	}));
 
 	if (sortBy === "compatibility") {
-		enrichedItems.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
-		return { items: enrichedItems, nextCursor: null };
+		const nextCursor =
+			hasNextPage ?
+				{
+					cursorScore: enrichedItems[enrichedItems.length - 1].compatibilityScore,
+					cursorId: enrichedItems[enrichedItems.length - 1].listing_id,
+				}
+			:	null;
+
+		return { items: enrichedItems, nextCursor };
 	}
 
 	const nextCursor =

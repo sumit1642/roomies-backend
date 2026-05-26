@@ -26,3 +26,21 @@ export const enqueueNotification = (payload) => {
 		);
 	}
 };
+
+export const enqueueNotificationsBulk = async (payloads) => {
+	if (!payloads.length) return 0;
+
+	try {
+		await getQueue(NOTIFICATION_QUEUE_NAME).addBulk(
+			payloads.map((payload) => ({
+				name: "send-notification",
+				data: payload,
+				opts: JOB_OPTIONS,
+			})),
+		);
+		return payloads.length;
+	} catch (err) {
+		logger.error({ err, count: payloads.length }, "Failed to bulk enqueue notifications");
+		throw err;
+	}
+};
