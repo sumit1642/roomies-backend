@@ -22,38 +22,41 @@ export const listingParamsSchema = z.object({
 });
 
 export const searchListingsSchema = z.object({
-	query: buildKeysetPaginationQuerySchema({
-		sortBy: z.enum(["recent", "compatibility"]).default("recent"),
+	query: buildKeysetPaginationQuerySchema(
+		{
+			sortBy: z.enum(["recent", "compatibility"]).default("recent"),
 
-		city: z.string().min(1).max(100).optional(),
+			city: z.string().min(1).max(100).optional(),
 
-		minRent: z.coerce.number().int().min(0).optional(),
-		maxRent: z.coerce.number().int().min(0).optional(),
+			minRent: z.coerce.number().int().min(0).optional(),
+			maxRent: z.coerce.number().int().min(0).optional(),
 
-		roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
-		bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
+			roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
+			bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
 
-		preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
+			preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
 
-		listingType: z.enum(["student_room", "pg_room", "hostel_bed"]).optional(),
+			listingType: z.enum(["student_room", "pg_room", "hostel_bed"]).optional(),
 
-		availableFrom: z.string().date({ error: "availableFrom must be a valid date (YYYY-MM-DD)" }).optional(),
+			availableFrom: z.string().date({ error: "availableFrom must be a valid date (YYYY-MM-DD)" }).optional(),
 
-		lat: z.coerce.number().min(-90).max(90).optional(),
-		lng: z.coerce.number().min(-180).max(180).optional(),
-		radius: z.coerce.number().int().min(100).max(50_000).default(5_000),
+			lat: z.coerce.number().min(-90).max(90).optional(),
+			lng: z.coerce.number().min(-180).max(180).optional(),
+			radius: z.coerce.number().int().min(100).max(50_000).default(5_000),
 
-		amenityIds: z.preprocess(
-			(val) => {
-				if (typeof val !== "string") return val;
-				return val
-					.split(",")
-					.map((s) => s.trim())
-					.filter(Boolean);
-			},
-			z.array(z.uuid({ error: "Each amenity ID must be a valid UUID" })).default([]),
-		),
-	})
+			amenityIds: z.preprocess(
+				(val) => {
+					if (typeof val !== "string") return val;
+					return val
+						.split(",")
+						.map((s) => s.trim())
+						.filter(Boolean);
+				},
+				z.array(z.uuid({ error: "Each amenity ID must be a valid UUID" })).default([]),
+			),
+		},
+		{ allowCursorScore: true },
+	)
 		.refine(
 			(data) => {
 				if (data.minRent !== undefined && data.maxRent !== undefined) {
@@ -72,6 +75,16 @@ export const searchListingsSchema = z.object({
 			{
 				error: "lat and lng must be provided together for proximity search",
 				path: ["lng"],
+			},
+		)
+		.refine(
+			(data) => {
+				if (data.sortBy === "compatibility") return data.cursorTime === undefined;
+				return data.cursorScore === undefined;
+			},
+			{
+				error: "compatibility sorting uses cursorScore; recent sorting uses cursorTime",
+				path: ["cursorScore"],
 			},
 		),
 });
