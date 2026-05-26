@@ -80,14 +80,6 @@ const fetchMatchedSearches = async (cursorId) => {
            )
          )
      ),
-     updated_searches AS (
-       UPDATE saved_searches ss
-       SET last_alerted_at = NOW()
-       FROM matched_searches ms
-       WHERE ss.search_id = ms.search_id
-         AND ss.deleted_at IS NULL
-       RETURNING ss.search_id, ms.user_id
-     ),
      batch_meta AS (
        SELECT
          (SELECT search_id FROM search_batch ORDER BY search_id DESC LIMIT 1) AS batch_cursor_id,
@@ -96,15 +88,29 @@ const fetchMatchedSearches = async (cursorId) => {
      SELECT
        bm.batch_cursor_id,
        bm.batch_count,
-       us.search_id,
-       us.user_id
+       ms.search_id,
+       ms.user_id
      FROM batch_meta bm
-     LEFT JOIN updated_searches us ON TRUE
-     ORDER BY us.search_id ASC`,
+     LEFT JOIN matched_searches ms ON TRUE
+     ORDER BY ms.search_id ASC`,
 		[cursorId, SEARCH_BATCH_SIZE],
 	);
 
 	return { rows, queryDurationMs: Date.now() - queryStartedAt };
+};
+
+const markSearchesAlerted = async (searchIds) => {
+	if (!searchIds.length) return 0;
+
+	const { rowCount } = await pool.query(
+		`UPDATE saved_searches
+     SET last_alerted_at = NOW()
+     WHERE search_id = ANY($1::uuid[])
+       AND deleted_at IS NULL`,
+		[searchIds],
+	);
+
+	return rowCount;
 };
 
 export const runSavedSearchAlert = async () => {
@@ -115,6 +121,7 @@ export const runSavedSearchAlert = async () => {
 	let scanned = 0;
 	let matched = 0;
 	let enqueued = 0;
+	let updated = 0;
 	let queryDurationMs = 0;
 
 	while (true) {
@@ -140,10 +147,14 @@ export const runSavedSearchAlert = async () => {
 			enqueued += await enqueueNotificationsBulk(notificationChunk);
 		}
 
+		const batchUpdated = await markSearchesAlerted(notifications.map((notification) => notification.entityId));
+		updated += batchUpdated;
+
 		logger.debug(
 			{
 				batchCount,
 				batchMatched: notifications.length,
+				batchUpdated,
 				batchQueryDurationMs,
 				cursorId: batchCursorId,
 			},
@@ -159,6 +170,7 @@ export const runSavedSearchAlert = async () => {
 			scanned,
 			matched,
 			enqueued,
+			updated,
 			queryDurationMs,
 			durationMs: Date.now() - startedAt,
 		},
