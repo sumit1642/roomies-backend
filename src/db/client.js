@@ -4,7 +4,8 @@ import { logger } from "../logger/index.js";
 
 const { Pool } = pg;
 
-const DB_POOL_MAX = Number(process.env.DB_POOL_MAX) || 10;
+const parsedPoolMax = Number.parseInt(process.env.DB_POOL_MAX ?? "", 10);
+const DB_POOL_MAX = Number.isInteger(parsedPoolMax) && parsedPoolMax > 0 ? parsedPoolMax : 10;
 
 export const pool = new Pool({
 	connectionString: config.DATABASE_URL,

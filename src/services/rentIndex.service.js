@@ -1,5 +1,4 @@
 // src/services/rentIndex.service.js
-//
 
 import { pool } from "../db/client.js";
 import { AppError } from "../middleware/errorHandler.js";
@@ -7,8 +6,10 @@ import { AppError } from "../middleware/errorHandler.js";
 const paiseToRupees = (paise) => (paise != null ? Math.round(paise / 100) : null);
 
 export const getRentIndex = async ({ city, locality, roomType }) => {
-	const normCity = city ? city.toLowerCase().trim() : city;
-	const normLocality = locality ? locality.toLowerCase().trim() : null;
+	// Normalize: trim + lowercase, then treat empty string as null.
+	// This ensures "   " → null, consistent with DB trigger behaviour.
+	const normCity = city?.trim().toLowerCase() || null;
+	const normLocality = locality?.trim().toLowerCase() || null;
 
 	const { rows } = await pool.query(
 		`SELECT
@@ -42,9 +43,9 @@ export const getRentIndex = async ({ city, locality, roomType }) => {
 
 	return {
 		city: normCity,
-		locality: normLocality, // normalized value (null when blank/absent)
+		locality: normLocality,
 		roomType,
-		resolution: row.resolution, // 'locality' | 'city'
+		resolution: row.resolution,
 		p25: paiseToRupees(row.p25),
 		p50: paiseToRupees(row.p50),
 		p75: paiseToRupees(row.p75),

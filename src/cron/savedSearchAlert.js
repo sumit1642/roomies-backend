@@ -6,8 +6,14 @@ import { logger } from "../logger/index.js";
 import { enqueueNotificationsBulk } from "../workers/notificationQueue.js";
 
 const SCHEDULE = process.env.CRON_SAVED_SEARCH_ALERT ?? "0 8 * * *";
-const SEARCH_BATCH_SIZE = Number(process.env.SAVED_SEARCH_ALERT_BATCH_SIZE) || 500;
-const NOTIFICATION_CHUNK_SIZE = Number(process.env.SAVED_SEARCH_ALERT_NOTIFICATION_CHUNK_SIZE) || 100;
+
+const toPositiveInt = (value, fallback) => {
+	const n = Number(value);
+	return Number.isInteger(n) && n > 0 ? n : fallback;
+};
+
+const SEARCH_BATCH_SIZE = toPositiveInt(process.env.SAVED_SEARCH_ALERT_BATCH_SIZE, 500);
+const NOTIFICATION_CHUNK_SIZE = toPositiveInt(process.env.SAVED_SEARCH_ALERT_NOTIFICATION_CHUNK_SIZE, 100);
 
 const chunk = (items, size) => {
 	const chunks = [];

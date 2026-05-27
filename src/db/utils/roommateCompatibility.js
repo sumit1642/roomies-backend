@@ -1,31 +1,7 @@
 // src/db/utils/roommateCompatibility.js
-//
-// Jaccard similarity between two students' preference sets.
-//
-// A preference is the pair (preference_key, preference_value).
-// Both fields must match for it to count as shared — having
-// smoking=smoker vs smoking=non_smoker is a mismatch, not a partial hit.
-//
-// Score formula:
-//   jaccard = |A ∩ B| / |A ∪ B|
-//   where |A ∪ B| = |A| + |B| - |A ∩ B|
-//
-// Returned as an integer 0–100.
-// Returns 0 when either user has no preferences (union = 0) — the caller
-// should set compatibilityAvailable = false in that case.
-
 import { pool } from "../client.js";
 import { logger } from "../../logger/index.js";
 
-// scoreUsersForUser
-//
-// requestingUserId: UUID of the student whose feed is being built.
-// candidateIds:     Array of UUIDs of the candidate students to score.
-//                   Already filtered for opt-in, blocks, and city before this call.
-//
-// Returns: { [userId]: score 0–100 }
-// On DB failure: logs the error and returns {} so the feed still renders
-// without compatibility scores rather than crashing the request.
 export const scoreUsersForUser = async (requestingUserId, candidateIds, client = pool) => {
 	if (!candidateIds.length) return {};
 
@@ -47,13 +23,16 @@ export const scoreUsersForUser = async (requestingUserId, candidateIds, client =
 		);
 
 		// Step 2 — individual preference counts for union computation.
-		// We fetch the requesting user alongside the candidates in one query.
+		// FIX: pass a single array $1 for ANY($1::uuid[]) — previously the code
+		// spread [requestingUserId, ...candidateIds] which bound multiple positional
+		// params while the SQL only had one placeholder ($1), causing a DB error.
+		const allIds = [requestingUserId, ...candidateIds];
 		const { rows: countRows } = await client.query(
 			`SELECT user_id, COUNT(*)::int AS pref_count
        FROM user_preferences
        WHERE user_id = ANY($1::uuid[])
        GROUP BY user_id`,
-			[requestingUserId, ...candidateIds],
+			[allIds],
 		);
 
 		const myCount = countRows.find((r) => r.user_id === requestingUserId)?.pref_count ?? 0;
@@ -64,8 +43,6 @@ export const scoreUsersForUser = async (requestingUserId, candidateIds, client =
 			const shared = sharedMap[id] ?? 0;
 			const theirCount = countMap[id] ?? 0;
 			const union = myCount + theirCount - shared;
-			// When union is 0 both users have no preferences — score 0, caller sets
-			// compatibilityAvailable = false so the UI can hide the score badge.
 			acc[id] = union === 0 ? 0 : Math.round((shared / union) * 100);
 			return acc;
 		}, {});
@@ -74,17 +51,10 @@ export const scoreUsersForUser = async (requestingUserId, candidateIds, client =
 			{ err, requestingUserId, candidateCount: candidateIds.length },
 			"scoreUsersForUser: DB error computing compatibility scores — returning empty scores",
 		);
-		// Return safe default so the feed still renders without scores
 		return {};
 	}
 };
 
-// hasPreferences
-//
-// Quick check: does the given user have at least one preference row?
-// Used to set compatibilityAvailable on the requesting user's own side.
-// On DB failure: logs the error and returns false so the feed degrades
-// gracefully (no compatibility scores shown) rather than crashing.
 export const hasPreferences = async (userId, client = pool) => {
 	try {
 		const { rows } = await client.query(

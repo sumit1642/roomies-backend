@@ -99,7 +99,7 @@ export const startMediaWorker = () => {
 		logger.error({ jobId: job?.id, photoId: job?.data?.photoId, err }, "Media worker: job failed");
 
 		if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
-			const { photoId, listingId } = job.data ?? {};
+			const { photoId, listingId, stagingPath } = job.data ?? {};
 			if (!photoId || !listingId) {
 				logger.error({ jobId: job.id }, "Media worker: missing photoId or listingId in job data");
 				return;
@@ -123,6 +123,23 @@ export const startMediaWorker = () => {
 					{ cleanupErr, photoId, listingId },
 					"Media worker: failed to clean provisional row after permanent failure",
 				);
+			}
+
+			if (stagingPath) {
+				try {
+					await fs.unlink(stagingPath);
+					logger.warn(
+						{ stagingPath, photoId, listingId },
+						"Media worker: staging file cleaned after permanent failure",
+					);
+				} catch (fsErr) {
+					if (fsErr.code !== "ENOENT") {
+						logger.error(
+							{ stagingPath, photoId, listingId, err: fsErr },
+							"Media worker: failed to delete staging file after permanent failure",
+						);
+					}
+				}
 			}
 		}
 	});

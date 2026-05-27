@@ -28,7 +28,10 @@ export const enqueueNotification = (payload) => {
 };
 
 export const enqueueNotificationsBulk = async (payloads) => {
-	if (!payloads.length) return 0;
+	if (!Array.isArray(payloads)) {
+		throw new TypeError("enqueueNotificationsBulk: payloads must be an array");
+	}
+	if (payloads.length === 0) return 0;
 
 	try {
 		await getQueue(NOTIFICATION_QUEUE_NAME).addBulk(
