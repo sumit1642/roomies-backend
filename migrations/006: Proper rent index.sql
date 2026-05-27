@@ -7,6 +7,12 @@
 -- rent_index: materialised p25/p50/p75 per (city, locality, room_type).
 --   Refreshed nightly by cron/rentIndexRefresh.js.
 --   Listings JOIN this table to expose rentDeviation in API responses.
+--
+-- Fix (originally migration 011): The trigger now also fires when expires_at
+-- changes so that renewals (status stays 'active' but expires_at advances)
+-- correctly record a 'listing_renewed' observation. The UPDATE condition was
+-- broadened to: NEW.status = 'active' AND (OLD.status <> 'active' OR
+-- NEW.expires_at IS DISTINCT FROM OLD.expires_at).
 
 CREATE TABLE IF NOT EXISTS rent_observations (
     observation_id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
@@ -56,8 +62,13 @@ CREATE TABLE IF NOT EXISTS rent_index (
 CREATE INDEX IF NOT EXISTS idx_rent_index_lookup ON rent_index (city, locality, room_type);
 
 -- Trigger function: fires after INSERT on listings (new listing goes active)
--- and after UPDATE when status flips to 'active' (listing renewed / reactivated).
--- Runs inside the same transaction as the listing write — observation is never lost.
+-- and after UPDATE when status flips to 'active' OR expires_at changes while
+-- already active (i.e. a renewal). Runs inside the same transaction as the
+-- listing write — observation is never lost.
+--
+-- Fix vs original: the UPDATE branch previously only fired when OLD.status <>
+-- 'active', which meant renewals (status unchanged, only expires_at advancing)
+-- were silently dropped. Now we also fire when expires_at changes.
 CREATE OR REPLACE FUNCTION capture_rent_observation()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -75,8 +86,11 @@ BEGIN
 
     ELSIF TG_OP = 'UPDATE'
         AND NEW.status = 'active'
-        AND OLD.status <> 'active'
         AND NEW.deleted_at IS NULL
+        AND (
+            OLD.status <> 'active'
+            OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
+        )
     THEN
         INSERT INTO rent_observations
             (listing_id, city, locality, room_type, rent_per_month, source)
@@ -94,8 +108,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Watch both status and expires_at so renewals (expires_at advances while
+-- status stays 'active') also fire the trigger.
 DROP TRIGGER IF EXISTS trg_capture_rent_observation ON listings;
 
 CREATE TRIGGER trg_capture_rent_observation
-    AFTER INSERT OR UPDATE OF status ON listings
+    AFTER INSERT OR UPDATE OF status, expires_at ON listings
     FOR EACH ROW EXECUTE FUNCTION capture_rent_observation();
