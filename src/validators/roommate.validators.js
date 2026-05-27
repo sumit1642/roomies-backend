@@ -8,7 +8,6 @@ export const getRoommateFeedSchema = z.object({
 		city: z.string().min(1).max(100).optional(),
 	}).transform((data) => ({
 		...data,
-		// Clamp limit to 50 for the roommate feed (tighter than listing search)
 		limit: Math.min(data.limit, 50),
 	})),
 });
@@ -26,8 +25,13 @@ export const updateRoommateProfileSchema = z.object({
 });
 
 export const blockTargetParamsSchema = z.object({
-	params: z.object({
-		userId: z.uuid({ error: "Invalid user ID" }),
-		targetUserId: z.uuid({ error: "Invalid target user ID" }),
-	}),
+	params: z
+		.object({
+			userId: z.uuid({ error: "Invalid user ID" }),
+			targetUserId: z.uuid({ error: "Invalid target user ID" }),
+		})
+		.refine((p) => p.userId !== p.targetUserId, {
+			message: "You cannot block yourself",
+			path: ["targetUserId"],
+		}),
 });

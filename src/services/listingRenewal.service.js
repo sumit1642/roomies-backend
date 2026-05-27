@@ -8,13 +8,14 @@ const RENEWABLE_STATUSES = new Set(["active", "expired", "deactivated"]);
 const RENEWAL_INTERVAL_DAYS = 60;
 
 export const renewListing = async (posterId, listingId) => {
-	// Single atomic UPDATE — no need for a transaction since this is one
-	// statement. We check ownership, status eligibility, and apply the change
-	// in one round-trip.
+	// Use GREATEST(expires_at, NOW()) so an active listing with time remaining
+	// gets the full renewal interval *added on top of* its current expiry, not
+	// replaced from NOW(). COALESCE handles the NULL case for listings that have
+	// never had an expiry set.
 	const { rows } = await pool.query(
 		`UPDATE listings
      SET status     = 'active'::listing_status_enum,
-         expires_at = NOW() + ($1::int * INTERVAL '1 day'),
+         expires_at = GREATEST(COALESCE(expires_at, NOW()), NOW()) + ($1::int * INTERVAL '1 day'),
          updated_at = NOW()
      WHERE listing_id = $2
        AND posted_by  = $3
@@ -27,7 +28,6 @@ export const renewListing = async (posterId, listingId) => {
 		[RENEWAL_INTERVAL_DAYS, listingId, posterId, [...RENEWABLE_STATUSES]],
 	);
 
-	// Nothing updated — work out why so we can return the right error.
 	if (!rows.length) {
 		const { rows: check } = await pool.query(
 			`SELECT status, posted_by
@@ -45,7 +45,6 @@ export const renewListing = async (posterId, listingId) => {
 			throw new AppError("Forbidden", 403);
 		}
 
-		// Must be a non-renewable status (filled).
 		throw new AppError(
 			`Listing cannot be renewed from its current status '${check[0].status}'. ` +
 				`Only active, expired, or deactivated listings can be renewed.`,

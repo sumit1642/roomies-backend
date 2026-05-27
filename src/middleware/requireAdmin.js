@@ -7,7 +7,8 @@ import { AppError } from "./errorHandler.js";
 
 const assertEmailVerified = (req, res, next) => {
 	if (!req.user) {
-		return next(new AppError("authenticate middleware must run before requireAdmin", 500));
+		// 401 — the caller is unauthenticated, not a server misconfiguration.
+		return next(new AppError("Authentication required", 401));
 	}
 	if (!req.user.isEmailVerified) {
 		return next(new AppError("Email verification required", 403));

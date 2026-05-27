@@ -1,8 +1,14 @@
+// src/controllers/verification.controller.js
+
 import * as verificationService from "../services/verification.service.js";
 
 export const submitDocument = async (req, res, next) => {
 	try {
-		const result = await verificationService.submitDocument(req.user.userId, req.params.userId, req.body);
+		const result = await verificationService.submitDocument(
+			req.user.userId,
+			req.user.userId, // targetUserId = self
+			req.body,
+		);
 		res.status(201).json({ status: "success", data: result });
 	} catch (err) {
 		next(err);

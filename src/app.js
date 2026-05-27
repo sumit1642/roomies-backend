@@ -40,7 +40,8 @@ app.use(
 				return callback(null, true);
 			}
 
-			callback(new Error(`CORS: origin '${origin}' is not allowed`));
+			logger.warn({ origin }, "CORS: origin not allowed");
+			callback(null, false);
 		},
 
 		credentials: true,

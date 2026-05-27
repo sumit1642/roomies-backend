@@ -1,3 +1,15 @@
+// src/controllers/auth.controller.js
+//
+// Token transport strategy (mobile + web):
+//   - Cookies are always set (HttpOnly, Secure) — browser clients use these.
+//   - The JSON body includes tokens ONLY when the request signals it is a
+//     native mobile client, detected via the X-Client-Type: mobile header.
+//     Android / iOS clients must send this header to receive tokens in the body.
+//   - Browser clients (no header) get { authenticated: true } — no token leak.
+//
+// This keeps the API secure for browsers while remaining compatible with native
+// apps that cannot access HttpOnly cookies.
+
 import * as authService from "../services/auth.service.js";
 import { parseTtlSeconds } from "../services/auth.service.js";
 import { AppError } from "../middleware/errorHandler.js";
@@ -22,12 +34,30 @@ const clearAuthCookies = (res) => {
 	});
 };
 
+/**
+ * Returns true when the caller is a native mobile app.
+ * Mobile clients MUST send `X-Client-Type: mobile` to receive tokens in the body.
+ * Browsers never send this header, so they only get HttpOnly cookies.
+ */
+const isMobileClient = (req) => req.headers["x-client-type"]?.toLowerCase() === "mobile";
+
+/**
+ * Build the JSON data payload for auth responses.
+ * - Mobile: full token pair so the client can store them in secure storage.
+ * - Browser: no tokens in body; cookies carry the session.
+ */
+const authResponseData = (req, tokens) => {
+	if (isMobileClient(req)) {
+		return tokens; // { accessToken, refreshToken, user, sid }
+	}
+	return { user: tokens.user }; // cookies-only transport for browsers
+};
+
 export const register = async (req, res, next) => {
 	try {
 		const tokens = await authService.register(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-
-		res.status(201).json({ status: "success", data: tokens });
+		res.status(201).json({ status: "success", data: authResponseData(req, tokens) });
 	} catch (err) {
 		next(err);
 	}
@@ -37,8 +67,7 @@ export const login = async (req, res, next) => {
 	try {
 		const tokens = await authService.login(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-
-		res.json({ status: "success", data: tokens });
+		res.json({ status: "success", data: authResponseData(req, tokens) });
 	} catch (err) {
 		next(err);
 	}
@@ -81,10 +110,8 @@ export const refresh = async (req, res, next) => {
 		}
 
 		const tokens = await authService.refresh(incomingRefreshToken);
-
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-
-		res.json({ status: "success", data: tokens });
+		res.json({ status: "success", data: authResponseData(req, tokens) });
 	} catch (err) {
 		next(err);
 	}
@@ -149,8 +176,7 @@ export const googleCallback = async (req, res, next) => {
 	try {
 		const tokens = await authService.googleOAuth(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-
-		res.json({ status: "success", data: tokens });
+		res.json({ status: "success", data: authResponseData(req, tokens) });
 	} catch (err) {
 		next(err);
 	}
