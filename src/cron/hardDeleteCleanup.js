@@ -340,11 +340,18 @@ const runHardDeleteCleanup = async () => {
 	// logged but do not affect the DB state — the rows are already gone and
 	// orphaned blobs can be reconciled manually or by a future storage audit.
 	for (const url of photoUrlsToDelete) {
+		let blobKey;
+		try {
+			blobKey = new URL(url).pathname;
+		} catch {
+			blobKey = url;
+		}
+
 		try {
 			await storageService.delete(url);
 		} catch (storageErr) {
 			logger.error(
-				{ storageErr, profile_photo_url: url },
+				{ storageErr, blobKey },
 				"cron:hardDeleteCleanup — failed to delete profile photo blob",
 			);
 		}
