@@ -191,14 +191,11 @@ if (parsed.data.EMAIL_PROVIDER === "brevo") {
 		process.exit(1);
 	}
 
-	// Guard against the most common Brevo credential mistake: pasting the API
-	// key (xkeysib-...) where the SMTP key (xsmtpsib-...) is expected. Both
-	// look similar but the SMTP key is a separate credential generated in the
-	// SMTP tab of Brevo's settings.
-	if (parsed.data.BREVO_API_KEY?.startsWith("xsmtpsib-")) {
+	if (parsed.data.BREVO_API_KEY && !parsed.data.BREVO_API_KEY.startsWith("xkeysib-")) {
 		console.error(
-			`❌  BREVO_API_KEY starts with "xsmtpsib-" which is an SMTP key, not an API key.\n` +
-				`   The API key starts with "xkeysib-". Find it in Brevo → Settings → SMTP & API → API Keys.\n`,
+			`❌  BREVO_API_KEY does not start with "xkeysib-".\n` +
+				`   API keys start with "xkeysib-". ` +
+				`   If you have "xsmtpsib-...", that is an SMTP key — find the API key in Brevo → Settings → SMTP & API → API Keys.\n`,
 		);
 		process.exit(1);
 	}
@@ -217,10 +214,11 @@ if (parsed.data.EMAIL_PROVIDER === "brevo-api") {
 		);
 		process.exit(1);
 	}
-	if (parsed.data.BREVO_API_KEY?.startsWith("xsmtpsib-")) {
+	if (parsed.data.BREVO_API_KEY && !parsed.data.BREVO_API_KEY.startsWith("xkeysib-")) {
 		console.error(
-			`❌  BREVO_API_KEY starts with "xsmtpsib-" which is an SMTP key, not an API key.\n` +
-				`   The API key starts with "xkeysib-". Find it in Brevo → Settings → SMTP & API → API Keys.\n`,
+			`❌  BREVO_API_KEY does not start with "xkeysib-".\n` +
+				`   API keys start with "xkeysib-". ` +
+				`   If you have "xsmtpsib-...", that is an SMTP key — find the API key in Brevo → Settings → SMTP & API → API Keys.\n`,
 		);
 		process.exit(1);
 	}
