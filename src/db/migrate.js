@@ -55,7 +55,7 @@ const run = async () => {
 		let files;
 		try {
 			const entries = await fs.readdir(MIGRATIONS_DIR);
-			files = entries.filter((f) => f.endsWith(".sql")).sort();
+			files = entries.filter((f) => f.toLowerCase().endsWith(".sql")).sort();
 		} catch (err) {
 			console.error(`❌  Cannot read migrations directory: ${MIGRATIONS_DIR}`);
 			console.error(`    Make sure the migrations/ folder exists at the project root.`);
