@@ -209,7 +209,6 @@ export const blockUser = async (requestingUserId, targetUserId) => {
 			[targetUserId],
 		);
 		if (!targetRows.length) {
-			await client.query("ROLLBACK");
 			throw new AppError("User not found", 404);
 		}
 
@@ -219,7 +218,6 @@ export const blockUser = async (requestingUserId, targetUserId) => {
 			[requestingUserId],
 		);
 		if (countRows[0].cnt >= MAX_BLOCKS_PER_USER) {
-			await client.query("ROLLBACK");
 			throw new AppError(`You can block at most ${MAX_BLOCKS_PER_USER} users`, 422);
 		}
 
