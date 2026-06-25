@@ -7,13 +7,21 @@ import { enqueueNotificationsBulk } from "../workers/notificationQueue.js";
 
 const SCHEDULE = process.env.CRON_SAVED_SEARCH_ALERT ?? "0 8 * * *";
 
-const toPositiveInt = (value, fallback) => {
+const MAX_SEARCH_BATCH_SIZE = 5000;
+const MAX_NOTIFICATION_CHUNK_SIZE = 500;
+
+const toPositiveInt = (value, fallback, max = Infinity) => {
 	const n = Number(value);
-	return Number.isInteger(n) && n > 0 ? n : fallback;
+	if (!Number.isInteger(n) || n <= 0) return fallback;
+	return Math.min(n, max);
 };
 
-const SEARCH_BATCH_SIZE = toPositiveInt(process.env.SAVED_SEARCH_ALERT_BATCH_SIZE, 500);
-const NOTIFICATION_CHUNK_SIZE = toPositiveInt(process.env.SAVED_SEARCH_ALERT_NOTIFICATION_CHUNK_SIZE, 100);
+const SEARCH_BATCH_SIZE = toPositiveInt(process.env.SAVED_SEARCH_ALERT_BATCH_SIZE, 500, MAX_SEARCH_BATCH_SIZE);
+const NOTIFICATION_CHUNK_SIZE = toPositiveInt(
+	process.env.SAVED_SEARCH_ALERT_NOTIFICATION_CHUNK_SIZE,
+	100,
+	MAX_NOTIFICATION_CHUNK_SIZE,
+);
 
 const chunk = (items, size) => {
 	const chunks = [];
