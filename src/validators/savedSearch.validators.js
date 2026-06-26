@@ -5,8 +5,8 @@ import { z } from "zod";
 const filtersSchema = z
 	.object({
 		city: z.string().min(1).max(100).optional(),
-		minRent: z.coerce.number().int().min(0).optional(),
-		maxRent: z.coerce.number().int().min(0).optional(),
+		minRent: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().min(0).optional()),
+		maxRent: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().min(0).optional()),
 		roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
 		bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
 		preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),

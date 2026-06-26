@@ -40,8 +40,10 @@ export const uploadStudentPhoto = async (requestingUserId, targetUserId, staging
 	// Upload first, then atomically swap + capture old URL in one UPDATE.
 	const newUrl = await compressAndUpload(stagingPath, targetUserId);
 
-	const { rows } = await pool.query(
-		`WITH current AS (
+	let rows;
+	try {
+		({ rows } = await pool.query(
+			`WITH current AS (
        SELECT profile_photo_url
        FROM student_profiles
        WHERE user_id = $2 AND deleted_at IS NULL
@@ -53,8 +55,13 @@ export const uploadStudentPhoto = async (requestingUserId, targetUserId, staging
      WHERE sp.user_id    = $2
        AND sp.deleted_at IS NULL
      RETURNING current.profile_photo_url AS old_url`,
-		[newUrl, targetUserId],
-	);
+			[newUrl, targetUserId],
+		));
+	} catch (dbErr) {
+		// DB update failed after upload — delete the orphaned blob before rethrowing.
+		await tryDeleteBlob(newUrl, { userId: targetUserId, stage: "db-error-cleanup" });
+		throw dbErr;
+	}
 
 	if (!rows.length) {
 		// Profile disappeared between compress and update — clean up the uploaded blob.
@@ -110,8 +117,10 @@ export const uploadPgOwnerPhoto = async (requestingUserId, targetUserId, staging
 
 	const newUrl = await compressAndUpload(stagingPath, targetUserId);
 
-	const { rows } = await pool.query(
-		`WITH current AS (
+	let rows;
+	try {
+		({ rows } = await pool.query(
+			`WITH current AS (
        SELECT profile_photo_url
        FROM pg_owner_profiles
        WHERE user_id = $2 AND deleted_at IS NULL
@@ -123,8 +132,13 @@ export const uploadPgOwnerPhoto = async (requestingUserId, targetUserId, staging
      WHERE pop.user_id    = $2
        AND pop.deleted_at IS NULL
      RETURNING current.profile_photo_url AS old_url`,
-		[newUrl, targetUserId],
-	);
+			[newUrl, targetUserId],
+		));
+	} catch (dbErr) {
+		// DB update failed after upload — delete the orphaned blob before rethrowing.
+		await tryDeleteBlob(newUrl, { userId: targetUserId, stage: "db-error-cleanup" });
+		throw dbErr;
+	}
 
 	if (!rows.length) {
 		await tryDeleteBlob(newUrl, { userId: targetUserId, stage: "post-upload-race" });

@@ -31,13 +31,27 @@ export const startMediaWorker = () => {
 			const filename = `${photoId}.webp`;
 			const finalUrl = await storageService.upload(outputBuffer, listingId, filename);
 
-			const { rowCount: urlUpdateCount } = await pool.query(
-				`UPDATE listing_photos
-         SET photo_url = $1
-         WHERE photo_id   = $2
-           AND deleted_at IS NULL`,
-				[finalUrl, photoId],
-			);
+			let urlUpdateCount;
+			try {
+				({ rowCount: urlUpdateCount } = await pool.query(
+					`UPDATE listing_photos
+           				SET photo_url = $1
+           			WHERE photo_id   = $2
+             		AND deleted_at IS NULL`,
+					[finalUrl, photoId],
+				));
+			} catch (dbErr) {
+				// DB update failed after successful upload — delete the orphaned blob.
+				try {
+					await storageService.delete(finalUrl);
+				} catch (deleteErr) {
+					logger.error(
+						{ finalUrl, deleteErr },
+						"Media worker: failed to delete orphaned blob after DB error — manual cleanup required",
+					);
+				}
+				throw dbErr;
+			}
 
 			if (urlUpdateCount === 0) {
 				logger.warn(

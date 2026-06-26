@@ -38,15 +38,13 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displ
 		await client.query("BEGIN");
 		transactionOpen = true;
 
-		// Lock the listing row (FOR SHARE) so concurrent uploads must queue
-		// behind this transaction's count check, preventing double-admission.
 		const { rows: listingRows } = await client.query(
 			`SELECT listing_id
        FROM listings
        WHERE listing_id = $1
          AND posted_by  = $2
          AND deleted_at IS NULL
-       FOR SHARE`,
+       FOR UPDATE`,
 			[listingId, posterId],
 		);
 

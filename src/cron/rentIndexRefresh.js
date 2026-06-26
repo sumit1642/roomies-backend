@@ -69,6 +69,31 @@ const runRentIndexRefresh = async () => {
 			[WINDOW_DAYS, MIN_SAMPLE_LOCALITY],
 		);
 
+		// Prune locality rows that no longer meet the minimum sample threshold.
+		// Without this, rows for localities that fell below MIN_SAMPLE_LOCALITY
+		// or outside the rolling window would remain stale indefinitely.
+		await client.query(
+			`WITH qualifying_locality_keys AS (
+         SELECT city, locality, room_type
+         FROM rent_observations
+         WHERE observed_at > NOW() - ($1::int * INTERVAL '1 day')
+           AND locality IS NOT NULL
+           AND locality <> ''
+         GROUP BY city, locality, room_type
+         HAVING COUNT(*) >= $2
+       )
+       DELETE FROM rent_index ri
+       WHERE ri.locality IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1
+           FROM qualifying_locality_keys q
+           WHERE q.city      = ri.city
+             AND q.locality  = ri.locality
+             AND q.room_type = ri.room_type
+         )`,
+			[WINDOW_DAYS, MIN_SAMPLE_LOCALITY],
+		);
+
 		// Pass 2 — city-wide fallback rows (locality IS NULL)
 		// The unique constraint uses (city, locality, room_type) and locality IS NULL,
 		// so we need a NULL-safe upsert. PostgreSQL unique constraints treat NULLs as

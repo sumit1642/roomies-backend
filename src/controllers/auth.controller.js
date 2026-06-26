@@ -5,7 +5,7 @@
 //   - The JSON body includes tokens ONLY when the request signals it is a
 //     native mobile client, detected via the X-Client-Type: mobile header.
 //     Android / iOS clients must send this header to receive tokens in the body.
-//   - Browser clients (no header) get { authenticated: true } — no token leak.
+//   - Browser clients (no header) get { user: tokens.user } — no raw token in body.
 //
 // This keeps the API secure for browsers while remaining compatible with native
 // apps that cannot access HttpOnly cookies.
