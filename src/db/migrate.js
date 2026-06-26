@@ -48,7 +48,7 @@ const run = async () => {
 		await client.query(ENSURE_MIGRATIONS_TABLE);
 
 		const { rows: appliedRows } = await client.query(
-			`SELECT filename, checksum FROM schema_migrations ORDER BY filename`,
+			`SELECT filename, checksum, applied_at FROM schema_migrations ORDER BY filename`,
 		);
 		const applied = new Map(appliedRows.map((r) => [r.filename, r.checksum]));
 
