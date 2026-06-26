@@ -34,3 +34,4 @@ Feature-level API documentation lives in `docs/api/`.
 - Treat the validators in `src/validators/` as the authoritative contract for params, query, and body shape.
 - Treat service-layer `AppError` branches as the authoritative source for documented business-rule failures.
 - Keep `API.md` as the front door and keep the feature-level detail inside `docs/api/`.
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/sumit1642/roomies-backend?utm_source=oss&utm_medium=github&utm_campaign=sumit1642%2Froomies-backend&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
