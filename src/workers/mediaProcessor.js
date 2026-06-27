@@ -1,3 +1,4 @@
+// src/workers/mediaProcessor.js
 import fs from "fs/promises";
 import sharp from "sharp";
 import { Worker } from "bullmq";
@@ -30,6 +31,23 @@ export const startMediaWorker = () => {
 
 			const filename = `${photoId}.webp`;
 			const finalUrl = await storageService.upload(outputBuffer, listingId, filename);
+			try {
+				await job.updateData({ ...job.data, finalUrl });
+			} catch (jobDataErr) {
+				logger.error(
+					{ finalUrl, photoId, err: jobDataErr },
+					"Media worker: failed to persist uploaded file URL into job data",
+				);
+				try {
+					await storageService.delete(finalUrl);
+				} catch (deleteErr) {
+					logger.error(
+						{ finalUrl, photoId, err: deleteErr },
+						"Media worker: failed to delete uploaded file after job data update failure",
+					);
+				}
+				throw jobDataErr;
+			}
 
 			let urlUpdateCount;
 			try {
@@ -46,10 +64,7 @@ export const startMediaWorker = () => {
 				// UPDATE. Deleting finalUrl would corrupt a row that already points to it.
 				// Log the blob as a potential orphan; the job will retry (BullMQ backoff) and
 				// the UPDATE is idempotent — same finalUrl, same photoId, safe to re-run.
-				logger.error(
-					{ finalUrl, photoId, err: dbErr },
-					"Media worker: DB update failed after blob upload — blob may be orphaned if retries also fail. Manual cleanup may be required.",
-				);
+				logger.error({ finalUrl, photoId, err: dbErr }, "Media worker: DB update failed after blob upload");
 				throw dbErr;
 			}
 
@@ -113,7 +128,7 @@ export const startMediaWorker = () => {
 		logger.error({ jobId: job?.id, photoId: job?.data?.photoId, err }, "Media worker: job failed");
 
 		if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
-			const { photoId, listingId, stagingPath } = job.data ?? {};
+			const { photoId, listingId, stagingPath, finalUrl } = job.data ?? {};
 			if (!photoId || !listingId) {
 				logger.error({ jobId: job.id }, "Media worker: missing photoId or listingId in job data");
 				return;
@@ -136,6 +151,26 @@ export const startMediaWorker = () => {
 				logger.error(
 					{ cleanupErr, photoId, listingId },
 					"Media worker: failed to clean provisional row after permanent failure",
+				);
+			}
+
+			if (finalUrl) {
+				try {
+					await storageService.delete(finalUrl);
+					logger.warn(
+						{ finalUrl, photoId, listingId },
+						"Media worker: orphaned permanent file deleted after permanent job failure",
+					);
+				} catch (deleteErr) {
+					logger.error(
+						{ finalUrl, photoId, listingId, err: deleteErr },
+						"Media worker: failed to delete orphaned permanent file after permanent job failure",
+					);
+				}
+			} else {
+				logger.warn(
+					{ photoId, listingId },
+					"Media worker: permanent job failure occurred before upload completed; no permanent file to delete",
 				);
 			}
 
