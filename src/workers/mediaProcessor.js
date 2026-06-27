@@ -35,21 +35,21 @@ export const startMediaWorker = () => {
 			try {
 				({ rowCount: urlUpdateCount } = await pool.query(
 					`UPDATE listing_photos
-           				SET photo_url = $1
-           			WHERE photo_id   = $2
-             		AND deleted_at IS NULL`,
+                    SET photo_url = $1
+                WHERE photo_id   = $2
+                AND deleted_at IS NULL`,
 					[finalUrl, photoId],
 				));
 			} catch (dbErr) {
-				// DB update failed after successful upload — delete the orphaned blob.
-				try {
-					await storageService.delete(finalUrl);
-				} catch (deleteErr) {
-					logger.error(
-						{ finalUrl, deleteErr },
-						"Media worker: failed to delete orphaned blob after DB error — manual cleanup required",
-					);
-				}
+				// Do NOT delete the blob here. pool.query rejects on connection-level errors
+				// (network drop, timeout) which can fire even after the server committed the
+				// UPDATE. Deleting finalUrl would corrupt a row that already points to it.
+				// Log the blob as a potential orphan; the job will retry (BullMQ backoff) and
+				// the UPDATE is idempotent — same finalUrl, same photoId, safe to re-run.
+				logger.error(
+					{ finalUrl, photoId, err: dbErr },
+					"Media worker: DB update failed after blob upload — blob may be orphaned if retries also fail. Manual cleanup may be required.",
+				);
 				throw dbErr;
 			}
 

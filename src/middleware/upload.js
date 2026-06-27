@@ -37,7 +37,7 @@ const fileFilter = (_req, file, cb) => {
 
 	const ext = path.extname(file.originalname).toLowerCase();
 	const allowedExts = MIME_TO_EXTENSIONS[file.mimetype];
-	if (!allowedExts.includes(ext)) {
+	if (ext !== "" && !allowedExts.includes(ext)) {
 		return cb(
 			new AppError(
 				`File extension '${ext}' does not match declared type '${file.mimetype}'. ` +
