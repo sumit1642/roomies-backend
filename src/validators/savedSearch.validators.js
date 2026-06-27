@@ -2,11 +2,23 @@
 
 import { z } from "zod";
 
+// Preprocessor for optional integer fields that may arrive as strings from JSON
+// or form data. Trims first, then treats empty or whitespace-only strings as
+// undefined so z.coerce.number() never sees them and does not coerce " " → 0.
+const toOptionalInt = (v) => {
+	if (typeof v === "string") {
+		const trimmed = v.trim();
+		if (trimmed === "") return undefined;
+		return trimmed;
+	}
+	return v === "" ? undefined : v;
+};
+
 const filtersSchema = z
 	.object({
 		city: z.string().min(1).max(100).optional(),
-		minRent: z.coerce.number().int().min(0).optional(),
-		maxRent: z.coerce.number().int().min(0).optional(),
+		minRent: z.preprocess(toOptionalInt, z.coerce.number().int().min(0).optional()),
+		maxRent: z.preprocess(toOptionalInt, z.coerce.number().int().min(0).optional()),
 		roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
 		bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
 		preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),

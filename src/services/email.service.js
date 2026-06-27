@@ -3,7 +3,7 @@ import { config } from "../config/env.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 
-const activeEmailProvider = config.EMAIL_PROVIDER === "brevo" ? "brevo" : "ethereal";
+const activeEmailProvider = config.EMAIL_PROVIDER ?? "ethereal";
 
 const maskEmail = (email) => {
 	const [local, domain] = email.split("@");
@@ -13,6 +13,11 @@ const maskEmail = (email) => {
 };
 
 const createEmailTransport = () => {
+	if (config.EMAIL_PROVIDER === "brevo-api") {
+		// All delivery goes through the REST API; no SMTP transport needed.
+		return null;
+	}
+
 	if (config.EMAIL_PROVIDER === "brevo") {
 		logger.info(
 			{
@@ -60,6 +65,8 @@ const createEmailTransport = () => {
 };
 
 const transport = createEmailTransport();
+// transport is null when EMAIL_PROVIDER=brevo-api; all send functions return
+// early via sendViaBrevoAPI() before touching the transport in that case.
 
 logger.info({ provider: activeEmailProvider }, `Email provider selected at startup: ${activeEmailProvider}`);
 

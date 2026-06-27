@@ -38,15 +38,13 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displ
 		await client.query("BEGIN");
 		transactionOpen = true;
 
-		// Lock the listing row (FOR SHARE) so concurrent uploads must queue
-		// behind this transaction's count check, preventing double-admission.
 		const { rows: listingRows } = await client.query(
 			`SELECT listing_id
        FROM listings
        WHERE listing_id = $1
          AND posted_by  = $2
          AND deleted_at IS NULL
-       FOR SHARE`,
+       FOR UPDATE`,
 			[listingId, posterId],
 		);
 
@@ -55,14 +53,12 @@ export const enqueuePhotoUpload = async (posterId, listingId, stagingPath, displ
 			throw new AppError("Listing not found", 404);
 		}
 
-		// Count only committed, non-processing photos — these are the ones the
-		// user actually sees and that count toward the cap.
+		// With this (remove the NOT LIKE filter — count all active slots including in-flight):
 		const { rows: countRows } = await client.query(
 			`SELECT COUNT(*)::int AS photo_count
        FROM listing_photos
        WHERE listing_id = $1
-         AND deleted_at IS NULL
-         AND photo_url  NOT LIKE 'processing:%'`,
+         AND deleted_at IS NULL`,
 			[listingId],
 		);
 

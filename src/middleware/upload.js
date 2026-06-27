@@ -20,7 +20,11 @@ const storage = multer.diskStorage({
 			.catch((err) => cb(err));
 	},
 	filename: (_req, file, cb) => {
-		const ext = path.extname(file.originalname).toLowerCase() || ".jpg";
+		// fileFilter guarantees the extension is valid; use the MIME map as the
+		// authoritative fallback rather than the hard-coded ".jpg" that fileFilter
+		// would have already rejected.
+		const extFromName = path.extname(file.originalname).toLowerCase();
+		const ext = extFromName || MIME_TO_EXTENSIONS[file.mimetype]?.[0] || ".jpg";
 		const name = `${crypto.randomUUID()}${ext}`;
 		cb(null, name);
 	},
@@ -33,7 +37,7 @@ const fileFilter = (_req, file, cb) => {
 
 	const ext = path.extname(file.originalname).toLowerCase();
 	const allowedExts = MIME_TO_EXTENSIONS[file.mimetype];
-	if (!allowedExts.includes(ext)) {
+	if (ext !== "" && !allowedExts.includes(ext)) {
 		return cb(
 			new AppError(
 				`File extension '${ext}' does not match declared type '${file.mimetype}'. ` +

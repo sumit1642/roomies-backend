@@ -192,11 +192,22 @@ export const runSavedSearchAlert = async () => {
 	);
 };
 
+let _savedSearchAlertRunning = false;
+
 export const registerSavedSearchAlertCron = () => {
 	const task = cron.schedule(SCHEDULE, () => {
-		runSavedSearchAlert().catch((err) => {
-			logger.error({ err }, "cron:savedSearchAlert — unhandled error");
-		});
+		if (_savedSearchAlertRunning) {
+			logger.warn("cron:savedSearchAlert — previous run still active; skipping this tick");
+			return;
+		}
+		_savedSearchAlertRunning = true;
+		runSavedSearchAlert()
+			.catch((err) => {
+				logger.error({ err }, "cron:savedSearchAlert — unhandled error");
+			})
+			.finally(() => {
+				_savedSearchAlertRunning = false;
+			});
 	});
 
 	logger.info({ schedule: SCHEDULE }, "cron:savedSearchAlert — registered");

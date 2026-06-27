@@ -214,8 +214,8 @@ export const blockUser = async (requestingUserId, targetUserId) => {
 
 		// Soft cap — re-checked inside the transaction to prevent TOCTOU race.
 		const { rows: countRows } = await client.query(
-			`SELECT COUNT(*)::int AS cnt FROM roommate_blocks WHERE blocker_id = $1`,
-			[requestingUserId],
+			`SELECT COUNT(*)::int AS cnt FROM roommate_blocks WHERE blocker_id = $1 AND blocked_id <> $2`,
+			[requestingUserId, targetUserId],
 		);
 		if (countRows[0].cnt >= MAX_BLOCKS_PER_USER) {
 			throw new AppError(`You can block at most ${MAX_BLOCKS_PER_USER} users`, 422);
