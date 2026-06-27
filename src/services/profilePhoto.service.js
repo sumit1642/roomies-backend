@@ -1,7 +1,4 @@
 // src/services/profilePhoto.service.js
-// Fix: use CTE-based atomic UPDATE...RETURNING to get old_url in the same
-// round-trip as the write. This eliminates the pre-read race where concurrent
-// uploads could orphan a blob that was overwritten between SELECT and UPDATE.
 
 import sharp from "sharp";
 import { pool } from "../db/client.js";
@@ -32,6 +29,21 @@ const tryDeleteBlob = async (url, context) => {
 	}
 };
 
+// Checks the DB to see whether the given URL is still referenced by the profile
+// row. Returns true when the row owns that URL (so we must NOT delete it).
+const rowOwnsUrl = async (table, userId, url) => {
+	try {
+		const { rows } = await pool.query(
+			`SELECT 1 FROM ${table} WHERE user_id = $1 AND profile_photo_url = $2 AND deleted_at IS NULL`,
+			[userId, url],
+		);
+		return rows.length > 0;
+	} catch {
+		// If the ownership check itself fails, assume owned to be safe.
+		return true;
+	}
+};
+
 export const uploadStudentPhoto = async (requestingUserId, targetUserId, stagingPath) => {
 	if (requestingUserId !== targetUserId) {
 		throw new AppError("Forbidden", 403);
@@ -58,8 +70,17 @@ export const uploadStudentPhoto = async (requestingUserId, targetUserId, staging
 			[newUrl, targetUserId],
 		));
 	} catch (dbErr) {
-		// DB update failed after upload — delete the orphaned blob before rethrowing.
-		await tryDeleteBlob(newUrl, { userId: targetUserId, stage: "db-error-cleanup" });
+		// pool.query can throw after the backend committed (network drop, timeout).
+		// Re-check whether the row now owns newUrl before deleting it.
+		const owned = await rowOwnsUrl("student_profiles", targetUserId, newUrl);
+		if (!owned) {
+			await tryDeleteBlob(newUrl, { userId: targetUserId, stage: "db-error-cleanup" });
+		} else {
+			logger.warn(
+				{ userId: targetUserId, newUrl },
+				"profilePhoto: DB error but row already references newUrl — skipping blob delete",
+			);
+		}
 		throw dbErr;
 	}
 
@@ -72,8 +93,12 @@ export const uploadStudentPhoto = async (requestingUserId, targetUserId, staging
 	const oldUrl = rows[0].old_url;
 	logger.info({ userId: targetUserId, newUrl, hadPrevious: Boolean(oldUrl) }, "Student profile photo updated");
 
-	// Delete old blob after DB commit so storage errors don't affect the response.
-	await tryDeleteBlob(oldUrl, { userId: targetUserId, stage: "replace-old" });
+	// Delete old blob after DB commit — but only when oldUrl differs from newUrl.
+	// Azure Blob Storage overwrites in place and returns the same URL for the same
+	// object key, so when oldUrl === newUrl the "old" blob is the one we just wrote.
+	if (oldUrl && oldUrl !== newUrl) {
+		await tryDeleteBlob(oldUrl, { userId: targetUserId, stage: "replace-old" });
+	}
 
 	return { profilePhotoUrl: newUrl };
 };
@@ -135,8 +160,16 @@ export const uploadPgOwnerPhoto = async (requestingUserId, targetUserId, staging
 			[newUrl, targetUserId],
 		));
 	} catch (dbErr) {
-		// DB update failed after upload — delete the orphaned blob before rethrowing.
-		await tryDeleteBlob(newUrl, { userId: targetUserId, stage: "db-error-cleanup" });
+		// Same guarded cleanup as uploadStudentPhoto above.
+		const owned = await rowOwnsUrl("pg_owner_profiles", targetUserId, newUrl);
+		if (!owned) {
+			await tryDeleteBlob(newUrl, { userId: targetUserId, stage: "db-error-cleanup" });
+		} else {
+			logger.warn(
+				{ userId: targetUserId, newUrl },
+				"profilePhoto: DB error but pg_owner row already references newUrl — skipping blob delete",
+			);
+		}
 		throw dbErr;
 	}
 
@@ -147,7 +180,11 @@ export const uploadPgOwnerPhoto = async (requestingUserId, targetUserId, staging
 
 	const oldUrl = rows[0].old_url;
 	logger.info({ userId: targetUserId, newUrl, hadPrevious: Boolean(oldUrl) }, "PG owner profile photo updated");
-	await tryDeleteBlob(oldUrl, { userId: targetUserId, stage: "replace-old" });
+
+	// Skip delete when oldUrl === newUrl (same key, same blob).
+	if (oldUrl && oldUrl !== newUrl) {
+		await tryDeleteBlob(oldUrl, { userId: targetUserId, stage: "replace-old" });
+	}
 
 	return { profilePhotoUrl: newUrl };
 };

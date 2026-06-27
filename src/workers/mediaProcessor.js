@@ -155,16 +155,49 @@ export const startMediaWorker = () => {
 			}
 
 			if (finalUrl) {
+				// Before deleting the blob, verify no active listing_photos row owns it.
+				// A pool.query network error in the main handler can fire after the DB
+				// committed the URL update — in that case the row already references
+				// finalUrl and we must not delete it.
+				let blobIsOwned = false;
 				try {
-					await storageService.delete(finalUrl);
+					const { rows: ownerRows } = await pool.query(
+						`SELECT 1
+             FROM listing_photos
+             WHERE photo_id   = $1
+               AND listing_id = $2
+               AND photo_url  = $3
+               AND deleted_at IS NULL`,
+						[photoId, listingId, finalUrl],
+					);
+					blobIsOwned = ownerRows.length > 0;
+				} catch (checkErr) {
+					// Ownership check itself failed — err on the side of caution and keep
+					// the blob rather than risk deleting a live asset.
+					logger.error(
+						{ checkErr, finalUrl, photoId, listingId },
+						"Media worker: ownership check failed — skipping blob delete to be safe",
+					);
+					blobIsOwned = true;
+				}
+
+				if (!blobIsOwned) {
+					try {
+						await storageService.delete(finalUrl);
+						logger.warn(
+							{ finalUrl, photoId, listingId },
+							"Media worker: orphaned permanent file deleted after permanent job failure",
+						);
+					} catch (deleteErr) {
+						logger.error(
+							{ finalUrl, photoId, listingId, err: deleteErr },
+							"Media worker: failed to delete orphaned permanent file after permanent job failure",
+						);
+					}
+				} else {
 					logger.warn(
 						{ finalUrl, photoId, listingId },
-						"Media worker: orphaned permanent file deleted after permanent job failure",
-					);
-				} catch (deleteErr) {
-					logger.error(
-						{ finalUrl, photoId, listingId, err: deleteErr },
-						"Media worker: failed to delete orphaned permanent file after permanent job failure",
+						"Media worker: skipping blob delete — DB row owns finalUrl (DB commit succeeded despite JS error)",
 					);
 				}
 			} else {
