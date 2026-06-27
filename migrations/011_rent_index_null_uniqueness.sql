@@ -1,4 +1,4 @@
--- Migration 012: Enforce uniqueness of city-wide (locality IS NULL) rent_index rows
+-- Migration 011: Enforce uniqueness of city-wide (locality IS NULL) rent_index rows
 --
 -- PostgreSQL < 15: NULLs are always considered distinct in UNIQUE constraints,
 -- so multiple rows with locality IS NULL for the same (city, room_type) are
