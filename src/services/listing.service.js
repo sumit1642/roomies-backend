@@ -363,8 +363,6 @@ export const searchListings = async (userId, filters) => {
 		preferredGender,
 		listingType,
 		availableFrom,
-		lat,
-		lng,
 		radius,
 		amenityIds = [],
 		cursorTime,
@@ -372,6 +370,24 @@ export const searchListings = async (userId, filters) => {
 		cursorId,
 		limit = 20,
 	} = filters;
+
+	// lat/lng may come directly from the client (GPS, native geolocation) or
+	// be resolved here from a pincode (web pincode-search path — PRD:
+	// Proximity Search v2). Pulled out separately as `let`, not part of the
+	// destructuring above, because they may be reassigned by the pincode
+	// resolution block below. lat/lng wins over pincode when both are
+	// present — GPS is strictly more precise than a pincode centroid.
+	let { lat, lng } = filters;
+
+	if ((lat === undefined || lng === undefined) && filters.pincode !== undefined) {
+		const { rows: pincodeRows } = await pool.query(`SELECT latitude, longitude FROM pincodes WHERE pincode = $1`, [
+			filters.pincode,
+		]);
+		if (!pincodeRows.length) {
+			throw new AppError("We don't recognize that pincode", 404);
+		}
+		({ latitude: lat, longitude: lng } = pincodeRows[0]);
+	}
 
 	const clauses = [`l.status = 'active'`, `l.deleted_at IS NULL`, `l.expires_at > NOW()`];
 	const params = [];
