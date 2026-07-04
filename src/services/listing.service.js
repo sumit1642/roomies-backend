@@ -7,6 +7,7 @@ import { assertPgOwnerVerified } from "../db/utils/pgOwner.js";
 import { expirePendingRequestsForListing } from "./interest.service.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 import { dedupePreferencesByKey } from "../config/preferences.js";
+import { getPincode } from "./pincode.service.js";
 
 const PROPERTY_OWNED_LOCATION_FIELDS = new Set([
 	"addressLine",
@@ -380,13 +381,7 @@ export const searchListings = async (userId, filters) => {
 	let { lat, lng } = filters;
 
 	if ((lat === undefined || lng === undefined) && filters.pincode !== undefined) {
-		const { rows: pincodeRows } = await pool.query(`SELECT latitude, longitude FROM pincodes WHERE pincode = $1`, [
-			filters.pincode,
-		]);
-		if (!pincodeRows.length) {
-			throw new AppError("We don't recognize that pincode", 404);
-		}
-		({ latitude: lat, longitude: lng } = pincodeRows[0]);
+		({ latitude: lat, longitude: lng } = await getPincode(filters.pincode));
 	}
 
 	const clauses = [`l.status = 'active'`, `l.deleted_at IS NULL`, `l.expires_at > NOW()`];

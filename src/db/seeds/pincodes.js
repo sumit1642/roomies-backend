@@ -87,7 +87,6 @@ export const resolvePincode = (pincode, rawRows) => {
 		tier: getTier(row.officetype, row.officename),
 	}));
 
-	const anySwapCorrected = resolvedRows.some((r) => r.coord.usable && r.coord.swapped);
 	const usableRows = resolvedRows.filter((r) => r.coord.usable);
 
 	if (usableRows.length === 0) {
@@ -96,6 +95,7 @@ export const resolvePincode = (pincode, rawRows) => {
 
 	const bestTier = Math.min(...usableRows.map((r) => r.tier));
 	const topTierRows = usableRows.filter((r) => r.tier === bestTier);
+	const swapCorrected = topTierRows.some((r) => r.coord.swapped);
 
 	// "priority" only if a real (non-fallback) tier signal actually narrowed
 	// the candidate set below the full usable pool for this pincode — matches
@@ -175,8 +175,10 @@ const readCsvRows = async (csvPath) => {
 	let header = null;
 	const rowsByPincode = new Map();
 	let totalRows = 0;
+	let rawLineNumber = 0;
 
 	for await (const line of rl) {
+		rawLineNumber++;
 		if (!line.trim()) continue;
 
 		if (!header) {
@@ -201,7 +203,7 @@ const readCsvRows = async (csvPath) => {
 		if (!/^\d{6}$/.test(pincode)) {
 			// Matches profile_pincodes.py's format check; real dataset had 0
 			// such rows, but guard against a future CSV revision introducing them.
-			logger.warn({ pincode, line: totalRows + 2 }, "pincodes.js: skipping row with malformed pincode");
+			logger.warn({ pincode, line: rawLineNumber }, "pincodes.js: skipping row with malformed pincode");
 			continue;
 		}
 
@@ -227,14 +229,14 @@ const readCsvRows = async (csvPath) => {
 // src/db/seeds/amenities.js. Batched to keep any single INSERT statement's
 // parameter count reasonable across ~19.5k rows. ────────────────────────────
 const INSERT_BATCH_SIZE = 1000;
-const COLUMNS_PER_ROW = 8; // pincode, city, district, state, latitude, longitude, office_count, resolution, swap_corrected -> see below (9 actually)
+const COLUMNS_PER_ROW = 9; // pincode, city, district, state, latitude, longitude, office_count, resolution, swap_corrected
 
 const insertBatch = async (batch) => {
 	if (!batch.length) return 0;
 
 	const placeholders = batch
 		.map((_, i) => {
-			const base = i * 9;
+			const base = i * COLUMNS_PER_ROW;
 			return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9})`;
 		})
 		.join(", ");
