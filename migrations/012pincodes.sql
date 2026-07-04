@@ -1,4 +1,4 @@
--- Active: 1777192065763@@127.0.0.1@5432@roomies_db
+-- Migration 012: Pincode reference table for proximity search v2
 -- Migration 012: Pincode reference table for proximity search v2
 --
 -- One row per pincode (not per post office). Read-only reference data,
