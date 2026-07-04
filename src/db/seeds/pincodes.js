@@ -122,7 +122,7 @@ export const resolvePincode = (pincode, rawRows) => {
 		state: representative.statename?.trim(),
 		officeCount: rawRows.length,
 		resolution,
-		swapCorrected: anySwapCorrected,
+		swapCorrected: swapCorrected,
 	};
 };
 
