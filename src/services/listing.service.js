@@ -7,6 +7,7 @@ import { assertPgOwnerVerified } from "../db/utils/pgOwner.js";
 import { expirePendingRequestsForListing } from "./interest.service.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 import { dedupePreferencesByKey } from "../config/preferences.js";
+import { getPincode } from "./pincode.service.js";
 
 const PROPERTY_OWNED_LOCATION_FIELDS = new Set([
 	"addressLine",
@@ -363,8 +364,6 @@ export const searchListings = async (userId, filters) => {
 		preferredGender,
 		listingType,
 		availableFrom,
-		lat,
-		lng,
 		radius,
 		amenityIds = [],
 		cursorTime,
@@ -372,6 +371,18 @@ export const searchListings = async (userId, filters) => {
 		cursorId,
 		limit = 20,
 	} = filters;
+
+	// lat/lng may come directly from the client (GPS, native geolocation) or
+	// be resolved here from a pincode (web pincode-search path — PRD:
+	// Proximity Search v2). Pulled out separately as `let`, not part of the
+	// destructuring above, because they may be reassigned by the pincode
+	// resolution block below. lat/lng wins over pincode when both are
+	// present — GPS is strictly more precise than a pincode centroid.
+	let { lat, lng } = filters;
+
+	if ((lat === undefined || lng === undefined) && filters.pincode !== undefined) {
+		({ latitude: lat, longitude: lng } = await getPincode(filters.pincode));
+	}
 
 	const clauses = [`l.status = 'active'`, `l.deleted_at IS NULL`, `l.expires_at > NOW()`];
 	const params = [];

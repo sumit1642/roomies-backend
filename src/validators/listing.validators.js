@@ -44,6 +44,13 @@ export const searchListingsSchema = z.object({
 			lng: z.coerce.number().min(-180).max(180).optional(),
 			radius: z.coerce.number().int().min(100).max(50_000).default(5_000),
 
+			// Web pincode-search path (PRD: Proximity Search v2). No refinement
+			// forcing mutual exclusivity with lat/lng — both are legal to send;
+			// the service layer (searchListings) decides precedence: lat/lng
+			// wins when both are present, since GPS is strictly more precise
+			// than a pincode centroid.
+			pincode: z.string().regex(/^\d{6}$/, { error: "pincode must be exactly 6 digits" }).optional(),
+
 			amenityIds: z.preprocess(
 				(val) => {
 					if (typeof val !== "string") return val;
