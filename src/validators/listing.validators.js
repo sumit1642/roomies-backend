@@ -49,7 +49,10 @@ export const searchListingsSchema = z.object({
 			// the service layer (searchListings) decides precedence: lat/lng
 			// wins when both are present, since GPS is strictly more precise
 			// than a pincode centroid.
-			pincode: z.string().regex(/^\d{6}$/, { error: "pincode must be exactly 6 digits" }).optional(),
+			pincode: z
+				.string()
+				.regex(/^\d{6}$/, { error: "pincode must be exactly 6 digits" })
+				.optional(),
 
 			amenityIds: z.preprocess(
 				(val) => {
@@ -170,6 +173,15 @@ export const createListingSchema = z.object({
 					(data.latitude === undefined && data.longitude === undefined),
 				{
 					error: "Coordinates are not accepted for pg_room or hostel_bed listings — location is inherited from the property",
+					path: ["latitude"],
+				},
+			)
+			.refine(
+				(data) =>
+					data.listingType !== "student_room" ||
+					(data.latitude !== undefined && data.longitude !== undefined),
+				{
+					error: "latitude and longitude are required for student_room listings — without them the listing cannot appear in proximity or pincode searches",
 					path: ["latitude"],
 				},
 			)

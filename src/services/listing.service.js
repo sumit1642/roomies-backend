@@ -381,7 +381,17 @@ export const searchListings = async (userId, filters) => {
 	let { lat, lng } = filters;
 
 	if ((lat === undefined || lng === undefined) && filters.pincode !== undefined) {
-		({ latitude: lat, longitude: lng } = await getPincode(filters.pincode));
+		try {
+			({ latitude: lat, longitude: lng } = await getPincode(filters.pincode));
+		} catch (err) {
+			if (!(err instanceof AppError && err.statusCode === 404)) {
+				throw err;
+			}
+			logger.warn(
+				{ pincode: filters.pincode },
+				"searchListings: pincode not found in reference table — proceeding without proximity filter",
+			);
+		}
 	}
 
 	const clauses = [`l.status = 'active'`, `l.deleted_at IS NULL`, `l.expires_at > NOW()`];
