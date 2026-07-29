@@ -407,7 +407,8 @@ WHERE
     status = 'active'
     AND deleted_at IS NULL;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_listings_city_lower ON listings (LOWER(city))
+-- CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_listings_city_lower ON listings (LOWER(city))
+CREATE INDEX  IF NOT EXISTS idx_listings_city_lower ON listings (LOWER(city))
 WHERE
     status = 'active'
     AND deleted_at IS NULL;
@@ -548,7 +549,8 @@ CREATE INDEX IF NOT EXISTS idx_connections_listing_id ON connections (listing_id
 WHERE
     deleted_at IS NULL;
 
-CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_connections_interest_request_id ON connections (interest_request_id)
+-- CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_connections_interest_request_id ON connections (interest_request_id)
+CREATE UNIQUE INDEX  IF NOT EXISTS idx_connections_interest_request_id ON connections (interest_request_id)
 WHERE
     interest_request_id IS NOT NULL
     AND deleted_at IS NULL;
