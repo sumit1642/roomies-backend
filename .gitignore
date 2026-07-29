@@ -9,6 +9,7 @@ node_modules/
 .env.render
 .env.*.local
 env.render
+.env.test
 # Local file uploads — stored on disk in dev, Azure Blob in prod
 uploads/
 

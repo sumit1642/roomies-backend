@@ -1,0 +1,289 @@
+<div id="root"></div>
+<style>
+  :root{
+    --bg:#eef1f4; --panel:#ffffff; --ink:#151a21; --sub:#5b6572;
+    --line:#dde2e8; --accent:#1f6f5c; --amber:#b9790a; --slate:#6b7280;
+    --get:#1f7a4d; --post:#1d5fa8; --put:#a86a0a; --patch:#7a4dab; --del:#b23a3a;
+    --mono: 'SFMono-Regular', ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);}
+  #root{max-width:920px;margin:0 auto;padding:20px 16px 48px;}
+
+  .head{display:flex;flex-direction:column;gap:10px;margin-bottom:20px;}
+  .head h1{font-size:18px;font-weight:700;margin:0;letter-spacing:-0.01em;}
+  .head p{margin:0;color:var(--sub);font-size:13px;font-family:var(--mono);}
+  .progress-row{display:flex;align-items:center;gap:10px;}
+  .progress-track{flex:1;height:8px;border-radius:99px;background:var(--line);overflow:hidden;}
+  .progress-fill{height:100%;background:var(--accent);transition:width .25s ease;}
+  .progress-label{font-family:var(--mono);font-size:12px;color:var(--sub);white-space:nowrap;}
+
+  .grid{display:grid;grid-template-columns:1fr;gap:12px;}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;}
+  .card-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;cursor:pointer;user-select:none;}
+  .card-head:hover{background:#fafbfc;}
+  .card-title{display:flex;align-items:baseline;gap:8px;}
+  .suite-idx{font-family:var(--mono);font-size:11px;color:var(--sub);}
+  .suite-name{font-weight:600;font-size:14px;}
+  .card-meta{display:flex;align-items:center;gap:10px;}
+  .mini-track{width:70px;height:6px;border-radius:99px;background:var(--line);overflow:hidden;}
+  .mini-fill{height:100%;background:var(--accent);}
+  .mini-count{font-family:var(--mono);font-size:11px;color:var(--sub);width:38px;text-align:right;}
+  .chev{transition:transform .15s ease;color:var(--sub);}
+  .chev.open{transform:rotate(90deg);}
+
+  .endpoints{border-top:1px solid var(--line);padding:4px 8px;}
+  .endpoint-row{display:flex;align-items:center;gap:10px;padding:8px 8px;border-radius:6px;}
+  .endpoint-row:hover{background:#f6f8f9;}
+  .endpoint-row input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer;}
+  .method{font-family:var(--mono);font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;color:#fff;min-width:44px;text-align:center;}
+  .m-GET{background:var(--get);} .m-POST{background:var(--post);} .m-PUT{background:var(--put);}
+  .m-PATCH{background:var(--patch);} .m-DELETE{background:var(--del);}
+  .path{font-family:var(--mono);font-size:12.5px;color:var(--ink);}
+  .label{font-size:12px;color:var(--sub);margin-left:auto;text-align:right;}
+  .done .path{text-decoration:line-through;color:var(--sub);}
+
+  .footer-note{margin-top:18px;font-size:11.5px;color:var(--sub);font-family:var(--mono);line-height:1.6;}
+</style>
+<script>
+const SUITES = [
+  { id: "00", name: "health", endpoints: [
+    ["GET","/api/v1/health","liveness + DB/Redis probe"],
+  ]},
+  { id: "01", name: "auth", endpoints: [
+    ["POST","/auth/register","student + pg_owner"],
+    ["POST","/auth/login",""],
+    ["POST","/auth/logout",""],
+    ["POST","/auth/logout/current",""],
+    ["POST","/auth/logout/all",""],
+    ["GET","/auth/sessions",""],
+    ["DELETE","/auth/sessions/:sid",""],
+    ["POST","/auth/refresh","cookie + rotation"],
+    ["POST","/auth/otp/send",""],
+    ["POST","/auth/otp/verify",""],
+    ["GET","/auth/me",""],
+    ["POST","/auth/google/callback","stub verifyIdToken"],
+  ]},
+  { id: "02", name: "students", endpoints: [
+    ["GET","/students/:id/profile",""],
+    ["PUT","/students/:id/profile",""],
+    ["PUT","/students/:id/photo",""],
+    ["DELETE","/students/:id/photo",""],
+    ["GET","/students/:id/contact/reveal","guest quota + auth"],
+    ["GET","/students/:id/preferences",""],
+    ["PUT","/students/:id/preferences",""],
+  ]},
+  { id: "03", name: "roommate", endpoints: [
+    ["GET","/students/roommates","feed + compat score"],
+    ["PUT","/students/:id/roommate-profile",""],
+    ["POST","/students/:id/block/:targetId",""],
+    ["DELETE","/students/:id/block/:targetId",""],
+  ]},
+  { id: "04", name: "pgOwners", endpoints: [
+    ["GET","/pg-owners/:id/profile",""],
+    ["PUT","/pg-owners/:id/photo",""],
+    ["DELETE","/pg-owners/:id/photo",""],
+    ["POST","/pg-owners/:id/contact/reveal",""],
+    ["PUT","/pg-owners/:id/profile",""],
+    ["POST","/pg-owners/:id/documents",""],
+  ]},
+  { id: "05", name: "verification", endpoints: [
+    ["POST","/verification/submit",""],
+    ["GET","/verification/queue","admin"],
+    ["PATCH","/verification/:id/approve","admin"],
+    ["PATCH","/verification/:id/reject","admin"],
+  ]},
+  { id: "06", name: "properties", endpoints: [
+    ["GET","/properties/:id",""],
+    ["GET","/properties","owner list"],
+    ["POST","/properties","requires verified owner"],
+    ["PUT","/properties/:id","location cascade to listings"],
+    ["DELETE","/properties/:id","blocked if active listings"],
+  ]},
+  { id: "07", name: "listings-crud", endpoints: [
+    ["POST","/listings","student_room + pg_room paths"],
+    ["GET","/listings/:id",""],
+    ["PUT","/listings/:id",""],
+    ["DELETE","/listings/:id",""],
+    ["PATCH","/listings/:id/status","valid transitions"],
+  ]},
+  { id: "08", name: "listings-search", endpoints: [
+    ["GET","/listings","city + rent + room/bed + gender"],
+    ["GET","/listings","amenities filter"],
+    ["GET","/listings","lat/lng radius"],
+    ["GET","/listings","pincode resolution"],
+    ["GET","/listings","cursor pagination"],
+    ["GET","/listings","compatibility sort"],
+  ]},
+  { id: "09", name: "listings-photos", endpoints: [
+    ["GET","/listings/:id/photos",""],
+    ["POST","/listings/:id/photos","202 processing"],
+    ["DELETE","/listings/:id/photos/:pid",""],
+    ["PATCH","/listings/:id/photos/:pid/cover",""],
+    ["PUT","/listings/:id/photos/reorder",""],
+  ]},
+  { id: "10", name: "listings-renewal-analytics", endpoints: [
+    ["POST","/listings/:id/renew",""],
+    ["GET","/listings/:id/analytics",""],
+    ["GET","/listings/:id/preferences",""],
+    ["PUT","/listings/:id/preferences",""],
+    ["POST","/listings/:id/save",""],
+    ["DELETE","/listings/:id/save",""],
+    ["GET","/listings/me/saved",""],
+  ]},
+  { id: "11", name: "interests", endpoints: [
+    ["POST","/listings/:id/interests",""],
+    ["GET","/listings/:id/interests","poster view"],
+    ["GET","/interests/me",""],
+    ["GET","/interests/:id",""],
+    ["PATCH","/interests/:id/status","accept/decline/withdraw"],
+  ]},
+  { id: "12", name: "connections", endpoints: [
+    ["GET","/connections/me",""],
+    ["GET","/connections/:id",""],
+    ["POST","/connections/:id/confirm","both parties"],
+  ]},
+  { id: "13", name: "ratings", endpoints: [
+    ["POST","/ratings","user + property"],
+    ["GET","/ratings/connection/:id",""],
+    ["GET","/ratings/user/:id","public"],
+    ["GET","/ratings/property/:id","public"],
+    ["GET","/ratings/me/given",""],
+  ]},
+  { id: "14", name: "reports", endpoints: [
+    ["POST","/ratings/:id/report",""],
+    ["GET","/reports/queue","admin"],
+    ["PATCH","/reports/:id/resolve","admin"],
+  ]},
+  { id: "15", name: "notifications", endpoints: [
+    ["GET","/notifications",""],
+    ["GET","/notifications/unread-count",""],
+    ["POST","/notifications/mark-read",""],
+  ]},
+  { id: "16", name: "savedSearches", endpoints: [
+    ["GET","/saved-searches",""],
+    ["POST","/saved-searches","10-per-user cap"],
+    ["PATCH","/saved-searches/:id",""],
+    ["DELETE","/saved-searches/:id",""],
+  ]},
+  { id: "17", name: "referenceData", endpoints: [
+    ["GET","/preferences/meta",""],
+    ["GET","/amenities",""],
+    ["GET","/rent-index",""],
+    ["GET","/pincodes/:pincode",""],
+  ]},
+];
+
+const STORAGE_KEY = "roomies-test-tracker-v1";
+let checked = {};
+let open = { "01": true };
+let saveErr = false;
+
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const computeTotals = () => {
+  let done = 0, total = 0;
+  const perSuite = {};
+  SUITES.forEach(s => {
+    let sDone = 0;
+    s.endpoints.forEach((_, i) => {
+      total++;
+      if (checked[`${s.id}-${i}`]) { done++; sDone++; }
+    });
+    perSuite[s.id] = { done: sDone, total: s.endpoints.length };
+  });
+  return { done, total, perSuite };
+};
+
+const render = () => {
+  const totals = computeTotals();
+  const root = document.getElementById("root");
+
+  const cards = SUITES.map(s => {
+    const isOpen = !!open[s.id];
+    const st = totals.perSuite[s.id];
+    const pct = st.total ? (st.done / st.total * 100) : 0;
+
+    const rows = s.endpoints.map(([method, path, label], i) => {
+      const key = `${s.id}-${i}`;
+      const isDone = !!checked[key];
+      return `
+        <label class="endpoint-row${isDone ? " done" : ""}">
+          <input type="checkbox" data-key="${key}" ${isDone ? "checked" : ""} />
+          <span class="method m-${method}">${method}</span>
+          <span class="path">${esc(path)}</span>
+          ${label ? `<span class="label">${esc(label)}</span>` : ""}
+        </label>`;
+    }).join("");
+
+    return `
+      <div class="card">
+        <div class="card-head" data-toggle-suite="${s.id}">
+          <div class="card-title">
+            <span class="suite-idx">${s.id}</span>
+            <span class="suite-name">${s.name}</span>
+          </div>
+          <div class="card-meta">
+            <div class="mini-track"><div class="mini-fill" style="width:${pct}%"></div></div>
+            <span class="mini-count">${st.done}/${st.total}</span>
+            <span class="chev${isOpen ? " open" : ""}">▶</span>
+          </div>
+        </div>
+        ${isOpen ? `<div class="endpoints">${rows}</div>` : ""}
+      </div>`;
+  }).join("");
+
+  root.innerHTML = `
+    <div class="head">
+      <h1>Roomies API — Test Coverage Tracker</h1>
+      <p>18 suites · ${totals.total} endpoints · synced across sessions</p>
+      <div class="progress-row">
+        <div class="progress-track">
+          <div class="progress-fill" style="width:${totals.total ? (totals.done / totals.total * 100) : 0}%"></div>
+        </div>
+        <div class="progress-label">${totals.done}/${totals.total}</div>
+      </div>
+      ${saveErr ? `<p style="color:#b23a3a">Couldn't save last change — check connection.</p>` : ""}
+    </div>
+    <div class="grid">${cards}</div>
+    <p class="footer-note">
+      Checking a box marks that endpoint's test as written &amp; passing. State is shared (window.storage, shared=true) —
+      anyone with this artifact sees the same board. Click a suite header to expand its endpoint list; the mini-bar
+      shows suite completion without needing to expand it.
+    </p>`;
+
+  root.querySelectorAll("[data-toggle-suite]").forEach(el => {
+    el.addEventListener("click", () => {
+      const id = el.getAttribute("data-toggle-suite");
+      open = { ...open, [id]: !open[id] };
+      render();
+    });
+  });
+
+  root.querySelectorAll("input[data-key]").forEach(el => {
+    el.addEventListener("click", (e) => e.stopPropagation());
+    el.addEventListener("change", async () => {
+      const key = el.getAttribute("data-key");
+      checked = { ...checked, [key]: !checked[key] };
+      render();
+      try {
+        await window.storage.set(STORAGE_KEY, JSON.stringify(checked), true);
+        saveErr = false;
+      } catch (e) {
+        saveErr = true;
+        render();
+      }
+    });
+  });
+};
+
+(async () => {
+  document.getElementById("root").innerHTML = `<div style="padding:20px;font-family:var(--mono);color:#5b6572">Loading board…</div>`;
+  try {
+    const res = await window.storage.get(STORAGE_KEY, true);
+    if (res && res.value) checked = JSON.parse(res.value);
+  } catch (e) { /* no saved state yet — fresh board */ }
+  render();
+})();
+</script>
