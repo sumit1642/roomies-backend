@@ -174,7 +174,8 @@ export const sendOtpEmail = async (to, otp) => {
 			`,
 		});
 
-		const previewUrl = nodemailer.getTestMessageUrl(info);
+		const previewUrl =
+			typeof nodemailer.getTestMessageUrl === "function" ? nodemailer.getTestMessageUrl(info) : undefined;
 		if (previewUrl) {
 			logger.info(
 				{ to: maskedTo, previewUrl, provider: "ethereal" },
@@ -304,7 +305,8 @@ export const sendVerificationApprovedEmail = async (to, ownerName, businessName)
       `,
 		});
 
-		const previewUrl = nodemailer.getTestMessageUrl(info);
+		const previewUrl =
+			typeof nodemailer.getTestMessageUrl === "function" ? nodemailer.getTestMessageUrl(info) : undefined;
 		if (previewUrl) {
 			logger.info({ to: maskedTo, previewUrl }, "Verification approved email sent (Ethereal preview)");
 		} else {
@@ -438,7 +440,8 @@ export const sendVerificationRejectedEmail = async (to, ownerName, rejectionReas
       `,
 		});
 
-		const previewUrl = nodemailer.getTestMessageUrl(info);
+		const previewUrl =
+			typeof nodemailer.getTestMessageUrl === "function" ? nodemailer.getTestMessageUrl(info) : undefined;
 		if (previewUrl) {
 			logger.info({ to: maskedTo, previewUrl }, "Verification rejected email sent (Ethereal preview)");
 		} else {
@@ -563,7 +566,8 @@ export const sendVerificationPendingEmail = async (to, ownerName, businessName) 
             `,
 		});
 
-		const previewUrl = nodemailer.getTestMessageUrl(info);
+		const previewUrl =
+			typeof nodemailer.getTestMessageUrl === "function" ? nodemailer.getTestMessageUrl(info) : undefined;
 		if (previewUrl) {
 			logger.info({ to: maskedTo, previewUrl }, "Verification pending email sent (Ethereal preview)");
 		} else {

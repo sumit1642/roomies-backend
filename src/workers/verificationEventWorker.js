@@ -9,7 +9,7 @@ const BATCH_SIZE = 10;
 
 const MAX_ATTEMPTS = 5;
 
-const processEvent = async (event, client) => {
+export const processEvent = async (event, client) => {
 	const { event_id, event_type, user_id, request_id, rejection_reason } = event;
 
 	const { rows: userRows } = await client.query(
@@ -133,7 +133,7 @@ const processEvent = async (event, client) => {
 	return sideEffects;
 };
 
-const drainOutbox = async () => {
+export const drainOutbox = async () => {
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");

@@ -14,7 +14,8 @@ import { redis, connectRedis } from "../../src/cache/client.js";
 import { closeRateLimitRedisClient } from "../../src/middleware/rateLimiter.js";
 import { closeAllQueues } from "../../src/workers/queue.js";
 import { resetDb } from "./testDb.js";
-
+import request from "supertest";
+import { app } from "../../src/app.js";
 beforeAll(async () => {
 	if (!redis.isOpen) {
 		await connectRedis();
@@ -23,6 +24,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
 	await resetDb();
+	await request(app).post("/api/v1/test-utils/reset-rate-limits");
 });
 
 // Each test FILE gets its own module registry (see comment above), so a
