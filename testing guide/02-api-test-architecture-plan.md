@@ -206,3 +206,40 @@ Writing all 18 suites by hand in one pass is a multi-day effort even with helper
   rather than doing it turn-by-turn in chat.
 
 The tracker artifact tracks suite-by-suite progress either way.
+Good instinct to want a deliberate rollout rather than "write all 17 suites in one shot." Here's how I'd sequence it, based on what's actually in this codebase's dependency chain and risk profile — not just the alphabetical suite numbers.
+
+## The organizing principle
+
+Group by **shared setup cost** and **blast radius**, not by suite number. Three tiers:
+
+**Tier 1 — foundational, unlocks everything downstream.** If `01-auth` is broken, no other suite's fixtures work (they all call `registerUser`/`registerPgOwner`). This has to go first, alone, and needs the most scrutiny since a subtle auth bug silently invalidates every later suite's "passing" status.
+
+**Tier 2 — entity CRUD that other suites depend on as fixtures.** `students`, `pgOwners`, `properties`, `listings-crud`. These don't depend on each other much, but suites 3-16 depend on *them* existing (you can't test interests without a listing, can't test connections without an interest). Good candidates for **grouped, parallel-ish batches** since they're mostly independent of each other.
+
+**Tier 3 — behavior built on top of Tier 2 entities.** `interests`, `connections`, `ratings`, `notifications`, `savedSearches`, `roommate`, `reports`. These are where the interesting business logic bugs live (state machines, concurrency, the stuff we just found in verification). Best done **one at a time**, because each one tends to surface its own `013`/`014`-style migration bug and you don't want three of those tangled together in one PR.
+
+**Tier 4 — read-only reference data.** `referenceData` (preferences meta, amenities, rent-index, pincodes), `listings-search`, `listings-photos`. Lower risk, mostly query correctness, no state machines. Fine to batch together.
+
+## Concretely, in order
+
+| Batch | Suites | Why this grouping | Approach |
+|---|---|---|---|
+| 1 | `01-auth` | Everything else's fixtures depend on it | Solo, most careful |
+| 2 | `02-students`, `04-pgOwners` | Independent of each other, both just profile CRUD + contact-reveal gate | Together |
+| 3 | `06-properties`, `07-listings-crud` | properties → listings dependency, natural pair | Together |
+| 4 | `09-listings-photos`, `08-listings-search` | Depend on listings existing; photos has the async BullMQ quirk (test guide already flags this) | Together, but treat photos' "stays in processing state" behavior as its own careful sub-case |
+| 5 | `11-interests` | First state-machine suite (pending/accepted/declined/withdrawn + capacity-fill side effects) — exactly the kind of code that hid the verification bugs | Solo |
+| 6 | `12-connections` | Depends on interests (accept creates a connection) | Solo, right after interests |
+| 7 | `13-ratings`, `14-reports` | ratings needs a confirmed connection; reports needs a rating. Natural chain, but reports is small | Together |
+| 8 | `03-roommate` | Self-contained feed/block logic, no dependency on the interest/connection chain | Solo |
+| 9 | `15-notifications`, `16-savedSearches` | Both are "side outputs" of other flows, testable somewhat independently once earlier batches exist | Together |
+| 10 | `17-referenceData` | Pure read-only lookups, lowest risk | Solo, quick, last |
+
+## Why this isn't "all at once" or "one at a time" uniformly
+
+- **Auth alone** because a wrong assumption there (e.g. cookie flags, session rotation) would make every later suite's green checkmark meaningless — worth the isolation.
+- **Batching independent CRUD suites** (students+pgOwners, properties+listings-crud) saves time without adding risk, since they don't share mutable state or a trigger/outbox pattern the way verification did.
+- **Solo for state-machine suites** (interests, connections) because that's where we just found two real bugs in verification's outbox trigger — status-transition code is exactly where DB triggers, side effects, and race conditions hide, and untangling a failure across two suites at once (like we saw with 013 vs 014) is more expensive than doing them one at a time.
+- **referenceData last** because it's the least likely to reveal anything interesting and shouldn't block the tracker's visible progress on the stuff people actually care about.
+
+If you want, I can start on **Batch 1 (`01-auth`)** now — want me to write it, or would you rather review/adjust the sequencing first?
