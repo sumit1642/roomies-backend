@@ -30,35 +30,44 @@ export const mockNodemailer = () => {
 
 let queueEvents;
 
-const getQueueEvents = () => {
+export const getQueueEvents = () => {
 	queueEvents = queueEvents ?? new QueueEvents(EMAIL_QUEUE_NAME, { connection: bullConnection });
 	return queueEvents;
 };
+export const getQueueEventsReady = async () => {
+	const events = getQueueEvents();
+	await events.waitUntilReady();
+	return events;
+};
+
 
 export const waitForNextEmail = (timeoutMs = 5000) => {
 	const events = getQueueEvents();
 
-	return new Promise((resolve, reject) => {
-		const timer = setTimeout(() => {
-			events.off("completed", onCompleted);
-			events.off("failed", onFailed);
-			reject(new Error(`waitForNextEmail: no email job completed within ${timeoutMs}ms`));
-		}, timeoutMs);
+	return events.waitUntilReady().then(
+		() =>
+			new Promise((resolve, reject) => {
+				const timer = setTimeout(() => {
+					events.off("completed", onCompleted);
+					events.off("failed", onFailed);
+					reject(new Error(`waitForNextEmail: no email job completed within ${timeoutMs}ms`));
+				}, timeoutMs);
 
-		const onCompleted = ({ jobId }) => {
-			clearTimeout(timer);
-			events.off("failed", onFailed);
-			resolve(jobId);
-		};
-		const onFailed = ({ jobId, failedReason }) => {
-			clearTimeout(timer);
-			events.off("completed", onCompleted);
-			reject(new Error(`waitForNextEmail: job ${jobId} failed — ${failedReason}`));
-		};
+				const onCompleted = ({ jobId }) => {
+					clearTimeout(timer);
+					events.off("failed", onFailed);
+					resolve(jobId);
+				};
+				const onFailed = ({ jobId, failedReason }) => {
+					clearTimeout(timer);
+					events.off("completed", onCompleted);
+					reject(new Error(`waitForNextEmail: job ${jobId} failed — ${failedReason}`));
+				};
 
-		events.once("completed", onCompleted);
-		events.once("failed", onFailed);
-	});
+				events.once("completed", onCompleted);
+				events.once("failed", onFailed);
+			}),
+	);
 };
 
 export const closeEmailTestListener = async () => {

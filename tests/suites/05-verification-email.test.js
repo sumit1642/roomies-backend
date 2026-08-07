@@ -12,12 +12,12 @@
 // was already a standalone function, just not exported until now.
 
 import { jest } from "@jest/globals";
-import { mockNodemailer, findSentMailTo } from "../setup/testEmail.js";
+import { mockNodemailer, findSentMailTo, waitForNextEmail, closeEmailTestListener, getQueueEvents, getQueueEventsReady } from "../setup/testEmail.js";
 import { registerPgOwner } from "../setup/testAuth.js";
 
 mockNodemailer();
 
-let app, drainOutbox, nodemailerMock, pool, redis;
+let app, drainOutbox, startEmailWorker, nodemailerMock, pool, redis, emailWorker;
 
 // Minimal admin bootstrap: promote a registered user to admin role directly
 // via SQL, since there's no public admin-signup endpoint. Mirrors how other
@@ -32,13 +32,31 @@ const makeAdmin = async (userId) => {
 beforeAll(async () => {
 	({ app } = await import("../../src/app.js"));
 	({ drainOutbox } = await import("../../src/workers/verificationEventWorker.js"));
+	({ startEmailWorker } = await import("../../src/workers/emailWorker.js"));
 	({ pool } = await import("../../src/db/client.js"));
 	({ redis } = await import("../../src/cache/client.js"));
 	nodemailerMock = (await import("nodemailer-mock")).default ?? (await import("nodemailer-mock"));
+	emailWorker = startEmailWorker();
+	await getQueueEventsReady(); 
 });
+
+const waitForEmailAfter = async (action) => {
+	const events = getQueueEvents(); // if exported, or expose a `ready()` helper
+	await events.waitUntilReady();
+	const waitPromise = waitForNextEmail(); // now safe — listener attaches synchronously since already ready
+	const result = await action();
+	await drainOutbox();
+	await waitPromise;
+	return result;
+};
 
 afterEach(() => {
 	nodemailerMock.mock.reset();
+});
+
+afterAll(async () => {
+	await closeEmailTestListener();
+	await emailWorker.close();
 });
 
 describe("Verification event outbox -> email pipeline", () => {
@@ -55,19 +73,20 @@ describe("Verification event outbox -> email pipeline", () => {
 		});
 		await makeAdmin(admin.userId);
 
-		const submitRes = await ownerAgent.post(`/api/v1/pg-owners/${owner.userId}/documents`).send({
-			documentType: "owner_id",
-			documentUrl: "https://example.com/doc.pdf",
-		});
+		const submitRes = await waitForEmailAfter(() =>
+			ownerAgent.post(`/api/v1/pg-owners/${owner.userId}/documents`).send({
+				documentType: "owner_id",
+				documentUrl: "https://example.com/doc.pdf",
+			}),
+		);
 		expect(submitRes.status).toBe(201);
 		const requestId = submitRes.body.data.request_id;
 
-		const approveRes = await adminAgent.patch(`/api/v1/verification/${requestId}/approve`).send({});
+		nodemailerMock.mock.reset();
+		const approveRes = await waitForEmailAfter(() =>
+			adminAgent.patch(`/api/v1/verification/${requestId}/approve`).send({}),
+		);
 		expect(approveRes.status).toBe(200);
-
-		// Outbox row now exists (written by the DB trigger inside the same
-		// transaction as the status UPDATE) — drain it directly.
-		await drainOutbox();
 
 		const { rows } = await pool.query(`SELECT verification_status FROM pg_owner_profiles WHERE user_id = $1`, [
 			owner.userId,
@@ -92,18 +111,21 @@ describe("Verification event outbox -> email pipeline", () => {
 		});
 		await makeAdmin(admin.userId);
 
-		const submitRes = await ownerAgent.post(`/api/v1/pg-owners/${owner.userId}/documents`).send({
-			documentType: "owner_id",
-			documentUrl: "https://example.com/doc.pdf",
-		});
+		const submitRes = await waitForEmailAfter(() =>
+			ownerAgent.post(`/api/v1/pg-owners/${owner.userId}/documents`).send({
+				documentType: "owner_id",
+				documentUrl: "https://example.com/doc.pdf",
+			}),
+		);
 		const requestId = submitRes.body.data.request_id;
 
-		const rejectRes = await adminAgent.patch(`/api/v1/verification/${requestId}/reject`).send({
-			rejectionReason: "Document was illegible",
-		});
+		nodemailerMock.mock.reset();
+		const rejectRes = await waitForEmailAfter(() =>
+			adminAgent.patch(`/api/v1/verification/${requestId}/reject`).send({
+				rejectionReason: "Document was illegible",
+			}),
+		);
 		expect(rejectRes.status).toBe(200);
-
-		await drainOutbox();
 
 		const { rows } = await pool.query(
 			`SELECT verification_status, rejection_reason FROM pg_owner_profiles WHERE user_id = $1`,
@@ -126,13 +148,13 @@ describe("Verification event outbox -> email pipeline", () => {
 			email: `verify-pending-${Date.now()}@business.test`,
 		});
 
-		const submitRes = await ownerAgent.post(`/api/v1/pg-owners/${owner.userId}/documents`).send({
-			documentType: "owner_id",
-			documentUrl: "https://example.com/doc.pdf",
-		});
+		const submitRes = await waitForEmailAfter(() =>
+			ownerAgent.post(`/api/v1/pg-owners/${owner.userId}/documents`).send({
+				documentType: "owner_id",
+				documentUrl: "https://example.com/doc.pdf",
+			}),
+		);
 		expect(submitRes.status).toBe(201);
-
-		await drainOutbox();
 
 		const mail = findSentMailTo(nodemailerMock, ownerEmail);
 		expect(mail).not.toBeNull();
@@ -148,12 +170,12 @@ describe("Verification event outbox -> email pipeline", () => {
 			email: `verify-idempotent-${Date.now()}@business.test`,
 		});
 
-		await ownerAgent.post(`/api/v1/pg-owners/${owner.userId}/documents`).send({
-			documentType: "owner_id",
-			documentUrl: "https://example.com/doc.pdf",
-		});
-
-		await drainOutbox();
+		await waitForEmailAfter(() =>
+			ownerAgent.post(`/api/v1/pg-owners/${owner.userId}/documents`).send({
+				documentType: "owner_id",
+				documentUrl: "https://example.com/doc.pdf",
+			}),
+		);
 		nodemailerMock.mock.reset();
 
 		// Second drain should find no unprocessed rows for this event.
