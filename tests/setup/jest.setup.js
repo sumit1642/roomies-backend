@@ -15,8 +15,11 @@ import { closeRateLimitRedisClient } from "../../src/middleware/rateLimiter.js";
 import { closeAllQueues } from "../../src/workers/queue.js";
 import { resetDb } from "./testDb.js";
 import request from "supertest";
-import { app } from "../../src/app.js";
+
+let app;
 beforeAll(async () => {
+	({ app } = await import("../../src/app.js"));
+
 	if (!redis.isOpen) {
 		await connectRedis();
 	}
