@@ -199,17 +199,23 @@ export const rejectRequest = async (adminUserId, requestId, { rejectionReason, a
 	try {
 		await client.query("BEGIN");
 
+		// rejection_reason is written onto verification_requests itself (not just
+		// pg_owner_profiles) so that trg_verification_status_changed can read the
+		// real reason via NEW.rejection_reason when it inserts the
+		// verification_rejected outbox row. admin_notes remains a separate,
+		// admin-internal field and is never used as the reason shown to the owner.
 		const { rowCount, rows: requestRows } = await client.query(
 			`UPDATE verification_requests
-			SET status      = 'rejected',
-				reviewed_at = NOW(),
-				reviewed_by = $1,
-				admin_notes = $2
-			WHERE request_id = $3
+			SET status            = 'rejected',
+				reviewed_at       = NOW(),
+				reviewed_by       = $1,
+				admin_notes       = $2,
+				rejection_reason  = $3
+			WHERE request_id = $4
 				AND status = 'pending'
 				AND deleted_at IS NULL
 			RETURNING user_id`,
-			[adminUserId, adminNotes ?? null, requestId],
+			[adminUserId, adminNotes ?? null, rejectionReason, requestId],
 		);
 
 		if (rowCount === 0) {
