@@ -244,3 +244,76 @@ describe("GET /students/:userId/preferences, PUT /students/:userId/preferences",
 		expect(res.body.data[0].preferenceValue).toBe("not_okay");
 	});
 });
+
+describe("phone visibility on GET /students/:userId/profile", () => {
+	test("self-view includes phone after it is set", async () => {
+		const { agent, user } = await registerStudent({ email: uniqueEmail("phone-self") });
+
+		await agent.put(`/api/v1/students/${user.userId}/profile`).send({ phone: "9876543210" });
+
+		const res = await agent.get(`/api/v1/students/${user.userId}/profile`);
+
+		expect(res.status).toBe(200);
+		expect(res.body.data.phone).toBe("9876543210");
+	});
+
+	test("stranger view omits phone", async () => {
+		const { agent: targetAgent, user: target } = await registerStudent({ email: uniqueEmail("phone-target") });
+		await targetAgent.put(`/api/v1/students/${target.userId}/profile`).send({ phone: "9876543210" });
+
+		const { agent: viewerAgent } = await registerStudent({ email: uniqueEmail("phone-stranger") });
+
+		const res = await viewerAgent.get(`/api/v1/students/${target.userId}/profile`);
+
+		expect(res.status).toBe(200);
+		expect(res.body.data.phone).toBeNull();
+	});
+
+	test("PUT response always includes a phone key, even when phone wasn't updated", async () => {
+		const { agent, user } = await registerStudent({ email: uniqueEmail("phone-shape") });
+
+		const res = await agent.put(`/api/v1/students/${user.userId}/profile`).send({ bio: "no phone here" });
+
+		expect(res.status).toBe(200);
+		expect(res.body.data).toHaveProperty("phone");
+		expect(res.body.data.phone).toBeNull();
+	});
+
+	test("connected party (confirmed connection) can see phone", async () => {
+		const { agent: posterAgent, user: poster } = await registerStudent({ email: uniqueEmail("phone-conn-poster") });
+		await posterAgent.put(`/api/v1/students/${poster.userId}/profile`).send({ phone: "9111111111" });
+
+		const listingRes = await posterAgent.post("/api/v1/listings").send({
+			listingType: "student_room",
+			title: "Room for connection phone test",
+			rentPerMonth: 6000,
+			roomType: "single",
+			totalCapacity: 2,
+			availableFrom: "2026-09-01",
+			addressLine: "1 Test Street",
+			city: "Delhi",
+			latitude: 28.6139,
+			longitude: 77.209,
+		});
+		const listingId = listingRes.body.data.listing_id;
+
+		const { agent: senderAgent, user: sender } = await registerStudent({ email: uniqueEmail("phone-conn-sender") });
+		const interestRes = await senderAgent.post(`/api/v1/listings/${listingId}/interests`);
+		const acceptRes = await posterAgent
+			.patch(`/api/v1/interests/${interestRes.body.data.interestRequestId}/status`)
+			.send({ status: "accepted" });
+		const connectionId = acceptRes.body.data.connectionId;
+
+		// Not confirmed yet — sender should still NOT see poster's phone.
+		const beforeConfirm = await senderAgent.get(`/api/v1/students/${poster.userId}/profile`);
+		expect(beforeConfirm.body.data.phone).toBeNull();
+
+		// Confirm from both sides.
+		await senderAgent.post(`/api/v1/connections/${connectionId}/confirm`);
+		await posterAgent.post(`/api/v1/connections/${connectionId}/confirm`);
+
+		const afterConfirm = await senderAgent.get(`/api/v1/students/${poster.userId}/profile`);
+		expect(afterConfirm.status).toBe(200);
+		expect(afterConfirm.body.data.phone).toBe("9111111111");
+	});
+});

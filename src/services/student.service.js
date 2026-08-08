@@ -32,6 +32,20 @@ export const getStudentProfile = async (requestingUserId, targetUserId) => {
 			sp.institution_id,
 			sp.is_aadhaar_verified,
 			CASE WHEN $2::uuid = sp.user_id THEN u.email ELSE NULL END AS email,
+			CASE
+				WHEN $2::uuid = sp.user_id THEN u.phone
+				WHEN EXISTS (
+					SELECT 1 FROM connections c
+					WHERE c.confirmation_status = 'confirmed'
+					  AND c.deleted_at IS NULL
+					  AND (
+					    (c.initiator_id = $2::uuid AND c.counterpart_id = sp.user_id)
+					    OR
+					    (c.counterpart_id = $2::uuid AND c.initiator_id = sp.user_id)
+					  )
+				) THEN u.phone
+				ELSE NULL
+			END AS phone,
 			u.is_email_verified,
 			u.average_rating,
 			u.rating_count,
@@ -105,12 +119,6 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 		}
 	}
 
-	// `phone` lives on `users`, not `student_profiles` — it is used by
-	// interest.service.js to build the WhatsApp contact link for accepted
-	// interest requests on student_room listings (the pg_owner equivalent is
-	// business_phone on pg_owner_profiles, updatable via the pg-owners route).
-	// Handled separately from columnMap/setClauses below since it targets a
-	// different table.
 	const updatePhone = updates.phone !== undefined;
 
 	if (!setClauses.length && !updatePhone) {
@@ -139,9 +147,6 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 			}
 			profileRow = rows[0];
 		} else {
-			// phone-only update: still confirm the profile exists (and isn't
-			// soft-deleted) so this path enforces the same guard as the
-			// combined-update path above.
 			const { rows } = await client.query(
 				`SELECT * FROM student_profiles WHERE user_id = $1 AND deleted_at IS NULL`,
 				[targetUserId],
@@ -166,11 +171,19 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 				throw new AppError("User not found", 404);
 			}
 			phone = userRows[0].phone;
+		} else {
+			// Always include phone in the response for a consistent shape,
+			// even when this call didn't touch it.
+			const { rows: userRows } = await client.query(
+				`SELECT phone FROM users WHERE user_id = $1 AND deleted_at IS NULL`,
+				[targetUserId],
+			);
+			phone = userRows[0]?.phone ?? null;
 		}
 
 		await client.query("COMMIT");
 
-		return phone !== undefined ? { ...profileRow, phone } : profileRow;
+		return { ...profileRow, phone };
 	} catch (err) {
 		await client.query("ROLLBACK");
 		throw err;
