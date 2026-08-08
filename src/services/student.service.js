@@ -105,26 +105,78 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 		}
 	}
 
-	if (!setClauses.length) {
+	// `phone` lives on `users`, not `student_profiles` — it is used by
+	// interest.service.js to build the WhatsApp contact link for accepted
+	// interest requests on student_room listings (the pg_owner equivalent is
+	// business_phone on pg_owner_profiles, updatable via the pg-owners route).
+	// Handled separately from columnMap/setClauses below since it targets a
+	// different table.
+	const updatePhone = updates.phone !== undefined;
+
+	if (!setClauses.length && !updatePhone) {
 		throw new AppError("No valid fields provided for update", 400);
 	}
 
-	values.push(targetUserId);
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
 
-	const { rows } = await pool.query(
-		`UPDATE student_profiles
-		SET ${setClauses.join(", ")}
-		WHERE user_id = $${paramIndex}
-		AND deleted_at IS NULL
-		RETURNING *`,
-		values,
-	);
+		let profileRow;
 
-	if (!rows.length) {
-		throw new AppError("Student profile not found", 404);
+		if (setClauses.length) {
+			const profileValues = [...values, targetUserId];
+			const { rows } = await client.query(
+				`UPDATE student_profiles
+				SET ${setClauses.join(", ")}
+				WHERE user_id = $${paramIndex}
+				AND deleted_at IS NULL
+				RETURNING *`,
+				profileValues,
+			);
+
+			if (!rows.length) {
+				throw new AppError("Student profile not found", 404);
+			}
+			profileRow = rows[0];
+		} else {
+			// phone-only update: still confirm the profile exists (and isn't
+			// soft-deleted) so this path enforces the same guard as the
+			// combined-update path above.
+			const { rows } = await client.query(
+				`SELECT * FROM student_profiles WHERE user_id = $1 AND deleted_at IS NULL`,
+				[targetUserId],
+			);
+			if (!rows.length) {
+				throw new AppError("Student profile not found", 404);
+			}
+			profileRow = rows[0];
+		}
+
+		let phone;
+		if (updatePhone) {
+			const { rowCount, rows: userRows } = await client.query(
+				`UPDATE users
+				SET phone = $1
+				WHERE user_id = $2
+				AND deleted_at IS NULL
+				RETURNING phone`,
+				[updates.phone, targetUserId],
+			);
+			if (rowCount === 0) {
+				throw new AppError("User not found", 404);
+			}
+			phone = userRows[0].phone;
+		}
+
+		await client.query("COMMIT");
+
+		return phone !== undefined ? { ...profileRow, phone } : profileRow;
+	} catch (err) {
+		await client.query("ROLLBACK");
+		throw err;
+	} finally {
+		client.release();
 	}
-
-	return rows[0];
 };
 
 const bulkInsertUserPreferences = async (client, userId, preferences) => {
