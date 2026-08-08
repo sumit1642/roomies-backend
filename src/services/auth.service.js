@@ -42,8 +42,18 @@ const issueAccessToken = (userId, email, roles, sid) =>
 		expiresIn: ACCESS_TTL_SECONDS,
 	});
 
+// Root-cause fix: jwt.sign is deterministic for a given payload + secret +
+// expiry — two tokens issued for the same {userId, sid} within the same
+// second (identical `iat`) previously produced the EXACT SAME token string.
+// This silently defeated refresh-token rotation: a "rotated" token could be
+// byte-for-byte identical to the one it was meant to replace, making the
+// single-use / replay-prevention guarantee untestable and, in principle,
+// bypassable if two refreshes could ever be forced within the same second.
+// Adding a unique `jti` (JWT ID) guarantees every issuance is a distinct
+// string regardless of timing, without changing anything else about how the
+// token is verified or how casRefreshToken's CAS comparison works.
 const issueRefreshToken = (userId, sid) =>
-	jwt.sign({ userId, sid }, config.JWT_REFRESH_SECRET, {
+	jwt.sign({ userId, sid, jti: crypto.randomUUID() }, config.JWT_REFRESH_SECRET, {
 		expiresIn: REFRESH_TTL_SECONDS,
 	});
 
