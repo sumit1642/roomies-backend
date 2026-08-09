@@ -175,29 +175,144 @@ describe("GET /reports/queue — admin", () => {
 		expect(res.status).toBe(403);
 	});
 
-	test("supports cursor pagination", async () => {
-		const { agent: adminAgent, user: admin } = await registerStudent({
-			email: uniqueEmail("queue-paginate-admin"),
-		});
+	test("DIAGNOSTIC: instrument exact timestamps to confirm/refute the millisecond-collision theory", async () => {
+		const { agent: adminAgent, user: admin } = await registerStudent({ email: uniqueEmail("queue-diag-admin") });
 		await makeAdmin(admin.userId);
 
-		for (let i = 0; i < 3; i++) {
-			const { posterAgent, ratingId } = await createRatedConnection(`queue-paginate-${i}`);
+		const REPORT_COUNT = 3;
+		for (let i = 0; i < REPORT_COUNT; i++) {
+			const { posterAgent, ratingId } = await createRatedConnection(`queue-diag-${i}`);
 			await posterAgent.post(`/api/v1/ratings/${ratingId}/report`).send({ reason: "other" });
 		}
 
+		// Raw DB truth: exact microsecond timestamps + ids, in queue order.
+		const { rows: dbRows } = await pool.query(
+			`SELECT report_id, created_at, created_at::text AS created_at_text
+       FROM rating_reports
+       WHERE status = 'open'
+       ORDER BY created_at ASC, report_id ASC`,
+		);
+		console.log("DIAGNOSTIC — raw DB rows (exact precision):", JSON.stringify(dbRows, null, 2));
+		expect(dbRows).toHaveLength(REPORT_COUNT); // sanity: confirms exactly 3 real rows exist
+
 		const firstPage = await adminAgent.get("/api/v1/reports/queue").query({ limit: 2 });
-		expect(firstPage.status).toBe(200);
-		expect(firstPage.body.data.items).toHaveLength(2);
-		expect(firstPage.body.data.nextCursor).not.toBeNull();
+		console.log(
+			"DIAGNOSTIC — firstPage items:",
+			JSON.stringify(
+				firstPage.body.data.items.map((i) => ({
+					reportId: i.reportId,
+					submittedAt: i.submittedAt,
+				})),
+				null,
+				2,
+			),
+		);
+		console.log("DIAGNOSTIC — firstPage nextCursor:", JSON.stringify(firstPage.body.data.nextCursor));
 
 		const secondPage = await adminAgent.get("/api/v1/reports/queue").query({
 			limit: 2,
 			cursorTime: firstPage.body.data.nextCursor.cursorTime,
 			cursorId: firstPage.body.data.nextCursor.cursorId,
 		});
-		expect(secondPage.status).toBe(200);
-		expect(secondPage.body.data.items).toHaveLength(1);
+		console.log(
+			"DIAGNOSTIC — secondPage items:",
+			JSON.stringify(
+				secondPage.body.data.items.map((i) => ({
+					reportId: i.reportId,
+					submittedAt: i.submittedAt,
+				})),
+				null,
+				2,
+			),
+		);
+
+		const firstPageIds = firstPage.body.data.items.map((i) => i.reportId);
+		const secondPageIds = secondPage.body.data.items.map((i) => i.reportId);
+		const overlap = firstPageIds.filter((id) => secondPageIds.includes(id));
+		console.log("DIAGNOSTIC — overlapping report IDs across pages:", overlap);
+
+		// This is the actual question: does the boundary row leak across pages?
+		expect(overlap).toEqual([]);
+	});
+
+	test("DIAGNOSTIC: instrument exact timestamps to confirm/refute the millisecond-collision theory", async () => {
+		const { agent: adminAgent, user: admin } = await registerStudent({ email: uniqueEmail("queue-diag-admin") });
+		await makeAdmin(admin.userId);
+
+		const REPORT_COUNT = 3;
+		for (let i = 0; i < REPORT_COUNT; i++) {
+			const { posterAgent, ratingId } = await createRatedConnection(`queue-diag-${i}`);
+			await posterAgent.post(`/api/v1/ratings/${ratingId}/report`).send({ reason: "other" });
+		}
+
+		// Raw DB truth: exact microsecond timestamps + ids, in queue order.
+		const { rows: dbRows } = await pool.query(
+			`SELECT report_id, created_at, created_at::text AS created_at_text
+       FROM rating_reports
+       WHERE status = 'open'
+       ORDER BY created_at ASC, report_id ASC`,
+		);
+		console.log("DIAGNOSTIC — raw DB row count:", dbRows.length);
+		console.log("DIAGNOSTIC — raw DB rows (exact precision):", JSON.stringify(dbRows, null, 2));
+	});
+
+	test("supports cursor pagination against only the reports this test creates", async () => {
+		const { agent: adminAgent, user: admin } = await registerStudent({
+			email: uniqueEmail("queue-paginate-admin"),
+		});
+		await makeAdmin(admin.userId);
+
+		// Hermetic by construction: track exactly which report IDs this test
+		// creates, and assert pagination behavior against that known set rather
+		// than assuming the queue is otherwise empty. This removes any
+		// dependency on cross-test isolation timing — whether or not something
+		// else in the suite also has an open report at this moment, this test's
+		// own 3 reports must appear exactly once, in total, across all pages.
+		const REPORT_COUNT = 3;
+		const createdReportIds = new Set();
+		for (let i = 0; i < REPORT_COUNT; i++) {
+			const { posterAgent, ratingId } = await createRatedConnection(`queue-paginate-${i}`);
+			const reportRes = await posterAgent.post(`/api/v1/ratings/${ratingId}/report`).send({ reason: "other" });
+			createdReportIds.add(reportRes.body.data.reportId);
+		}
+		expect(createdReportIds.size).toBe(REPORT_COUNT);
+
+		// Walk every page with a small limit, collecting only report IDs that
+		// belong to this test's own fixture set.
+		const seenOwnReportIds = [];
+		let cursorTime, cursorId;
+		let guardIterations = 0;
+
+		while (true) {
+			guardIterations++;
+			if (guardIterations > 50) {
+				throw new Error("supports cursor pagination: exceeded pagination guard — possible infinite loop");
+			}
+
+			const query = { limit: 2 };
+			if (cursorTime !== undefined) {
+				query.cursorTime = cursorTime;
+				query.cursorId = cursorId;
+			}
+
+			const page = await adminAgent.get("/api/v1/reports/queue").query(query);
+			expect(page.status).toBe(200);
+
+			for (const item of page.body.data.items) {
+				if (createdReportIds.has(item.reportId)) {
+					seenOwnReportIds.push(item.reportId);
+				}
+			}
+
+			if (!page.body.data.nextCursor) break;
+			cursorTime = page.body.data.nextCursor.cursorTime;
+			cursorId = page.body.data.nextCursor.cursorId;
+		}
+
+		// Each of this test's 3 reports must appear exactly once across the
+		// full paginated walk — no duplicates (cursor boundary bug) and no
+		// omissions (off-by-one bug), regardless of what else is in the queue.
+		expect(seenOwnReportIds.sort()).toEqual([...createdReportIds].sort());
 	});
 });
 
