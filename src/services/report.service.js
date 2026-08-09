@@ -48,7 +48,12 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 
 	if (hasCursor) {
 		params.push(cursorTime, cursorId);
-		cursorClause = `AND (rr.created_at, rr.report_id) > ($2, $3::uuid)`;
+		// $2 is compared against rr.created_at (timestamptz). cursorTime is the
+		// full microsecond-precision text this same query produces via
+		// to_char(...) below — cast explicitly rather than relying on Postgres's
+		// implicit text->timestamptz cast, so a malformed cursorTime fails fast
+		// with a clear type-cast error instead of silently coercing.
+		cursorClause = `AND (rr.created_at, rr.report_id) > ($2::timestamptz, $3::uuid)`;
 	}
 
 	const { rows } = await pool.query(
@@ -60,6 +65,18 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
        rr.explanation,
        rr.status,
        rr.created_at                           AS submitted_at,
+       -- Full microsecond-precision cursor value, as text. node-postgres
+       -- parses TIMESTAMPTZ into a JS Date, which is millisecond-precision —
+       -- any microseconds Postgres actually stored are silently truncated
+       -- before .toISOString() runs. Two reports created within the same
+       -- millisecond (created_at differing only in microseconds) would then
+       -- produce a cursor value <= the boundary row's true stored value, so
+       -- "(rr.created_at, rr.report_id) > (cursorTime, cursorId)" could be
+       -- satisfied by the boundary row itself on the next page — duplicating
+       -- it across pages. to_char with US preserves all 6 fractional digits
+       -- Postgres stores for TIMESTAMPTZ, round-tripped as plain text so no
+       -- client-side Date parsing (and its precision loss) ever happens.
+       to_char(rr.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at,
 
        r.overall_score,
        r.cleanliness_score,
@@ -150,7 +167,7 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	const nextCursor =
 		hasNextPage && items.length > 0 ?
 			{
-				cursorTime: items[items.length - 1].submitted_at.toISOString(),
+				cursorTime: items[items.length - 1].cursor_created_at,
 				cursorId: items[items.length - 1].report_id,
 			}
 		:	null;

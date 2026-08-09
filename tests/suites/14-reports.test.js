@@ -175,7 +175,15 @@ describe("GET /reports/queue — admin", () => {
 		expect(res.status).toBe(403);
 	});
 
-	test("DIAGNOSTIC: instrument exact timestamps to confirm/refute the millisecond-collision theory", async () => {
+	// Regression test for a cursor-precision bug: node-postgres parses
+	// TIMESTAMPTZ into a millisecond-precision JS Date, but Postgres stores
+	// microsecond precision. getReportQueue() used to build nextCursor.cursorTime
+	// from that truncated Date (via .toISOString()), so a boundary row whose
+	// true created_at had a nonzero microsecond remainder could satisfy its
+	// own cursor comparison again on the next page — duplicating it across
+	// pages. Fixed by having the query emit a full-precision text cursor
+	// (to_char(..., 'US')) instead of routing through a JS Date at all.
+	test("boundary row does not leak across pages when reports share a timestamp to millisecond precision", async () => {
 		const { agent: adminAgent, user: admin } = await registerStudent({ email: uniqueEmail("queue-diag-admin") });
 		await makeAdmin(admin.userId);
 
@@ -185,75 +193,28 @@ describe("GET /reports/queue — admin", () => {
 			await posterAgent.post(`/api/v1/ratings/${ratingId}/report`).send({ reason: "other" });
 		}
 
-		// Raw DB truth: exact microsecond timestamps + ids, in queue order.
 		const { rows: dbRows } = await pool.query(
 			`SELECT report_id, created_at, created_at::text AS created_at_text
        FROM rating_reports
        WHERE status = 'open'
        ORDER BY created_at ASC, report_id ASC`,
 		);
-		console.log("DIAGNOSTIC — raw DB rows (exact precision):", JSON.stringify(dbRows, null, 2));
 		expect(dbRows).toHaveLength(REPORT_COUNT); // sanity: confirms exactly 3 real rows exist
 
 		const firstPage = await adminAgent.get("/api/v1/reports/queue").query({ limit: 2 });
-		console.log(
-			"DIAGNOSTIC — firstPage items:",
-			JSON.stringify(
-				firstPage.body.data.items.map((i) => ({
-					reportId: i.reportId,
-					submittedAt: i.submittedAt,
-				})),
-				null,
-				2,
-			),
-		);
-		console.log("DIAGNOSTIC — firstPage nextCursor:", JSON.stringify(firstPage.body.data.nextCursor));
 
 		const secondPage = await adminAgent.get("/api/v1/reports/queue").query({
 			limit: 2,
 			cursorTime: firstPage.body.data.nextCursor.cursorTime,
 			cursorId: firstPage.body.data.nextCursor.cursorId,
 		});
-		console.log(
-			"DIAGNOSTIC — secondPage items:",
-			JSON.stringify(
-				secondPage.body.data.items.map((i) => ({
-					reportId: i.reportId,
-					submittedAt: i.submittedAt,
-				})),
-				null,
-				2,
-			),
-		);
 
 		const firstPageIds = firstPage.body.data.items.map((i) => i.reportId);
 		const secondPageIds = secondPage.body.data.items.map((i) => i.reportId);
 		const overlap = firstPageIds.filter((id) => secondPageIds.includes(id));
-		console.log("DIAGNOSTIC — overlapping report IDs across pages:", overlap);
 
-		// This is the actual question: does the boundary row leak across pages?
+		// The actual regression check: does the boundary row leak across pages?
 		expect(overlap).toEqual([]);
-	});
-
-	test("DIAGNOSTIC: instrument exact timestamps to confirm/refute the millisecond-collision theory", async () => {
-		const { agent: adminAgent, user: admin } = await registerStudent({ email: uniqueEmail("queue-diag-admin") });
-		await makeAdmin(admin.userId);
-
-		const REPORT_COUNT = 3;
-		for (let i = 0; i < REPORT_COUNT; i++) {
-			const { posterAgent, ratingId } = await createRatedConnection(`queue-diag-${i}`);
-			await posterAgent.post(`/api/v1/ratings/${ratingId}/report`).send({ reason: "other" });
-		}
-
-		// Raw DB truth: exact microsecond timestamps + ids, in queue order.
-		const { rows: dbRows } = await pool.query(
-			`SELECT report_id, created_at, created_at::text AS created_at_text
-       FROM rating_reports
-       WHERE status = 'open'
-       ORDER BY created_at ASC, report_id ASC`,
-		);
-		console.log("DIAGNOSTIC — raw DB row count:", dbRows.length);
-		console.log("DIAGNOSTIC — raw DB rows (exact precision):", JSON.stringify(dbRows, null, 2));
 	});
 
 	test("supports cursor pagination against only the reports this test creates", async () => {
