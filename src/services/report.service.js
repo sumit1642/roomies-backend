@@ -150,7 +150,7 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	const nextCursor =
 		hasNextPage && items.length > 0 ?
 			{
-				cursorTime: items[items.length - 1].submitted_at,
+				cursorTime: items[items.length - 1].submitted_at.toISOString(),
 				cursorId: items[items.length - 1].report_id,
 			}
 		:	null;
