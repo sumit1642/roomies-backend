@@ -100,7 +100,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 
 	if (hasCursor) {
 		params.push(cursorTime, cursorId);
-		cursorClause = `AND (vr.submitted_at, vr.request_id) > ($2, $3::uuid)`;
+		cursorClause = `AND (vr.submitted_at, vr.request_id) > ($2::timestamptz, $3::uuid)`;
 	}
 
 	const { rows } = await pool.query(
@@ -110,6 +110,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
       vr.document_type,
       vr.document_url,
       vr.submitted_at,
+      to_char(vr.submitted_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_submitted_at,
       pop.business_name,
       pop.owner_full_name,
       pop.verification_status,
@@ -131,7 +132,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 	const nextCursor =
 		hasNextPage ?
 			{
-				cursorTime: items[items.length - 1].submitted_at.toISOString(),
+				cursorTime: items[items.length - 1].cursor_submitted_at,
 				cursorId: items[items.length - 1].request_id,
 			}
 		:	null;
