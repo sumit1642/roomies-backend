@@ -6,6 +6,24 @@
 // have been applied, not application data, and truncating it would make the
 // migration runner think nothing has been applied yet.
 //
+// spatial_ref_sys is ALSO deliberately excluded, for the same reason:
+// PostGIS installs this table into the public schema and seeds it with
+// ~8,000 SRID projection definitions (including 4326/WGS84) as part of
+// `CREATE EXTENSION postgis`. It is reference data owned by the extension,
+// not application data — truncating it does not reset any test fixture, it
+// just destroys PostGIS's own projection metadata for the rest of the test
+// run. Root-caused via a real failure: every proximity-search query using
+// `::geography` casts (ST_DWithin) started throwing
+// "Cannot find SRID (4326) in spatial_ref_sys" as soon as any earlier test
+// in the run had called resetDb() once, because the original blanket
+// TRUNCATE (excluding only schema_migrations) wiped SRID 4326's row on the
+// very first test and every one after ran against an empty table. Simple
+// point construction (ST_SetSRID via sync_location_geometry()'s trigger)
+// tolerates a missing SRID row, which is why listing/property creation never
+// surfaced this — only ST_DWithin's geodetic distance math actually needs
+// the projection lookup, so the bug was invisible until a suite exercised
+// the proximity/lat-lng search path.
+//
 // ALSO flushes Redis. Postgres truncation alone was not sufficient isolation:
 // refreshToken:* and userSessions:* keys (and anything else written to Redis
 // during a test) persist for their full TTL and are NEVER cleared by
@@ -31,6 +49,14 @@ import { pool } from "../../src/db/client.js";
 import { redis } from "../../src/cache/client.js";
 import { config } from "../../src/config/env.js";
 
+// Tables that are reference/infrastructure data owned by an extension or the
+// migration runner, never application state — must never be truncated
+// between tests.
+const NON_APPLICATION_TABLES = new Set([
+	"schema_migrations",
+	"spatial_ref_sys", // PostGIS SRID projection reference data (public schema)
+]);
+
 const assertTestRedisUrl = () => {
 	let parsed;
 	try {
@@ -52,11 +78,12 @@ const assertTestRedisUrl = () => {
 };
 
 export const resetDb = async () => {
-	const { rows } = await pool.query(
-		`SELECT tablename FROM pg_tables
-     WHERE schemaname = 'public' AND tablename <> 'schema_migrations'`,
-	);
-	const tables = rows.map((r) => `"${r.tablename}"`).join(", ");
+	const { rows } = await pool.query(`SELECT tablename FROM pg_tables WHERE schemaname = 'public'`);
+	const tables = rows
+		.map((r) => r.tablename)
+		.filter((name) => !NON_APPLICATION_TABLES.has(name))
+		.map((name) => `"${name}"`)
+		.join(", ");
 	if (tables) await pool.query(`TRUNCATE ${tables} RESTART IDENTITY CASCADE`);
 
 	assertTestRedisUrl();
