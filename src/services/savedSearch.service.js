@@ -9,6 +9,15 @@ const MAX_SAVED_SEARCHES_PER_USER = 10;
 const SAVED_SEARCH_CAP_CONSTRAINT = "saved_searches_active_cap_per_user";
 const savedSearchLimitMessage = `You can save at most ${MAX_SAVED_SEARCHES_PER_USER} searches`;
 
+const toCamelCase = (row) => ({
+	searchId: row.search_id,
+	name: row.name,
+	filters: row.filters,
+	lastAlertedAt: row.last_alerted_at,
+	createdAt: row.created_at,
+	...(row.updated_at !== undefined && { updatedAt: row.updated_at }),
+});
+
 export const createSavedSearch = async (userId, { name, filters }) => {
 	const client = await pool.connect();
 
@@ -28,15 +37,15 @@ export const createSavedSearch = async (userId, { name, filters }) => {
 
 		const { rows } = await client.query(
 			`INSERT INTO saved_searches (user_id, name, filters)
-       VALUES ($1, $2, $3)
-       RETURNING search_id, name, filters, last_alerted_at, created_at`,
+     VALUES ($1, $2, $3)
+     RETURNING search_id, name, filters, last_alerted_at, created_at`,
 			[userId, name, JSON.stringify(filters)],
 		);
 
 		await client.query("COMMIT");
 
 		logger.info({ userId, searchId: rows[0].search_id }, "Saved search created");
-		return rows[0];
+		return toCamelCase(rows[0]);
 	} catch (err) {
 		try {
 			await client.query("ROLLBACK");
@@ -62,7 +71,7 @@ export const listSavedSearches = async (userId) => {
      ORDER BY created_at DESC`,
 		[userId],
 	);
-	return rows;
+	return rows.map(toCamelCase);
 };
 
 export const deleteSavedSearch = async (userId, searchId) => {
@@ -109,5 +118,5 @@ export const updateSavedSearch = async (userId, searchId, updates) => {
 	if (!rows.length) throw new AppError("Saved search not found", 404);
 
 	logger.info({ userId, searchId }, "Saved search updated");
-	return rows[0];
+	return toCamelCase(rows[0]);
 };
