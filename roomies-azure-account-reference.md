@@ -1,260 +1,470 @@
 # Roomies — Azure Account Reference
 
-**Purpose:** Factual, current-state snapshot of the Azure account, resources, and access. Not a plan — see `roomies-infra-migration-prd.md` for the execution plan. Update this file each time a new `az` command output changes reality.
+**Purpose:** Complete factual snapshot of the current Azure account, resources, access, and configuration. This is not
+an execution plan; see `roomies-infra-migration-prd.md` for planned work. Update this document whenever a new Azure CLI
+result changes reality.
 
-**Last verified:** 2026-07-28
-**Verified via:** Azure CLI (`az`), commands and raw output on file
-
----
-
-## 1. Subscription
-
-| Field | Value |
-|---|---|
-| Subscription name | Azure for Students |
-| Subscription ID | `eaf92174-664c-4d77-b387-7f4da6bf8a36` |
-| Subscription type | Free education grant (GitHub Student Developer Pack) |
-| State | Enabled |
-| Cloud environment | AzureCloud |
-| Is default subscription | Yes |
-| Home tenant ID | `1490b17d-5dc9-4cbf-aeba-a2e854f521b8` |
-| Tenant display name | Graphic Era University |
-| Tenant default domain | `geu.ac.in` |
-| Signed-in user | `2510090039@geu.ac.in` |
-| User principal ID (object ID) | `66829680-745e-4357-bfac-f8a335fe943a` |
-| User type | User (not Service Principal) |
-
-### Credit status
-| Field | Value |
-|---|---|
-| Remaining credit | ₹9,436.54 |
-| Used | 0.03% of original grant |
-| Reset cycle | 45 days (per GitHub Student Pack Azure grant terms) |
-| Budget configured (`az consumption budget`) | **None as of last check** — `az consumption budget list` returned `[]` |
-
-> ⚠️ No spend alert/budget is currently configured. See PRD Phase 1.2 for the planned budget creation step.
-
-### Known constraints of this subscription type
-- Some resource types / SKUs may have quota 0 in certain regions (not yet hit, but a possibility to watch for as more services are provisioned).
-- `az consumption budget create` may be rejected for CLI-level writes on student subscriptions even with Owner role — untested as of last verification; portal UI is the fallback if so.
+**Last verified:** 2026-08-14  
+**Verification method:** Azure Resource Graph (`az graph query`) for the primary resource inventory, then targeted
+read-only Azure CLI management-plane and data-plane commands.  
+**Security rule:** All values returned by Azure are recorded below except credentials and application secrets.
+Secret-bearing app settings are documented by exact name, never value; this includes database, Redis, JWT, OAuth,
+SMTP/API, and storage-connection secrets.
 
 ---
 
-## 2. Access / RBAC
+## 1. Subscription and signed-in identity
 
-| Principal | Role | Scope |
-|---|---|---|
-| `2510090039@geu.ac.in` (`66829680-745e-4357-bfac-f8a335fe943a`) | **Owner** | `/subscriptions/eaf92174-664c-4d77-b387-7f4da6bf8a36` (entire subscription) |
-| `2510090039@geu.ac.in` | **Storage Blob Data Reader** | Scoped to `roomiesblob` storage account only — added manually on 2026-07-27 to allow `az storage blob list --auth-mode login` (Owner role alone does not grant data-plane blob access; this is expected Azure RBAC behavior, not a misconfiguration) |
+| Field                         | Value                                  |
+| ----------------------------- | -------------------------------------- |
+| Subscription name             | Azure for Students                     |
+| Subscription ID               | `eaf92174-664c-4d77-b387-7f4da6bf8a36` |
+| Subscription state            | Enabled                                |
+| Cloud environment             | AzureCloud                             |
+| Default subscription          | `true`                                 |
+| Tenant ID / home tenant ID    | `1490b17d-5dc9-4cbf-aeba-a2e854f521b8` |
+| Tenant display name           | Graphic Era University                 |
+| Tenant default domain         | `geu.ac.in`                            |
+| Signed-in user principal name | `2510090039@geu.ac.in`                 |
+| Signed-in user display name   | Sumeet Yadav                           |
+| User object ID                | `66829680-745e-4357-bfac-f8a335fe943a` |
+| Account user type             | `user`                                 |
+| Managed-by tenants            | `[]`                                   |
 
-No other principals, service principals, or managed identities currently have any role assignments on this subscription or resource group.
+### Credit and budget
 
----
+| Field                           | Current value                                                                                                                                                      |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Azure CLI budget list           | `[]` — no budget is configured                                                                                                                                     |
+| Current remaining grant balance | Azure CLI consumption output did **not** return a numeric balance                                                                                                  |
+| Current used percentage         | Azure CLI consumption output did **not** return a numeric percentage                                                                                               |
+| Current reset cycle             | Not returned by Azure CLI                                                                                                                                          |
+| August 2026 usage query         | Returned 16 consumption rows for `roomies-api` and `roomiesblob`, but every row had `pretaxCost: None`, `currency: null`, `usageStart: null`, and `usageEnd: null` |
 
-## 3. Resource Group
+The older ₹9,436.54 / 0.03% figures are not carried forward as current facts. Obtain a current student-grant balance
+from the Azure portal before using it for a cost decision.
 
-| Field | Value |
-|---|---|
-| Name | `roomies-rg` |
-| Location | Central India |
-| Provisioning state | Succeeded |
-| Resource locks | None (`az lock list` returned `[]`) |
-| Policy assignments | None found at storage account scope |
-| Diagnostic settings | None configured (`az monitor diagnostic-settings list` returned `[]`) |
+### Known subscription constraints
 
----
-
-## 4. Resources Inside `roomies-rg`
-
-**Known deployed resources in `roomies-rg`:** the `roomiesblob` storage account, `roomies-api-plan` App Service Plan, and `roomies-api` Web App. The initial 2026-07-27 full-inventory snapshot pre-dated App Service provisioning.
-
-### 4.1 Storage Account — `roomiesblob`
-
-| Field | Value |
-|---|---|
-| Resource ID | `/subscriptions/eaf92174-664c-4d77-b387-7f4da6bf8a36/resourceGroups/roomies-rg/providers/Microsoft.Storage/storageAccounts/roomiesblob` |
-| Kind | StorageV2 |
-| SKU | Standard_LRS (locally redundant) |
-| Tier | Standard |
-| **Location** | **Southeast Asia** — ⚠️ note this differs from the resource group's own location (Central India). Flagging because Phase 1 provisions App Service in Central India; blob storage cross-region adds latency to photo upload/delete round-trips, though likely negligible relative to Neon's own `ap-southeast-1` location. Not a blocker, just documented for awareness. |
-| Creation time | 2026-04-20T07:29:58Z |
-| Access tier | Hot |
-| Public network access | Enabled |
-| Allow blob public access | **true** |
-| Allow shared key access | true |
-| Default to OAuth auth | false |
-| Min TLS version | TLS1_2 |
-| HTTPS-only traffic | Enforced (`supportsHttpsTrafficOnly: true`) |
-| Network ACL default action | Allow (no IP restrictions) |
-| Provisioning state | Succeeded |
-| Status | Available |
-
-**Endpoints:**
-| Service | URL |
-|---|---|
-| Blob | `https://roomiesblob.blob.core.windows.net/` |
-| DFS | `https://roomiesblob.dfs.core.windows.net/` |
-| File | `https://roomiesblob.file.core.windows.net/` |
-| Queue | `https://roomiesblob.queue.core.windows.net/` |
-| Table | `https://roomiesblob.table.core.windows.net/` |
-| Static website | `https://roomiesblob.z23.web.core.windows.net/` (not currently enabled — see Blob Service Properties below) |
-
-**Encryption:**
-- Key source: Microsoft.Storage (platform-managed keys, not customer-managed)
-- Blob encryption: enabled
-- File encryption: enabled
-- Infrastructure encryption (double encryption): not required/not enabled
-
-#### 4.1.1 Blob Service Properties
-
-| Field | Value |
-|---|---|
-| Soft-delete (blob) | Enabled, 7-day retention, permanent delete not allowed within window |
-| Soft-delete (container) | Enabled, 7-day retention |
-| Versioning | Not enabled |
-| Change feed | Not enabled |
-| CORS rules | **None configured** — relevant if any browser-side code ever calls the blob endpoint directly rather than through the backend |
-| Static website hosting | Disabled |
-| Last-access time tracking | Not enabled |
-| Lifecycle management policy | **None** (`ManagementPolicyNotFound` — no automatic tiering/expiry rules exist) |
-
-#### 4.1.2 Container — `roomies-uploads`
-
-| Field | Value |
-|---|---|
-| Public access level | **blob** (individual blobs are publicly readable via direct URL; container listing is not) — this matches `AzureBlobAdapter`'s design of returning direct public URLs for listing/profile photos |
-| Last modified | 2026-04-20T07:33:33Z |
-| Lease state | Available / unlocked |
-| Immutability policy | None |
-| Legal hold | None |
-| Current blob count | **0** — confirmed via `az storage blob list`, returned `[]` (empty container as of last check; expected, since it's newly created and the app isn't deployed anywhere yet) |
+- This is a free education grant through the GitHub Student Developer Pack.
+- Sponsored/student subscriptions can impose subscription-level region restrictions that are not represented by general
+  SKU availability.
+- `az consumption budget create` may be rejected on this subscription type; this has not been attempted in this audit.
 
 ---
 
-### 4.2 App Service Plan — `roomies-api-plan`
+## 2. Access, RBAC, and identities
 
-| Field | Value |
-|---|---|
-| Resource ID | `/subscriptions/eaf92174-664c-4d77-b387-7f4da6bf8a36/resourceGroups/roomies-rg/providers/Microsoft.Web/serverfarms/roomies-api-plan` |
-| Location | **Southeast Asia** (not Central India — see §5 for why) |
-| Kind | linux |
-| SKU | B1 (Basic tier, family B, capacity 1) |
-| Reserved (Linux flag) | true |
-| Provisioning state | Succeeded |
-| Status | Ready |
-| Number of workers | 1 |
-| Number of sites currently on plan | 1 (`roomies-api`) |
-| Zone redundant | false |
-| Created | 2026-07-27 |
-| ⚠️ Notable field | `freeOfferExpirationTime: 2027-01-27` — plan response includes a free-offer expiration date roughly 6 months out; meaning not yet fully understood (possibly a remaining free-tier App Service allowance layered under the Student subscription). Flagged for awareness, not yet actioned. |
+### Role assignments
 
-### 4.3 Web App — `roomies-api`
+| Assignment ID                          | Principal                                                       | Principal type | Role                     | Scope                                                                                   | Created / updated                  |
+| -------------------------------------- | --------------------------------------------------------------- | -------------- | ------------------------ | --------------------------------------------------------------------------------------- | ---------------------------------- |
+| `e533e20d-1f17-4851-b233-12e07d7ab9ce` | `2510090039@geu.ac.in` (`66829680-745e-4357-bfac-f8a335fe943a`) | User           | Owner                    | `/subscriptions/eaf92174-664c-4d77-b387-7f4da6bf8a36`                                   | `2025-09-10T14:19:26.389977+00:00` |
+| `8cf8edf1-1552-4095-8a33-80244b6e6a87` | `2510090039@geu.ac.in` (`66829680-745e-4357-bfac-f8a335fe943a`) | User           | Owner                    | `/subscriptions/eaf92174-664c-4d77-b387-7f4da6bf8a36`                                   | `2025-09-10T14:19:26.420852+00:00` |
+| `788b8371-533b-4229-b214-0899054bd13c` | `2510090039@geu.ac.in` (`66829680-745e-4357-bfac-f8a335fe943a`) | User           | Storage Blob Data Reader | `.../resourceGroups/roomies-rg/providers/Microsoft.Storage/storageAccounts/roomiesblob` | `2026-07-27T02:54:17.029660+00:00` |
 
-| Field | Value |
-|---|---|
-| Resource group | `roomies-rg` |
-| App Service Plan | `roomies-api-plan` |
-| Runtime | Node 22 LTS (`NODE|22-lts`) |
-| Default hostname | `roomies-api.azurewebsites.net` |
-| State | **Running** |
-| Availability state | **Normal** |
-| App Settings | **24 configured:** 23 application variables mirrored from `.env.azure`, plus `WEBSITES_PORT=3000` |
-| Slot settings | All app settings reported `SlotSetting: False` (expected for a non-slot deployment) |
+The two Owner assignments are duplicate role assignments for the same principal and scope. They do not grant more than
+Owner, but both exist. The Storage Blob Data Reader assignment is required for Entra ID data-plane blob access;
+subscription Owner alone does not grant blob data-plane access.
 
-> **Verification note:** The response echoed by `az webapp config appsettings set` can display setting values as `null`. Do not treat that echo as authoritative. Re-run `az webapp config appsettings list`; the 2026-07-28 follow-up confirmed that all 24 settings were present.
+No other principals, service principals, or managed identities appear in the returned subscription/RG/storage-scope RBAC
+assignments.
+
+### Managed identity — corrected finding
+
+| Field                                       | Value            |
+| ------------------------------------------- | ---------------- |
+| Web App `keyVaultReferenceIdentity` setting | `SystemAssigned` |
+| Web App `identity` object                   | `null`           |
+| `az webapp identity show` result            | Empty output     |
+| Actual system-assigned managed identity     | **Not assigned** |
+
+The `keyVaultReferenceIdentity` setting must not be treated as proof that an identity exists. There is currently no
+usable Web App managed identity and no Key Vault.
 
 ---
 
-## 5. Region Availability (verified for future provisioning)
+## 3. Resource group
 
-⚠️ **Correction (2026-07-27):** `az appservice list-locations --sku B1 --linux-workers-enabled` reported Central India as available (listed below), but this command only reflects general SKU/region availability — it does **not** reflect subscription-level region-restriction policies. Actual App Service Plan creation in Central India failed with:
-
-```
-(RequestDisallowedByAzure) Resource 'roomies-api-plan' was disallowed by Azure: This policy
-maintains a set of best available regions where your subscription can deploy resources...
-```
-
-This is a known behavior on Azure for Students / sponsored subscriptions — Azure enforces an additional subscription-scoped allowlist of regions on top of general SKU availability, and there is no single clean `az` query to list that allowlist directly. It must be discovered by attempting creation and reading the policy response, or via Azure Portal (Subscriptions → [sub] → Settings → Resource providers / Usage + quotas gives more detail than CLI in some cases).
-
-**Confirmed NOT deployable (App Service, this subscription):**
-- Central India — rejected by subscription region policy (2026-07-27)
-
-**Confirmed DEPLOYABLE (App Service, this subscription):**
-- ✅ **Southeast Asia** — App Service Plan created successfully 2026-07-27 (`roomies-api-plan`, B1 Linux). Also co-locates with the existing `roomiesblob` storage account.
-
-Original (misleading) SKU-availability output, retained for reference only — do not treat as "deployable":
-
-- Central India ❌ (SKU says available, subscription policy disallows — see correction above)
-- South India (untested)
-- West India (untested)
-- Southeast Asia (where the storage account currently lives — testing now)
-- East Asia (untested)
-- *(+ 44 other global regions listed as SKU-available; subscription-policy status unknown for all except Central India)*
-
-## 6. Runtime / Provider Registration State
-
-| Item | Status |
-|---|---|
-| `Microsoft.Web` resource provider | **Registered** (confirmed via `az provider show`) — required before first App Service creation; this was NOT registered by default and had to be explicitly registered on 2026-07-27 |
-| Node runtime available | `NODE|24-lts` (Active, EOL 2028-04-30) and `NODE|22-lts` (Near EOL, EOL 2027-04-30) |
-| Node runtime selected for `roomies-api` | `NODE|22-lts` — matches `package.json` engines field (`"node": ">=22.0.0"`) |
+| Field                             | Value                                                                           |
+| --------------------------------- | ------------------------------------------------------------------------------- |
+| Name                              | `roomies-rg`                                                                    |
+| Resource ID                       | `/subscriptions/eaf92174-664c-4d77-b387-7f4da6bf8a36/resourceGroups/roomies-rg` |
+| Location                          | `centralindia` (Central India)                                                  |
+| Provisioning state                | Succeeded                                                                       |
+| Tags                              | `null` (none)                                                                   |
+| Managed by                        | `null`                                                                          |
+| Resource locks                    | `[]` (none)                                                                     |
+| Resource-group policy assignments | `[]` (none)                                                                     |
 
 ---
 
-## 7. What Does NOT Exist Yet (as of last verification)
+## 4. Resource Graph inventory
 
-Explicitly noting these as "not yet provisioned" so nothing is assumed to exist for the remaining Phase 1 work:
+Azure Resource Graph confirms exactly **three** resources in `roomies-rg`:
 
-- ~~No App Service Plan~~ **Now exists** — `roomies-api-plan` (Southeast Asia, B1) — see §4.2
-- ~~No App Service / Web App~~ **Now exists** — `roomies-api` is Running and Normal at `roomies-api.azurewebsites.net` — see §4.3
-- No Azure Database for PostgreSQL (not planned — Neon stays, see PRD non-goals)
-- No Azure Cache for Redis (not planned — Upstash stays)
-- No Key Vault — application configuration, including sensitive values, is currently stored in Azure App Settings for the deployed Web App; a Key Vault migration has not been evaluated
-- No budget or cost alert
-- No custom domain bindings
-- No Application Insights / monitoring
-- No deployment credentials or GitHub Actions secrets configured for Azure
+| Type                                | Name               | Location        | Kind / SKU               | Provisioning state |
+| ----------------------------------- | ------------------ | --------------- | ------------------------ | ------------------ |
+| `microsoft.storage/storageaccounts` | `roomiesblob`      | `southeastasia` | StorageV2 / Standard_LRS | Succeeded          |
+| `microsoft.web/serverfarms`         | `roomies-api-plan` | `southeastasia` | linux / B1 Basic         | Succeeded          |
+| `microsoft.web/sites`               | `roomies-api`      | `southeastasia` | app,linux / Basic        | Running            |
+
+No additional Azure resources exist in this resource group according to the Graph query.
 
 ---
 
-## 8. Command Log
+## 5. Storage account — `roomiesblob`
 
-Raw commands run to produce this snapshot, for reproducibility:
+### Core account properties
+
+| Field                                    | Value                                                                                                                                   |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Resource ID                              | `/subscriptions/eaf92174-664c-4d77-b387-7f4da6bf8a36/resourceGroups/roomies-rg/providers/Microsoft.Storage/storageAccounts/roomiesblob` |
+| Type / kind                              | `Microsoft.Storage/storageAccounts` / StorageV2                                                                                         |
+| SKU / tier                               | Standard_LRS / Standard                                                                                                                 |
+| Location / primary location              | Southeast Asia / `southeastasia`                                                                                                        |
+| Creation time                            | `2026-04-20T07:29:58.547Z`                                                                                                              |
+| Provisioning state                       | Succeeded                                                                                                                               |
+| Primary status                           | available                                                                                                                               |
+| Access tier                              | Hot                                                                                                                                     |
+| Tags                                     | `{}`                                                                                                                                    |
+| Public network access                    | Enabled                                                                                                                                 |
+| Network ACL default action               | Allow                                                                                                                                   |
+| Network ACL bypass                       | AzureServices                                                                                                                           |
+| IPv4 rules / IPv6 rules / VNet rules     | `[]` / `[]` / `[]`                                                                                                                      |
+| Private endpoints                        | `[]`                                                                                                                                    |
+| Allow blob public access                 | `true`                                                                                                                                  |
+| Allow shared-key access                  | `true`                                                                                                                                  |
+| Default to OAuth authentication          | `false`                                                                                                                                 |
+| Allow cross-tenant replication           | `false`                                                                                                                                 |
+| Allow cross-tenant delegation SAS        | `false`                                                                                                                                 |
+| HTTPS-only traffic                       | `true`                                                                                                                                  |
+| Minimum TLS version                      | TLS1_2                                                                                                                                  |
+| Hierarchical namespace                   | `null`                                                                                                                                  |
+| NFS v3                                   | `null`                                                                                                                                  |
+| SFTP                                     | `null`                                                                                                                                  |
+| Local users                              | `null`                                                                                                                                  |
+| System/user-assigned identity            | `null`                                                                                                                                  |
+| Secondary location/endpoints             | `null`                                                                                                                                  |
+| Failover in progress / last geo failover | `null` / `null`                                                                                                                         |
+
+### Endpoints
+
+| Service | Endpoint                                        |
+| ------- | ----------------------------------------------- |
+| Blob    | `https://roomiesblob.blob.core.windows.net/`    |
+| DFS     | `https://roomiesblob.dfs.core.windows.net/`     |
+| File    | `https://roomiesblob.file.core.windows.net/`    |
+| Queue   | `https://roomiesblob.queue.core.windows.net/`   |
+| Table   | `https://roomiesblob.table.core.windows.net/`   |
+| Web     | `https://roomiesblob.z23.web.core.windows.net/` |
+
+### Encryption
+
+| Field                                     | Value                                                                        |
+| ----------------------------------------- | ---------------------------------------------------------------------------- |
+| Key source                                | Microsoft.Storage (platform-managed)                                         |
+| Customer Key Vault properties             | `null`                                                                       |
+| Infrastructure/double encryption required | `false`                                                                      |
+| Blob encryption                           | enabled; key type `Account`; last enabled `2026-04-20T07:29:58.712526+00:00` |
+| File encryption                           | enabled; key type `Account`; last enabled `2026-04-20T07:29:58.712526+00:00` |
+| Queue/table encryption entries            | `null` / `null`                                                              |
+| Key creation time, key1 / key2            | `2026-04-20T07:29:58.690193+00:00` / `2026-04-20T07:29:58.690193+00:00`      |
+
+### Blob service properties
+
+| Field                       | Value                                                |
+| --------------------------- | ---------------------------------------------------- |
+| Blob soft delete            | enabled, 7 days; permanent delete `false`            |
+| Container soft delete       | enabled, 7 days; permanent-delete field `null`       |
+| Blob versioning             | `null` (not enabled)                                 |
+| Change feed                 | `null` (not enabled)                                 |
+| CORS rules                  | `[]`                                                 |
+| Static website              | disabled; index document and 404 document are `null` |
+| Last-access time tracking   | `null` (not enabled)                                 |
+| Restore policy              | `null`                                               |
+| Default service version     | `null`                                               |
+| Automatic snapshot policy   | `null`                                               |
+| Lifecycle management policy | None — command returned `ManagementPolicyNotFound`   |
+| Storage diagnostic settings | `[]`                                                 |
+
+### Container — `roomies-uploads`
+
+| Field                             | Value                                                           |
+| --------------------------------- | --------------------------------------------------------------- |
+| Only container returned           | `roomies-uploads`                                               |
+| Public access                     | `blob` (individual blobs are publicly readable; listing is not) |
+| Blob count                        | `0`                                                             |
+| Last modified                     | `2026-04-20T07:33:33+00:00`                                     |
+| ETag                              | `"0x8DE9EAF20C1B678"`                                           |
+| Lease                             | state `available`, status `unlocked`, duration `null`           |
+| Immutability policy               | `false`                                                         |
+| Legal hold                        | `false`                                                         |
+| Container metadata                | `{}`                                                            |
+| Default encryption scope          | `$account-encryption-key`                                       |
+| Prevent encryption-scope override | `false`                                                         |
+| Immutable storage with versioning | `false`                                                         |
+| Deleted / version                 | `null` / `null`                                                 |
+
+---
+
+## 6. App Service Plan — `roomies-api-plan`
+
+| Field                                              | Value                                                                                                                                |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Resource ID                                        | `/subscriptions/eaf92174-664c-4d77-b387-7f4da6bf8a36/resourceGroups/roomies-rg/providers/Microsoft.Web/serverfarms/roomies-api-plan` |
+| Type / kind                                        | `Microsoft.Web/serverfarms` / linux                                                                                                  |
+| Location / geo region                              | Southeast Asia / Southeast Asia                                                                                                      |
+| SKU                                                | B1, Basic, family B, capacity 1                                                                                                      |
+| Compute mode / plan name                           | Dedicated / VirtualDedicatedPlan                                                                                                     |
+| Reserved Linux flag                                | `true`                                                                                                                               |
+| Provisioning state / status / power state          | Succeeded / Ready / Running                                                                                                          |
+| Created time                                       | `2026-07-27T04:16:26.4533333`                                                                                                        |
+| Free-offer expiration time                         | `2027-01-27T04:16:24.0066667`                                                                                                        |
+| Number of sites / workers                          | 1 / 1                                                                                                                                |
+| Current worker size / ID                           | Small / 0                                                                                                                            |
+| Current number of workers / zones used             | 1 / 1                                                                                                                                |
+| Maximum workers / elastic workers / zones          | 3 / 1 / 1                                                                                                                            |
+| Per-site scaling / elastic scaling / async scaling | false / false / false                                                                                                                |
+| Zone redundant                                     | false                                                                                                                                |
+| Spot / custom mode / Xenon / Hyper-V               | false / false / false / false                                                                                                        |
+| VNet connections used / maximum                    | 0 / 2                                                                                                                                |
+| Web space                                          | `roomies-rg-SoutheastAsiawebspace-Linux`                                                                                             |
+| MDM ID / server farm ID                            | `waws-prod-sg1-089_31656` / 31656                                                                                                    |
+| Tags                                               | `null`                                                                                                                               |
+| Plan diagnostic settings                           | `[]`                                                                                                                                 |
+
+---
+
+## 7. Web App — `roomies-api`
+
+### Core site properties
+
+| Field                                       | Value                                                                                                                     |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Resource ID                                 | `/subscriptions/eaf92174-664c-4d77-b387-7f4da6bf8a36/resourceGroups/roomies-rg/providers/Microsoft.Web/sites/roomies-api` |
+| Type / kind                                 | `Microsoft.Web/sites` / `app,linux`                                                                                       |
+| Location                                    | Southeast Asia                                                                                                            |
+| App Service Plan                            | `roomies-api-plan` (`.../serverfarms/roomies-api-plan`)                                                                   |
+| State / availability / runtime availability | Running / Normal / Normal                                                                                                 |
+| Enabled                                     | `true`                                                                                                                    |
+| Default hostname                            | `roomies-api.azurewebsites.net`                                                                                           |
+| Enabled hostnames                           | `roomies-api.azurewebsites.net`, `roomies-api.scm.azurewebsites.net`                                                      |
+| SKU                                         | Basic                                                                                                                     |
+| Last modified UTC                           | `2026-08-09T13:35:30.333333`                                                                                              |
+| Public network access                       | Enabled                                                                                                                   |
+| HTTPS-only                                  | `false`                                                                                                                   |
+| Client certificate enabled / mode           | false / Required                                                                                                          |
+| Client affinity / proxy affinity            | true / false                                                                                                              |
+| HTTP IP mode                                | IPv4                                                                                                                      |
+| Site tags                                   | `null`                                                                                                                    |
+| Web App identity                            | `null`                                                                                                                    |
+| Key Vault reference identity setting        | SystemAssigned (no actual identity is assigned; see §2)                                                                   |
+| In-flight features                          | `["SiteContainers"]`                                                                                                      |
+| End-to-end encryption                       | `false`                                                                                                                   |
+| VNet subnet / VNet integration              | `null` / `[]`                                                                                                             |
+| Deployment slots                            | `[]`                                                                                                                      |
+| Managed environment / private endpoints     | `null` / `[]`                                                                                                             |
+| Web App diagnostic settings                 | `[]`                                                                                                                      |
+
+### Network addresses
+
+| Address type                 | Value                                                                                                                                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Inbound IPv4                 | `20.212.64.12,20.212.79.14`                                                                                                                                                                            |
+| Inbound IPv6                 | `2603:1040:5:4::d`                                                                                                                                                                                     |
+| Current outbound IPv4        | `20.43.151.254,20.44.216.33,20.44.216.231,20.44.216.245,20.43.151.165,20.44.218.63,20.212.64.12,20.212.79.14`                                                                                          |
+| Current outbound IPv6        | `2603:1040:2:e::aa,2603:1040:2:6::96,2603:1040:2:b::95,2603:1040:2:d::9a,2603:1040:2:c::a8,2603:1040:2:f::a7,2603:1040:5:4::d,2603:10e1:100:2::14d4:400c,2603:1040:5:4::34,2603:10e1:100:2::14d4:4f0e` |
+| Possible outbound IPv4 count | 27 (returned by Azure; dynamic platform data)                                                                                                                                                          |
+| Possible outbound IPv6 count | 30 (returned by Azure; dynamic platform data)                                                                                                                                                          |
+| Outbound VNet routing        | allTraffic, applicationTraffic, backupRestoreTraffic, contentShareTraffic, imagePullTraffic, managedIdentityTraffic: all `false`                                                                       |
+
+### Runtime, application configuration, and deployment surface
+
+| Field                                                        | Value                                                                                                                                     |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Runtime stack                                                | `NODE                                                                                                                                     | 22-lts` |
+| Always On                                                    | `false`                                                                                                                                   |
+| Minimum TLS / SCM minimum TLS                                | 1.2 / 1.2                                                                                                                                 |
+| FTPS state                                                   | FtpsOnly                                                                                                                                  |
+| FTP publishing endpoint                                      | `ftps://waws-prod-sg1-089.ftp.azurewebsites.windows.net/site/wwwroot`                                                                     |
+| FTP username                                                 | `roomies-api\\$roomies-api`                                                                                                               |
+| Publishing password                                          | Secret — not recorded                                                                                                                     |
+| HTTP/2 / HTTP/2 proxy                                        | false / 0                                                                                                                                 |
+| WebSockets                                                   | false                                                                                                                                     |
+| Health check path                                            | `null`                                                                                                                                    |
+| Auto-heal / detailed errors / request tracing / HTTP logging | false / false / false / false                                                                                                             |
+| Remote debugging                                             | false                                                                                                                                     |
+| `use32BitWorkerProcess`                                      | true                                                                                                                                      |
+| Worker count / pre-warmed instances / min elastic instances  | 1 / 0 / 0                                                                                                                                 |
+| Load balancing                                               | LeastRequests                                                                                                                             |
+| SCM type                                                     | None                                                                                                                                      |
+| Main IP restrictions                                         | one `Allow all` rule for `Any`, priority 2147483647                                                                                       |
+| SCM IP restrictions                                          | one `Allow all` rule for `Any`, priority 2147483647                                                                                       |
+| SCM uses main restrictions                                   | false                                                                                                                                     |
+| App command line                                             | empty string                                                                                                                              |
+| Azure Storage mounts                                         | `{}`                                                                                                                                      |
+| Connection strings                                           | `null`                                                                                                                                    |
+| Site CORS configuration                                      | `null`                                                                                                                                    |
+| Default documents                                            | `Default.htm`, `Default.html`, `Default.asp`, `index.htm`, `index.html`, `iisstart.htm`, `default.aspx`, `index.php`, `hostingstart.html` |
+| Virtual application                                          | `/` → `site\\wwwroot`; preload false                                                                                                      |
+| Website timezone                                             | `null`                                                                                                                                    |
+| Web jobs enabled                                             | false                                                                                                                                     |
+
+### Hostnames, certificates, and custom domains
+
+| Field                                       | Value                                                                         |
+| ------------------------------------------- | ----------------------------------------------------------------------------- |
+| Hostname binding count                      | 1                                                                             |
+| Hostname binding                            | `roomies-api.azurewebsites.net`                                               |
+| Binding type                                | Verified (the standard Azure hostname, not a custom domain)                   |
+| Binding SSL state / thumbprint / virtual IP | `null` / `null` / `null`                                                      |
+| `azurewebsites.net` hostname SSL state      | Disabled (Azure platform hostname; this does not create a custom certificate) |
+| SCM hostname SSL state                      | Disabled                                                                      |
+| Custom domain bindings                      | None                                                                          |
+| Certificates / managed certificates         | `[]`                                                                          |
+
+### App settings
+
+Exactly **24** settings are present, and all have `slotSetting: false`:
+
+| Setting name                      | Current value / handling                                                |
+| --------------------------------- | ----------------------------------------------------------------------- |
+| `NODE_ENV`                        | `production`                                                            |
+| `PORT`                            | `3000`                                                                  |
+| `DATABASE_URL`                    | Secret — not recorded                                                   |
+| `REDIS_URL`                       | Secret — not recorded                                                   |
+| `JWT_SECRET`                      | Secret — not recorded                                                   |
+| `JWT_REFRESH_SECRET`              | Secret — not recorded                                                   |
+| `JWT_EXPIRES_IN`                  | `15m`                                                                   |
+| `JWT_REFRESH_EXPIRES_IN`          | `7d`                                                                    |
+| `GOOGLE_CLIENT_ID`                | Sensitive identifier — not recorded                                     |
+| `GOOGLE_CLIENT_SECRET`            | Secret — not recorded                                                   |
+| `BREVO_SMTP_SERVER`               | `smtp-relay.brevo.com`                                                  |
+| `BREVO_SMTP_PORT`                 | `587`                                                                   |
+| `BREVO_SMTP_LOGIN`                | Sensitive credential identifier — not recorded                          |
+| `BREVO_SMTP_KEY`                  | Secret — not recorded                                                   |
+| `BREVO_SMTP_FROM`                 | `sumity1642@gmail.com`                                                  |
+| `BREVO_API_KEY`                   | Secret — not recorded                                                   |
+| `EMAIL_PROVIDER`                  | `brevo-api`                                                             |
+| `STORAGE_ADAPTER`                 | `azure`                                                                 |
+| `AZURE_STORAGE_CONNECTION_STRING` | Secret — not recorded                                                   |
+| `AZURE_STORAGE_CONTAINER`         | `roomies-uploads`                                                       |
+| `ALLOWED_ORIGINS`                 | `https://roomies.sumitbuilds.app,https://roomies-api.azurewebsites.net` |
+| `TRUST_PROXY`                     | `1`                                                                     |
+| `DB_POOL_MAX`                     | `10`                                                                    |
+| `WEBSITES_PORT`                   | `3000`                                                                  |
+
+The 23 project-defined setting names match `.env.azure`; `WEBSITES_PORT` is the only Azure platform-added setting. Every
+non-sensitive value selected above was re-read directly from Azure. Sensitive values remain intentionally excluded to
+prevent credential disclosure.
+
+### Recent Activity Log records (8–14 Aug 2026)
+
+The retrieved activity records contain no Web App configuration write that explains the 9 Aug `lastModifiedTimeUtc`.
+They show only publishing-profile / publishing-credential access:
+
+| UTC time                     | Caller                 | Operation                      | Status    |
+| ---------------------------- | ---------------------- | ------------------------------ | --------- |
+| 2026-08-14T02:36:02.1230572Z | `2510090039@geu.ac.in` | Get Web App Publishing Profile | Succeeded |
+| 2026-08-13T04:16:21.7425283Z | `2510090039@geu.ac.in` | Get Web App Publishing Profile | Succeeded |
+| 2026-08-13T04:09:46Z         | Not populated by Azure | ListPublishingCredentials      | Succeeded |
+| 2026-08-13T03:35:11Z         | Not populated by Azure | ListPublishingCredentials      | Succeeded |
+
+---
+
+## 8. Region availability and provider state
+
+### Historic App Service region findings
+
+These are retained from the 2026-07-27 provisioning attempt. They were not re-proven by creating resources during this
+read-only audit.
+
+| Region                             | Status                                  | Evidence                                                                                                        |
+| ---------------------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Central India                      | Not deployable for this subscription    | App Service Plan creation returned `RequestDisallowedByAzure` due to the sponsored-subscription regional policy |
+| Southeast Asia                     | Deployable                              | `roomies-api-plan` was successfully created there on 2026-07-27                                                 |
+| South India, West India, East Asia | Untested under this subscription policy | General SKU availability must not be treated as deployability                                                   |
+
+### Provider registration and selected runtime
+
+| Item                     | Value      |
+| ------------------------ | ---------- | ------- |
+| `Microsoft.Web`          | Registered |
+| `Microsoft.Storage`      | Registered |
+| Selected Web App runtime | `NODE      | 22-lts` |
+
+The CLI runtime/region-list filters in this audit returned no matching records despite the deployed runtime and existing
+plan. The deployed resource is the authoritative result for this account; do not infer a subscription policy allowlist
+from general `az appservice list-locations` output.
+
+---
+
+## 9. Resources and capabilities that do not exist
+
+- No Azure Database for PostgreSQL; Neon remains the intended database.
+- No Azure Cache for Redis; Upstash remains the intended Redis provider.
+- No Key Vault.
+- No actual Web App managed identity.
+- No budget or cost alert.
+- No Azure resource locks.
+- No resource-group policy assignments.
+- No custom domain bindings or certificates.
+- No deployment slots.
+- No VNet integration or private endpoint connections.
+- No Application Insights or Azure diagnostic settings on storage, plan, or Web App.
+- No storage lifecycle-management policy.
+
+GitHub Actions secrets and GitHub deployment configuration are not Azure resources and were not queried in this
+Azure-only audit. FTP/FTPS publishing is enabled by the Web App platform (`FtpsOnly`).
+
+---
+
+## 10. Command log
+
+Commands used for this verification; all were read-only:
 
 ```bash
 az account show
-az account list -o table
-az group list -o table
-az resource list -g roomies-rg -o table
-az group show --name roomies-rg --subscription eaf92174-664c-4d77-b387-7f4da6bf8a36 -o json
-az graph query -q "Resources | project name, type, resourceGroup, location, subscriptionId, id" --subscriptions eaf92174-664c-4d77-b387-7f4da6bf8a36 -o json
-az resource show --ids "/subscriptions/.../storageAccounts/roomiesblob" -o json
-az storage account show --name roomiesblob --resource-group roomies-rg -o json
-az storage account blob-service-properties show --account-name roomiesblob --resource-group roomies-rg -o json
-az storage container list --account-name roomiesblob --auth-mode login -o json
-az storage container show --account-name roomiesblob --name roomies-uploads --auth-mode login -o json
-az storage account management-policy show --account-name roomiesblob --resource-group roomies-rg -o json
-az monitor diagnostic-settings list --resource "/subscriptions/.../storageAccounts/roomiesblob" -o json
-az lock list --resource-group roomies-rg -o json
-az role assignment list --scope "/subscriptions/eaf92174-664c-4d77-b387-7f4da6bf8a36" --include-inherited -o table
-az role assignment create --assignee-object-id 66829680-745e-4357-bfac-f8a335fe943a --assignee-principal-type User --role "Storage Blob Data Reader" --scope "/subscriptions/.../storageAccounts/roomiesblob"
-az appservice list-locations --sku B1 --linux-workers-enabled -o table
-az webapp list-runtimes --os-type linux -o table
-az provider register --namespace Microsoft.Web
-az provider show --namespace Microsoft.Web --query "registrationState" -o tsv
-az consumption budget list
-az webapp show --name roomies-api --resource-group roomies-rg --query "{state:state, defaultHostName:defaultHostName, availabilityState:availabilityState}" -o table
-# Port the 23 `.env.azure` keys using values supplied outside source control; do not record values here.
-az webapp config appsettings set --name roomies-api --resource-group roomies-rg --settings "WEBSITES_PORT=3000"
-az webapp config appsettings list --name roomies-api --resource-group roomies-rg -o table
+az ad signed-in-user show
+az group show --name roomies-rg
+az graph query -q "Resources | where resourceGroup =~ 'roomies-rg' | project id, name, type, location, resourceGroup, subscriptionId, kind, sku, tags, properties"
+az role assignment list --scope /subscriptions/eaf92174-664c-4d77-b387-7f4da6bf8a36 --include-inherited
+az role assignment list --scope /subscriptions/.../storageAccounts/roomiesblob --include-inherited
+az lock list --resource-group roomies-rg
+az policy assignment list --resource-group roomies-rg
+az storage account show --name roomiesblob --resource-group roomies-rg
+az storage account blob-service-properties show --account-name roomiesblob --resource-group roomies-rg
+az storage account network-rule list --account-name roomiesblob --resource-group roomies-rg
+az storage container list --account-name roomiesblob --auth-mode login
+az storage container show --account-name roomiesblob --name roomies-uploads --auth-mode login
+az storage blob list --account-name roomiesblob --container-name roomies-uploads --auth-mode login --query 'length(@)'
+az storage account management-policy show --account-name roomiesblob --resource-group roomies-rg
+az appservice plan show --name roomies-api-plan --resource-group roomies-rg
+az webapp show --name roomies-api --resource-group roomies-rg
+az webapp config show --name roomies-api --resource-group roomies-rg
+az webapp identity show --name roomies-api --resource-group roomies-rg
+az webapp config appsettings list --name roomies-api --resource-group roomies-rg --query '[].{name:name,slotSetting:slotSetting}'
+az webapp config hostname list --webapp-name roomies-api --resource-group roomies-rg
+az webapp config ssl list --resource-group roomies-rg
+az webapp deployment slot list --name roomies-api --resource-group roomies-rg
+az webapp vnet-integration list --resource-group roomies-rg --name roomies-api
+az monitor diagnostic-settings list --resource /subscriptions/.../storageAccounts/roomiesblob
+az monitor diagnostic-settings list --resource /subscriptions/.../serverfarms/roomies-api-plan
+az monitor diagnostic-settings list --resource /subscriptions/.../sites/roomies-api
+az provider show --namespace Microsoft.Web
+az provider show --namespace Microsoft.Storage
+az consumption budget list --subscription eaf92174-664c-4d77-b387-7f4da6bf8a36
+az consumption usage list --start-date 2026-08-01 --end-date 2026-08-14
+az monitor activity-log list --resource-id /subscriptions/.../sites/roomies-api --start-time 2026-08-08T00:00:00Z --end-time 2026-08-14T23:59:59Z
 ```
 
 ---
 
-## 9. Update Log
+## 11. Update log
 
-| Date | What changed |
-|---|---|
-| 2026-07-27 | Initial snapshot created from full account audit. Confirmed: 1 resource (storage account) exists, B1 quota available in Central India, Microsoft.Web registered, no budget configured. |
-| 2026-07-27 | App Service Plan `roomies-api-plan` provisioned in Southeast Asia after Central India was rejected by subscription policy. |
-| 2026-07-28 | Web App `roomies-api` confirmed Running and Normal at `roomies-api.azurewebsites.net`. Its 23 `.env.azure` application variables and `WEBSITES_PORT=3000` were verified in App Settings (24 settings total); no values are recorded in this document. |
+| Date       | Change                                                                                                                                                                                                                                                                                                                                                           |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-07-27 | Initial account snapshot; Storage account confirmed. App Service Plan later created in Southeast Asia after Central India was rejected by subscription policy.                                                                                                                                                                                                   |
+| 2026-07-28 | Web App confirmed Running with 24 app settings.                                                                                                                                                                                                                                                                                                                  |
+| 2026-08-14 | Full read-only re-verification and reference expansion. Resource Graph confirms three resources. Corrected the prior document: `keyVaultReferenceIdentity: SystemAssigned` does not mean a system-assigned identity exists; the actual identity is `null`. Added all verified storage, plan, Web App, RBAC, diagnostics, policy, and deployment-surface details. |
