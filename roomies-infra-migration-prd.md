@@ -63,6 +63,9 @@ Recorded as they're made so we don't re-litigate them later.
 - [x] Register `Microsoft.Web` resource provider — confirmed `Registered`
 
 ### Phase 1 — Azure Backend Compute Provisioning 🔶 IN PROGRESS
+
+> **Deploy branch clarified 2026-08-15:** `main` is the sole deploy-triggering branch (not `tier0`). `tier0` remains the active development/PR branch and continues to trigger `ci.yml`'s test-only workflow with no Azure credentials involved. The plan is: work happens on `tier0`, and merging `tier0` → `main` is what will trigger the Azure deploy workflow once 1.9 is written.
+
 **Goal:** Get the existing repo (unchanged) running on Azure App Service, proving parity with Render, before touching migration tooling.
 
 - [x] **1.1** Check real spend to date (`az consumption usage list`) — returned empty table; no discrete usage records posted yet (consistent with 0.03% used)
@@ -73,8 +76,8 @@ Recorded as they're made so we don't re-litigate them later.
 - [x] **1.6** Create `.env.azure` file (mirror `.env.render` structure, same `DATABASE_URL` pointing at Neon, same `REDIS_URL` pointing at Upstash, same Azure Blob credentials) — **DONE**; 23 application variables present
 - [x] **1.7** Port environment variables into Azure App Settings (`az webapp config appsettings set`) — **DONE**; all 23 `.env.azure` variables verified with `az webapp config appsettings list`. App Service does **not** read `.env` files.
 - [x] **1.8** Set `WEBSITES_PORT` app setting to match `config.PORT` — **DONE**; `WEBSITES_PORT=3000` verified. The resulting 24 App Settings consist of 23 application variables plus this Azure port setting. The `set` command echo may show `null` values; use `appsettings list` as the authoritative verification.
-- [ ] **1.9** Write GitHub Actions workflow: `npm ci` → `npm test` → deploy to App Service (publish profile or OIDC federated credential — decide auth method)
-- [ ] **1.10** Configure GitHub Secrets for Azure deploy credentials
+- [ ] **1.9** Write GitHub Actions workflow: `npm ci` → `npm test` → deploy to App Service, authenticating via the OIDC federated credential provisioned in 1.10 (auth method decided and completed 2026-08-15 — see Section 7 Change Log)
+- [x] **1.10** Configure GitHub Secrets for Azure deploy credentials — **DONE 2026-08-15.** OIDC app registration (`roomies-api-github-oidc`), federated credential scoped to `refs/heads/main` pushes only, service principal, and `Contributor` role assignment at `roomies-rg` scope are all provisioned and CLI-verified. Repo secrets still to be added in GitHub (not an Azure-side action — see note below): `AZURE_CLIENT_ID=1d2282ba-5347-4153-a18a-16b95a18068e`, `AZURE_TENANT_ID=1490b17d-5dc9-4cbf-aeba-a2e854f521b8`, `AZURE_SUBSCRIPTION_ID=eaf92174-664c-4d77-b387-7f4da6bf8a36`. No client secret exists or is needed.
 - [ ] **1.11** First deploy — confirm `roomies-api.azurewebsites.net/api/v1/health` returns 200 with `database: ok`, `redis: ok`
 - [ ] **1.12** Confirm BullMQ workers are actually processing jobs on App Service (not just that the process boots) — test one flow end-to-end (e.g. OTP email send)
 - [ ] **1.13** Confirm cron jobs register on startup (check logs for the `cron:*` registration messages already present in the codebase)
@@ -118,7 +121,7 @@ Recorded as they're made so we don't re-litigate them later.
 
 ## 4. Open Questions / Needs Decision
 
-- [ ] Auth method for GitHub Actions → Azure deploy: **publish profile** (simpler, but long-lived secret) vs. **OIDC federated credential** (more setup, no long-lived secret in GitHub) — recommend OIDC, needs explicit go-ahead before Phase 1.9
+- [x] Auth method for GitHub Actions → Azure deploy: **RESOLVED 2026-08-15 — OIDC federated credential chosen and fully provisioned.** See Section 3, Phase 1.9/1.10 status and Section 7 Change Log for details. No publish-profile secret was ever created.
 - [ ] Should Render be deleted or just paused/downgraded after Phase 1 cutover? (Section 6 has a recommendation)
 - [ ] Vercel preview deployment URLs are dynamic (`roomies-<hash>.vercel.app`) — do preview deploys need to talk to the Azure API? If yes, `ALLOWED_ORIGINS` needs a pattern-match approach, not a static list (current `app.js` CORS logic uses `config.ALLOWED_ORIGINS.includes(origin)` — exact match only, won't work for dynamic preview URLs as-is)
 - [ ] Budget alert email recipient — confirm which email should receive Azure Cost Management alerts
@@ -157,3 +160,4 @@ Not recoverable via any down migration. Sole recovery path is Neon point-in-time
 |---|---|
 | 2026-07-27 | Document created. Phase 0 marked complete based on verified `az` command output. Phase 1 commands drafted, awaiting execution. |
 | 2026-07-28 | Completed Phase 1.4–1.8: created and verified `roomies-api` (Running/Normal), prepared `.env.azure`, ported its 23 variables to Azure App Settings, and set `WEBSITES_PORT=3000`. App Settings were re-listed after the port-setting command and all 24 settings remained present. |
+| 2026-08-15 | OIDC federation for GitHub Actions → Azure deploy completed (Phase 1.9–1.10 prerequisite). Created App Registration `roomies-api-github-oidc` (appId `1d2282ba-5347-4153-a18a-16b95a18068e`, object ID `880d4a39-fb7f-454b-8c15-e84d6cc4dfb1`). Added federated credential `roomies-api-main-branch-deploy`, subject `repo:sumit1642/roomies-backend:ref:refs/heads/main` — deploy federation is scoped to `main`-branch pushes only; `tier0` and PRs remain test-only via existing `ci.yml`, no Azure federation. Created service principal (object ID `55431d16-3577-4c3f-a97b-ffa03d2e5b2c`) and assigned `Contributor` at `roomies-rg` scope (role assignment ID `387eb9fc-9ce0-4568-a5e0-448be2b3f6d3`). Scope decision: RG-level chosen over resource-level, deliberately, given the planned future migration of DB/other services into `roomies-rg` and solo-operator deploy triggering — documented as a conscious least-privilege tradeoff, not a default. No client secret created; OIDC token exchange only. All four provisioning steps were independently re-queried (`list`/`show`) and corroborated before proceeding to the next. Workflow YAML (`.github/workflows/deploy.yml`) not yet written — that is the next actionable step under 1.9. |

@@ -3,7 +3,9 @@
 **Purpose:** A strict, safe superset of the original 2026-07-28 Azure reference. This is a factual account record, not
 an execution plan; see `roomies-infra-migration-prd.md` for planned work.
 
-**Last live verification:** 2026-08-14 (Asia/Kolkata) **Safety rule:** No credential, token, password, connection
+**Last live verification:** 2026-08-15 (Asia/Kolkata) — RBAC/identity section only; all other sections retain their 2026-08-14 verification timestamp unless individually re-verified below.
+
+**Safety rule:** No credential, token, password, connection
 string, key, or publishing credential is recorded. App-setting values were deliberately not read; names only are
 retained.
 
@@ -68,18 +70,57 @@ No fourth resource is inferred from an empty normal CLI listing: the count and e
 
 ## 3. Access, RBAC, and managed identity
 
-`AuthorizationResources` returned **3** role-assignment resources. The two scoped CLI role queries return the same three
-assignment IDs when the storage-scope query includes inherited assignments. [Graph verified], [CLI verified]
+As of 2026-08-14, `AuthorizationResources` returned 3 role-assignment resources (subscription-level Owner ×2, plus
+Storage Blob Data Reader on `roomiesblob`). A 4th assignment was added 2026-08-15 for GitHub Actions OIDC federation
+(CLI-verified independently; Resource Graph was not re-queried for this addition — see row below). [Graph verified] (rows 1–3), [CLI verified] (rows 1–4)
 
 | Assignment ID                          | Principal                                                       | Principal type | Role                     | Scope                         | Created              | Source                           |
 | -------------------------------------- | --------------------------------------------------------------- | -------------- | ------------------------ | ----------------------------- | -------------------- | -------------------------------- |
 | `e533e20d-1f17-4851-b233-12e07d7ab9ce` | `2510090039@geu.ac.in` (`66829680-745e-4357-bfac-f8a335fe943a`) | User           | Owner                    | subscription                  | 2025-09-10T14:19:26Z | [Graph verified], [CLI verified] |
 | `8cf8edf1-1552-4095-8a33-80244b6e6a87` | same principal                                                  | User           | Owner                    | subscription                  | 2025-09-10T14:19:26Z | [Graph verified], [CLI verified] |
 | `788b8371-533b-4229-b214-0899054bd13c` | same principal                                                  | User           | Storage Blob Data Reader | `roomiesblob` storage account | 2026-07-27T02:54:17Z | [Graph verified], [CLI verified] |
+| `387eb9fc-9ce0-4568-a5e0-448be2b3f6d3` | `roomies-api-github-oidc` service principal (`55431d16-3577-4c3f-a97b-ffa03d2e5b2c`) | Service Principal | Contributor | `roomies-rg` (resource group) | 2026-08-15T02:12:23Z | [CLI verified] |
 
 The two Owner assignments are duplicates at the same subscription scope. The Storage Blob Data Reader assignment is the
 data-plane access used for `--auth-mode login`; subscription Owner does not by itself establish Blob data-plane
 authorization. [Graph verified], [Historical]
+
+
+### GitHub Actions OIDC federation (added 2026-08-15)
+
+A dedicated App Registration was created to allow GitHub Actions to authenticate to Azure via
+OIDC (workload identity federation), with no client secret stored anywhere.
+
+| Field | Value | Source |
+|---|---|---|
+| App Registration display name | `roomies-api-github-oidc` | [CLI verified] |
+| Application (client) ID | `1d2282ba-5347-4153-a18a-16b95a18068e` | [CLI verified] |
+| Application object ID | `880d4a39-fb7f-454b-8c15-e84d6cc4dfb1` | [CLI verified] |
+| Service principal object ID | `55431d16-3577-4c3f-a97b-ffa03d2e5b2c` | [CLI verified] |
+| Sign-in audience | `AzureADMyOrg` | [CLI verified] |
+| Federated credential name | `roomies-api-main-branch-deploy` | [CLI verified] |
+| Federated credential issuer | `https://token.actions.githubusercontent.com` | [CLI verified] |
+| Federated credential subject | `repo:sumit1642/roomies-backend:ref:refs/heads/main` | [CLI verified] |
+| Federated credential audience | `api://AzureADTokenExchange` | [CLI verified] |
+| Client secret | None — not created, not needed for OIDC | [CLI verified] |
+| Federation scope | `main`-branch pushes only. `tier0` (the active development branch) and pull requests have **no** Azure federation — they continue to run only `ci.yml`'s existing `npm ci` test step. | [CLI verified] |
+| Role assignment | `Contributor` at `roomies-rg` scope (see updated role-assignment table above) | [CLI verified] |
+
+**Repo/branch context:** `main` (`https://github.com/sumit1642/roomies-backend`) is the deploy
+branch; it currently holds minimal content. `tier0`
+(`https://github.com/sumit1642/roomies-backend/tree/tier0`) is the active development branch
+holding the full application. The operator's stated plan is to merge `tier0` → `main`, and that
+merge (a push to `main`) is what will trigger the Azure deploy workflow once it exists.
+
+**Scope decision rationale:** `Contributor` was assigned at the `roomies-rg` resource-group
+level rather than scoped to the single `roomies-api` Web App resource. This was a deliberate
+choice, made after the tighter resource-level scope was initially recommended: the operator
+intends to migrate the database and other services into this same resource group later, and
+deploys are solo-triggered, reducing the multi-contributor compromise surface that motivated the
+tighter recommendation. This broadens the blast radius of a compromised `main`-branch workflow
+run (or a leaked `AZURE_CLIENT_ID` combined with the federation trust) to include `roomiesblob`
+and `roomies-api-plan`, not just `roomies-api` — noted here so a future audit doesn't need to
+re-derive the reasoning.
 
 | Managed-identity field                                   | Result           | Source                           |
 | -------------------------------------------------------- | ---------------- | -------------------------------- |
@@ -351,7 +392,7 @@ profile references, and timestamps are intentionally not copied because this ref
 | VNet integration / private endpoint connection            | None                                  | [Graph verified], [CLI verified]                                                                  |
 | Storage lifecycle-management policy                       | None documented                       | [Historical] — prior `ManagementPolicyNotFound` result retained.                                  |
 | Custom domain bindings / certificates                     | None documented                       | [Historical] — prior resource-scoped lists were empty.                                            |
-| Azure deployment credentials                              | Not inspected                         | [Unavailable] — intentionally excluded to prevent credential disclosure.                          |
+| Azure deployment credentials (secrets/passwords/publish profiles) | None exist — OIDC federation was chosen specifically to avoid this class of credential. A GitHub Actions OIDC identity (App Registration + federated credential + service principal + RBAC role) now exists as of 2026-08-15 — see §3, "GitHub Actions OIDC federation." That identity has no password, secret, or certificate credential attached. | [CLI verified] |
 | GitHub Actions deployment configuration or GitHub secrets | Not an Azure resource and not queried | [Unavailable]                                                                                     |
 
 ---
@@ -594,6 +635,7 @@ classified below; **unclassified old fields: 0**.
 | Remaining credit, percent used, reset cycle                                                                      | §1 retained as dated values; not misrepresented as current                 | [Historical]                                                               |
 | Budget status and CLI-create constraint                                                                          | §§1, 9, 10                                                                 | [Graph verified], [CLI verified], [Historical]                             |
 | Owner and Blob Data Reader assignments and data-plane rationale                                                  | §3                                                                         | [Graph verified], [CLI verified], [Historical]                             |
+| GitHub Actions OIDC federation (new in this session, not present in any prior reference)                         | §3 (new subsection), §12 (update history)                                  | [CLI verified]                                                            |
 | Resource-group name, location, state, locks, policy, diagnostics                                                 | §4                                                                         | [Graph verified], [CLI verified], [Historical]                             |
 | All three deployed resources and their count                                                                     | §2                                                                         | [Graph verified], [CLI verified]                                           |
 | Storage ID, kind, SKU, tier, location, creation, access tier, network, TLS, status                               | §5                                                                         | [Graph verified], [CLI verified]                                           |
@@ -619,3 +661,4 @@ classified below; **unclassified old fields: 0**.
 | 2026-07-27 | Initial account snapshot; storage confirmed. Central India App Service creation was rejected and the plan was subsequently created in Southeast Asia.                              | [Historical]                     |
 | 2026-07-28 | Web App was recorded Running with 24 App Settings.                                                                                                                                 | [Historical]                     |
 | 2026-08-14 | Complete safe rebuild: Graph inventory/RBAC/policy counts, live policy allow-list, scoped CLI corroboration, identity correction, sanitized appendices, and field checklist added. | [Graph verified], [CLI verified] |
+| 2026-08-15 | GitHub Actions OIDC federation established for automated Azure deploys (PRD Phase 1.9–1.10). Created App Registration, federated credential (subject scoped to `refs/heads/main` only — not `tier0`, not PRs), service principal, and `Contributor` role assignment at `roomies-rg` scope. Every step was independently re-queried and corroborated via CLI before the next step was taken. No client secret was created at any point — OIDC token exchange only. This is an identity/RBAC-only change; no new Azure resources (storage, compute, database) were created, so the §2 live inventory count (3 resources) is unaffected. | [CLI verified] |
