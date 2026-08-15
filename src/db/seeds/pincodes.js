@@ -6,7 +6,7 @@
 //
 // Usage:
 //   ENV_FILE=.env.local node src/db/seeds/pincodes.js /path/to/AllIndiaPincodeDataSet.csv
-//   (also wired as `npm run seed:pincodes -- /path/to/AllIndiaPincodeDataSet.csv`)
+//   (also wired as `npm run seed:pincodes:local -- /path/to/AllIndiaPincodeDataSet.csv`)
 //
 // See PRD_proximity_search_v2.md (v3), §5.2, for the full algorithm spec and
 // the real dataset numbers this was validated against (165,627 rows,
@@ -19,6 +19,7 @@ import readline from "readline";
 import "../../config/env.js";
 import { pool } from "../client.js";
 import { logger } from "../../logger/index.js";
+import { confirmSeedTarget } from "./seedGuard.js";
 
 // ── India's bounding box, matching the migration's CHECK constraints and
 // profile_pincodes.py so the seed script's own validation is consistent
@@ -281,6 +282,12 @@ const seed = async (csvPath) => {
 		console.error(`pincodes.js: file not found: ${csvPath}`);
 		process.exit(1);
 	}
+
+	// Confirm which DB this run will write ~19.5k upserted rows to, fired
+	// after argument/file validation (no point prompting for a prod
+	// confirmation only to fail immediately on a missing CSV path) but
+	// before any DB connection or write happens.
+	await confirmSeedTarget("pincodes.js");
 
 	logger.info({ csvPath }, "pincodes.js: reading CSV");
 	const { rowsByPincode, totalRows } = await readCsvRows(csvPath);
