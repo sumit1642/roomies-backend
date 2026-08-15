@@ -1,6 +1,7 @@
 import "../../../src/config/env.js";
 import { pool } from "../client.js";
 import { logger } from "../../logger/index.js";
+import { confirmSeedTarget } from "./seedGuard.js";
 
 const AMENITIES = [
 	{ name: "WiFi", category: "utility", icon_name: "wifi" },
@@ -27,6 +28,8 @@ const AMENITIES = [
 ];
 
 const seed = async () => {
+	await confirmSeedTarget("amenities.js");
+
 	logger.info(`Seeding ${AMENITIES.length} amenities…`);
 
 	const placeholders = AMENITIES.map((_, i) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`).join(", ");

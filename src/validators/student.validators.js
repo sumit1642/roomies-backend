@@ -19,6 +19,14 @@ export const updateStudentSchema = z.object({
 		gender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
 
 		dateOfBirth: z.string().date({ error: "Must be a valid date (YYYY-MM-DD)" }).optional(),
+
+		phone: z
+			.string()
+			.max(20)
+			.regex(/^\+?[0-9]{7,15}$/, {
+				error: "Must be a valid phone number (digits only, 7–15 characters, optional leading +)",
+			})
+			.optional(),
 	}),
 });
 

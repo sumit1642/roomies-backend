@@ -100,7 +100,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 
 	if (hasCursor) {
 		params.push(cursorTime, cursorId);
-		cursorClause = `AND (vr.submitted_at, vr.request_id) > ($2, $3::uuid)`;
+		cursorClause = `AND (vr.submitted_at, vr.request_id) > ($2::timestamptz, $3::uuid)`;
 	}
 
 	const { rows } = await pool.query(
@@ -110,6 +110,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
       vr.document_type,
       vr.document_url,
       vr.submitted_at,
+      to_char(vr.submitted_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_submitted_at,
       pop.business_name,
       pop.owner_full_name,
       pop.verification_status,
@@ -131,7 +132,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 	const nextCursor =
 		hasNextPage ?
 			{
-				cursorTime: items[items.length - 1].submitted_at.toISOString(),
+				cursorTime: items[items.length - 1].cursor_submitted_at,
 				cursorId: items[items.length - 1].request_id,
 			}
 		:	null;
@@ -199,17 +200,23 @@ export const rejectRequest = async (adminUserId, requestId, { rejectionReason, a
 	try {
 		await client.query("BEGIN");
 
+		// rejection_reason is written onto verification_requests itself (not just
+		// pg_owner_profiles) so that trg_verification_status_changed can read the
+		// real reason via NEW.rejection_reason when it inserts the
+		// verification_rejected outbox row. admin_notes remains a separate,
+		// admin-internal field and is never used as the reason shown to the owner.
 		const { rowCount, rows: requestRows } = await client.query(
 			`UPDATE verification_requests
-			SET status      = 'rejected',
-				reviewed_at = NOW(),
-				reviewed_by = $1,
-				admin_notes = $2
-			WHERE request_id = $3
+			SET status            = 'rejected',
+				reviewed_at       = NOW(),
+				reviewed_by       = $1,
+				admin_notes       = $2,
+				rejection_reason  = $3
+			WHERE request_id = $4
 				AND status = 'pending'
 				AND deleted_at IS NULL
 			RETURNING user_id`,
-			[adminUserId, adminNotes ?? null, requestId],
+			[adminUserId, adminNotes ?? null, rejectionReason, requestId],
 		);
 
 		if (rowCount === 0) {
