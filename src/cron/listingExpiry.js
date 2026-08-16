@@ -5,7 +5,7 @@ import { enqueueNotification } from "../workers/notificationQueue.js";
 
 const SCHEDULE = process.env.CRON_LISTING_EXPIRY ?? "0 2 * * *";
 
-const runListingExpiry = async () => {
+export const runListingExpiry = async () => {
 	const startedAt = Date.now();
 	logger.info("cron:listingExpiry — starting run");
 
