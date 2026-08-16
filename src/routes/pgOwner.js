@@ -1,44 +1,57 @@
-// src/routes/pgOwner.js
-
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { optionalAuthenticate } from "../middleware/optionalAuthenticate.js";
 import { contactRevealGate } from "../middleware/contactRevealGate.js";
 import { authorize } from "../middleware/authorize.js";
 import { validate } from "../middleware/validate.js";
+import { upload } from "../middleware/upload.js";
+import { UPLOAD_FIELD_NAME } from "../config/constants.js";
 import { getPgOwnerParamsSchema, updatePgOwnerSchema } from "../validators/pgOwner.validators.js";
 import { submitDocumentSchema } from "../validators/verification.validators.js";
 import * as pgOwnerController from "../controllers/pgOwner.controller.js";
 import * as verificationController from "../controllers/verification.controller.js";
+import * as profilePhotoController from "../controllers/profilePhoto.controller.js";
+import { AppError } from "../middleware/errorHandler.js";
 
 export const pgOwnerRouter = Router();
 
+const requireSelf = (req, res, next) => {
+	if (req.user?.userId !== req.params.userId) {
+		return next(new AppError("Forbidden", 403));
+	}
+	next();
+};
+
 pgOwnerRouter.get("/:userId/profile", authenticate, validate(getPgOwnerParamsSchema), pgOwnerController.getProfile);
 
-// Contact reveal is POST rather than GET for two reasons:
-//   1. GET requests can be prefetched by browsers and cached by intermediaries,
-//      risking PII leakage via caches or browser history even before the user
-//      intends to reveal the contact.
-//   2. POST semantics correctly model the intent: the caller is performing an
-//      action (consuming a quota slot and disclosing PII) rather than merely
-//      reading a resource.
-//
-// Cache-Control: no-store is set inline here so the response is never stored by
-// the browser or any intermediate proxy, regardless of what the client or CDN
-// defaults to.
-//
-// validate runs before contactRevealGate so that malformed UUIDs in the path
-// are rejected before the gate increments the caller's reveal quota.
+pgOwnerRouter.put(
+	"/:userId/photo",
+	authenticate,
+	authorize("pg_owner"),
+	requireSelf,
+	validate(getPgOwnerParamsSchema),
+	upload.single(UPLOAD_FIELD_NAME),
+	profilePhotoController.uploadPgOwnerPhoto,
+);
+
+pgOwnerRouter.delete(
+	"/:userId/photo",
+	authenticate,
+	authorize("pg_owner"),
+	requireSelf,
+	validate(getPgOwnerParamsSchema),
+	profilePhotoController.deletePgOwnerPhoto,
+);
+
 pgOwnerRouter.post(
 	"/:userId/contact/reveal",
 	optionalAuthenticate,
 	validate(getPgOwnerParamsSchema),
-	contactRevealGate,
 	(req, res, next) => {
-		// Prevent any caching of the PII response by browsers, CDNs, or proxies.
 		res.setHeader("Cache-Control", "no-store");
 		next();
 	},
+	contactRevealGate,
 	pgOwnerController.revealContact,
 );
 

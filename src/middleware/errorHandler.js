@@ -1,5 +1,3 @@
-// src/middleware/errorHandler.js
-
 import { logger } from "../logger/index.js";
 import { MAX_UPLOAD_SIZE_BYTES, UPLOAD_FIELD_NAME } from "../config/constants.js";
 
@@ -22,13 +20,11 @@ export class AppError extends Error {
 	}
 }
 
-// eslint-disable-next-line no-unused-vars
 export const errorHandler = (err, req, res, next) => {
 	if (res.headersSent) {
 		return next(err);
 	}
 
-	// Zod v4 validation errors — format all issues into field/message pairs.
 	if (err.name === "ZodError") {
 		logger.warn(
 			{
@@ -51,8 +47,6 @@ export const errorHandler = (err, req, res, next) => {
 		});
 	}
 
-	// Multer upload errors. Each branch logs the specific Multer error code and
-	// message so upload failures are diagnosable without reading raw stack traces.
 	if (err.name === "MulterError") {
 		if (err.code === "LIMIT_FILE_SIZE") {
 			logger.warn(
@@ -89,7 +83,6 @@ export const errorHandler = (err, req, res, next) => {
 			});
 		}
 
-		// Unknown Multer error — log the full code and message so it is not lost.
 		logger.warn(
 			{
 				req: { method: req.method, url: req.url },
@@ -112,7 +105,6 @@ export const errorHandler = (err, req, res, next) => {
 		});
 	}
 
-	// PostgreSQL constraint errors.
 	if (err.code === "23505")
 		return res.status(409).json({ status: "error", message: "A record with this value already exists" });
 	if (err.code === "23503")
@@ -120,7 +112,6 @@ export const errorHandler = (err, req, res, next) => {
 	if (err.code === "23514")
 		return res.status(400).json({ status: "error", message: "Data failed a database constraint check" });
 
-	// JWT errors.
 	if (err.name === "JsonWebTokenError") return res.status(401).json({ status: "error", message: "Invalid token" });
 	if (err.name === "TokenExpiredError")
 		return res.status(401).json({ status: "error", message: "Token has expired" });

@@ -1,19 +1,7 @@
-// src/services/verification.service.js
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 
-// ─── Shared rollback-failure logger ──────────────────────────────────────────
-//
-// Both approveRequest and rejectRequest wrap their ROLLBACK in a try/catch and
-// log identically. Extracting the pattern here removes the duplication and
-// ensures any future logging change only needs to happen in one place.
-//
-// Parameters:
-//   rollbackErr  — the error thrown by client.query("ROLLBACK")
-//   originalErr  — the error that triggered the rollback in the first place
-//   context      — plain object with { adminUserId, requestId } for log correlation
 const handleRollbackFailure = (
 	rollbackErr,
 	originalErr,
@@ -23,13 +11,7 @@ const handleRollbackFailure = (
 	logger.error({ rollbackErr, originalErr, ...context }, message);
 };
 
-// ─── Document submission ──────────────────────────────────────────────────────
-
 export const submitDocument = async (requestingUserId, targetUserId, { documentType, documentUrl }) => {
-	// Route-level ownership check catches cross-user attacks by comparing JWT
-	// claims. This guard is different — it verifies actual database state: that a
-	// non-deleted pg_owner_profiles row exists for this user. A student who somehow
-	// obtained a pg_owner role would pass the ownership check but fail here.
 	if (requestingUserId !== targetUserId) {
 		throw new AppError("Forbidden", 403);
 	}
@@ -110,8 +92,6 @@ export const submitDocument = async (requestingUserId, targetUserId, { documentT
 	}
 };
 
-// ─── Admin queue ──────────────────────────────────────────────────────────────
-
 export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 
@@ -120,7 +100,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 
 	if (hasCursor) {
 		params.push(cursorTime, cursorId);
-		cursorClause = `AND (vr.submitted_at, vr.request_id) > ($2, $3::uuid)`;
+		cursorClause = `AND (vr.submitted_at, vr.request_id) > ($2::timestamptz, $3::uuid)`;
 	}
 
 	const { rows } = await pool.query(
@@ -130,6 +110,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
       vr.document_type,
       vr.document_url,
       vr.submitted_at,
+      to_char(vr.submitted_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_submitted_at,
       pop.business_name,
       pop.owner_full_name,
       pop.verification_status,
@@ -151,15 +132,13 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 	const nextCursor =
 		hasNextPage ?
 			{
-				cursorTime: items[items.length - 1].submitted_at.toISOString(),
+				cursorTime: items[items.length - 1].cursor_submitted_at,
 				cursorId: items[items.length - 1].request_id,
 			}
 		:	null;
 
 	return { items, nextCursor };
 };
-
-// ─── Admin resolution ─────────────────────────────────────────────────────────
 
 export const approveRequest = async (adminUserId, requestId, { adminNotes } = {}) => {
 	const client = await pool.connect();
@@ -221,17 +200,23 @@ export const rejectRequest = async (adminUserId, requestId, { rejectionReason, a
 	try {
 		await client.query("BEGIN");
 
+		// rejection_reason is written onto verification_requests itself (not just
+		// pg_owner_profiles) so that trg_verification_status_changed can read the
+		// real reason via NEW.rejection_reason when it inserts the
+		// verification_rejected outbox row. admin_notes remains a separate,
+		// admin-internal field and is never used as the reason shown to the owner.
 		const { rowCount, rows: requestRows } = await client.query(
 			`UPDATE verification_requests
-			SET status      = 'rejected',
-				reviewed_at = NOW(),
-				reviewed_by = $1,
-				admin_notes = $2
-			WHERE request_id = $3
+			SET status            = 'rejected',
+				reviewed_at       = NOW(),
+				reviewed_by       = $1,
+				admin_notes       = $2,
+				rejection_reason  = $3
+			WHERE request_id = $4
 				AND status = 'pending'
 				AND deleted_at IS NULL
 			RETURNING user_id`,
-			[adminUserId, adminNotes ?? null, requestId],
+			[adminUserId, adminNotes ?? null, rejectionReason, requestId],
 		);
 
 		if (rowCount === 0) {

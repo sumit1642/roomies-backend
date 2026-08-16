@@ -1,23 +1,20 @@
 // src/controllers/auth.controller.js
+//
+// Token transport strategy (mobile + web):
+//   - Cookies are always set (HttpOnly, Secure) — browser clients use these.
+//   - The JSON body includes tokens ONLY when the request signals it is a
+//     native mobile client, detected via the X-Client-Type: mobile header.
+//     Android / iOS clients must send this header to receive tokens in the body.
+//   - Browser clients (no header) get { user: tokens.user } — no raw token in body.
+//
+// This keeps the API secure for browsers while remaining compatible with native
+// apps that cannot access HttpOnly cookies.
 
 import * as authService from "../services/auth.service.js";
 import { parseTtlSeconds } from "../services/auth.service.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { config } from "../config/env.js";
-
-const ACCESS_COOKIE_OPTIONS = {
-	httpOnly: true,
-	secure: config.NODE_ENV === "production",
-	sameSite: "strict",
-	maxAge: parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60) * 1000,
-};
-
-const REFRESH_COOKIE_OPTIONS = {
-	httpOnly: true,
-	secure: config.NODE_ENV === "production",
-	sameSite: "strict",
-	maxAge: parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60) * 1000,
-};
+import { ACCESS_COOKIE_OPTIONS, REFRESH_COOKIE_OPTIONS } from "../middleware/authenticate.js";
 
 const setAuthCookies = (res, accessToken, refreshToken) => {
 	res.cookie("accessToken", accessToken, ACCESS_COOKIE_OPTIONS);
@@ -27,49 +24,40 @@ const setAuthCookies = (res, accessToken, refreshToken) => {
 const clearAuthCookies = (res) => {
 	res.clearCookie("accessToken", {
 		httpOnly: true,
-		secure: config.NODE_ENV === "production",
-		sameSite: "strict",
+		secure: ACCESS_COOKIE_OPTIONS.secure,
+		sameSite: ACCESS_COOKIE_OPTIONS.sameSite,
 	});
 	res.clearCookie("refreshToken", {
 		httpOnly: true,
-		secure: config.NODE_ENV === "production",
-		sameSite: "strict",
+		secure: REFRESH_COOKIE_OPTIONS.secure,
+		sameSite: REFRESH_COOKIE_OPTIONS.sameSite,
 	});
 };
 
-// Determines whether the caller is a non-browser client that manages its own
-// token lifecycle (e.g. the Android app). When true, tokens are included in the
-// JSON response body. When false, tokens are delivered only via HttpOnly cookies
-// and the body contains only safe session metadata.
-//
-// Browser clients using cookies gain no benefit from receiving raw tokens in the
-// body — they cannot read HttpOnly cookies from JavaScript anyway, and including
-// the tokens in JSON directly undermines the XSS protection that HttpOnly provides
-// by giving any script on the page an additional exfiltration surface.
-//
-// Android clients set X-Client-Transport: bearer to signal that they are managing
-// tokens explicitly and expect them in the response body.
-const isBearerTransport = (req) => req.headers["x-client-transport"] === "bearer";
+/**
+ * Returns true when the caller is a native mobile app.
+ * Mobile clients MUST send `X-Client-Type: mobile` to receive tokens in the body.
+ * Browsers never send this header, so they only get HttpOnly cookies.
+ */
+const isMobileClient = (req) => req.headers["x-client-type"]?.toLowerCase() === "mobile";
 
-// Builds the safe body payload for cookie-mode responses. Contains everything
-// the browser UI needs (user identity, roles, verification state) without
-// exposing the raw token strings that only the HttpOnly cookie transport should
-// carry. The sid is included so the client can reference the current session
-// (e.g. for the session management UI) without needing the token itself.
-const buildSafeBody = (tokens) => ({
-	user: tokens.user,
-	sid: tokens.sid,
-});
-
-// ─── Controllers ──────────────────────────────────────────────────────────────
+/**
+ * Build the JSON data payload for auth responses.
+ * - Mobile: full token pair so the client can store them in secure storage.
+ * - Browser: no tokens in body; cookies carry the session.
+ */
+const authResponseData = (req, tokens) => {
+	if (isMobileClient(req)) {
+		return tokens; // { accessToken, refreshToken, user, sid }
+	}
+	return { user: tokens.user }; // cookies-only transport for browsers
+};
 
 export const register = async (req, res, next) => {
 	try {
 		const tokens = await authService.register(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-
-		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
-		res.status(201).json({ status: "success", data });
+		res.status(201).json({ status: "success", data: authResponseData(req, tokens) });
 	} catch (err) {
 		next(err);
 	}
@@ -79,9 +67,7 @@ export const login = async (req, res, next) => {
 	try {
 		const tokens = await authService.login(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-
-		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
-		res.json({ status: "success", data });
+		res.json({ status: "success", data: authResponseData(req, tokens) });
 	} catch (err) {
 		next(err);
 	}
@@ -124,11 +110,8 @@ export const refresh = async (req, res, next) => {
 		}
 
 		const tokens = await authService.refresh(incomingRefreshToken);
-
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-
-		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
-		res.json({ status: "success", data });
+		res.json({ status: "success", data: authResponseData(req, tokens) });
 	} catch (err) {
 		next(err);
 	}
@@ -193,9 +176,7 @@ export const googleCallback = async (req, res, next) => {
 	try {
 		const tokens = await authService.googleOAuth(req.body);
 		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
-
-		const data = isBearerTransport(req) ? tokens : buildSafeBody(tokens);
-		res.json({ status: "success", data });
+		res.json({ status: "success", data: authResponseData(req, tokens) });
 	} catch (err) {
 		next(err);
 	}

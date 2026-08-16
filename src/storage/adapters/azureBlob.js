@@ -1,15 +1,6 @@
 // src/storage/adapters/azureBlob.js
 //
 // Azure Blob Storage adapter — production implementation.
-//
-// Fixes applied:
-//   Fix 7 — upload() now aborts after UPLOAD_TIMEOUT_MS (30s) via AbortController
-//            to prevent the worker from hanging indefinitely on a slow/stalled
-//            Azure connection.
-//   Fix 8 — delete() strips query-string and fragment from the URL before
-//            extracting the blob path, so SAS tokens or CDN cache-busters in
-//            the stored URL don't cause a path mismatch.
-
 import { BlobServiceClient } from "@azure/storage-blob";
 import { config } from "../../config/env.js";
 import { logger } from "../../logger/index.js";

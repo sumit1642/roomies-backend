@@ -1,5 +1,3 @@
-// src/middleware/optionalAuthenticate.js
-
 import jwt from "jsonwebtoken";
 import { config } from "../config/env.js";
 import { findUserById } from "../db/utils/auth.js";

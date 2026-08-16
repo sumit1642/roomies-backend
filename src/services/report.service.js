@@ -1,13 +1,7 @@
-// src/services/report.service.js
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 
-// ─── Submit report ────────────────────────────────────────────────────────────
-// Atomic INSERT ... SELECT: eligibility (caller is party to the connection) and
-// the INSERT happen in one statement. Zero rows → 404. 23505 (duplicate open
-// report from same reporter) → global handler converts to 409.
 export const submitReport = async (reporterId, ratingId, { reason, explanation }) => {
 	const { rows } = await pool.query(
 		`INSERT INTO rating_reports (reporter_id, rating_id, reason, explanation)
@@ -41,9 +35,6 @@ export const submitReport = async (reporterId, ratingId, { reason, explanation }
 	};
 };
 
-// ─── Get report queue (admin) ─────────────────────────────────────────────────
-// Returns open reports oldest-first (anti-starvation). LEFT JOINs ensure reports
-// remain visible even when the target rating, reporter, or reviewer is soft-deleted.
 export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	const hasPartialCursor = (cursorTime !== undefined) !== (cursorId !== undefined);
@@ -57,7 +48,12 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 
 	if (hasCursor) {
 		params.push(cursorTime, cursorId);
-		cursorClause = `AND (rr.created_at, rr.report_id) > ($2, $3::uuid)`;
+		// $2 is compared against rr.created_at (timestamptz). cursorTime is the
+		// full microsecond-precision text this same query produces via
+		// to_char(...) below — cast explicitly rather than relying on Postgres's
+		// implicit text->timestamptz cast, so a malformed cursorTime fails fast
+		// with a clear type-cast error instead of silently coercing.
+		cursorClause = `AND (rr.created_at, rr.report_id) > ($2::timestamptz, $3::uuid)`;
 	}
 
 	const { rows } = await pool.query(
@@ -69,6 +65,18 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
        rr.explanation,
        rr.status,
        rr.created_at                           AS submitted_at,
+       -- Full microsecond-precision cursor value, as text. node-postgres
+       -- parses TIMESTAMPTZ into a JS Date, which is millisecond-precision —
+       -- any microseconds Postgres actually stored are silently truncated
+       -- before .toISOString() runs. Two reports created within the same
+       -- millisecond (created_at differing only in microseconds) would then
+       -- produce a cursor value <= the boundary row's true stored value, so
+       -- "(rr.created_at, rr.report_id) > (cursorTime, cursorId)" could be
+       -- satisfied by the boundary row itself on the next page — duplicating
+       -- it across pages. to_char with US preserves all 6 fractional digits
+       -- Postgres stores for TIMESTAMPTZ, round-tripped as plain text so no
+       -- client-side Date parsing (and its precision loss) ever happens.
+       to_char(rr.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at,
 
        r.overall_score,
        r.cleanliness_score,
@@ -159,7 +167,7 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	const nextCursor =
 		hasNextPage && items.length > 0 ?
 			{
-				cursorTime: items[items.length - 1].submitted_at,
+				cursorTime: items[items.length - 1].cursor_created_at,
 				cursorId: items[items.length - 1].report_id,
 			}
 		:	null;
@@ -202,15 +210,6 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	};
 };
 
-// ─── Resolve report (admin) ───────────────────────────────────────────────────
-// Two outcomes: resolved_removed (hides the rating, triggers the DB aggregate
-// trigger) or resolved_kept (closes the report, rating stays visible).
-// AND status = 'open' is the concurrency guard — concurrent resolves produce
-// rowCount === 0 on the second attempt → 409.
-//
-// All logger.info calls are placed after COMMIT so they only fire when the
-// transaction has successfully persisted. A failed COMMIT does not produce a
-// false-positive success log.
 export const resolveReport = async (adminId, reportId, { resolution, adminNotes }) => {
 	const validResolutions = ["resolved_removed", "resolved_kept"];
 	if (!validResolutions.includes(resolution)) {
@@ -224,8 +223,7 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 	const client = await pool.connect();
 
 	let ratingId;
-	// Track whether the rating was already soft-deleted so we can log correctly
-	// after COMMIT without re-querying.
+
 	let ratingWasAlreadySoftDeleted = false;
 
 	try {
@@ -251,8 +249,6 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 		ratingId = reportRows[0].rating_id;
 
 		if (resolution === "resolved_removed") {
-			// The DB trigger update_rating_aggregates fires automatically after this
-			// UPDATE to recalculate average_rating and rating_count on the reviewee.
 			const { rowCount: ratingRowCount } = await client.query(
 				`UPDATE ratings
          SET is_visible = FALSE
@@ -262,9 +258,6 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 			);
 
 			if (ratingRowCount === 0) {
-				// Zero rows: either the rating is soft-deleted (already invisible,
-				// desired state achieved) or the row is completely missing (FK violation,
-				// should never happen). Distinguish the two cases.
 				const { rows: ratingCheck } = await client.query(
 					`SELECT deleted_at FROM ratings WHERE rating_id = $1`,
 					[ratingId],
@@ -277,16 +270,12 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 					);
 				}
 
-				// Rating is soft-deleted: already invisible, aggregates already adjusted.
-				// Mark the flag so we can choose the right log message after COMMIT.
 				ratingWasAlreadySoftDeleted = true;
 			}
 		}
 
 		await client.query("COMMIT");
 
-		// All logging happens after COMMIT to avoid false-positive success entries
-		// when the transaction is later rolled back.
 		if (ratingWasAlreadySoftDeleted) {
 			logger.info(
 				{ adminId, reportId, ratingId },

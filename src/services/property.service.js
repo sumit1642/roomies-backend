@@ -1,5 +1,3 @@
-// src/services/property.service.js
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
@@ -16,8 +14,6 @@ const bulkInsertAmenities = async (client, propertyId, amenityIds) => {
 	);
 };
 
-// Location fields that, when changed on a property, must cascade to all linked
-// pg_room and hostel_bed listings so proximity search and city filters stay consistent.
 const LOCATION_CASCADE_MAP = {
 	city: "city",
 	address_line: "address_line",
@@ -73,7 +69,6 @@ const fetchPropertyWithAmenities = async (propertyId, client = pool) => {
 	return rows[0] ?? null;
 };
 
-// ─── Create property ──────────────────────────────────────────────────────────
 export const createProperty = async (ownerId, body) => {
 	await assertOwnerVerified(ownerId);
 
@@ -138,7 +133,6 @@ export const createProperty = async (ownerId, body) => {
 	}
 };
 
-// ─── Get property ─────────────────────────────────────────────────────────────
 export const getProperty = async (propertyId) => {
 	const property = await fetchPropertyWithAmenities(propertyId);
 	if (!property) {
@@ -147,7 +141,6 @@ export const getProperty = async (propertyId) => {
 	return property;
 };
 
-// ─── List properties ──────────────────────────────────────────────────────────
 export const listProperties = async (ownerId, { cursorTime, cursorId, limit = 20 }) => {
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	const params = [ownerId, limit + 1];
@@ -206,9 +199,6 @@ export const listProperties = async (ownerId, { cursorTime, cursorId, limit = 20
 	return { items, nextCursor };
 };
 
-// ─── Update property ──────────────────────────────────────────────────────────
-// Location field changes cascade to all linked pg_room and hostel_bed listings
-// within the same transaction to keep city/address/coordinates consistent.
 export const updateProperty = async (ownerId, propertyId, body) => {
 	await assertOwnerVerified(ownerId);
 
@@ -336,14 +326,6 @@ export const updateProperty = async (ownerId, propertyId, body) => {
 	}
 };
 
-// ─── Delete property (soft) ───────────────────────────────────────────────────
-// Locks the property row then all its non-deleted listing rows to prevent a
-// TOCTOU race where a concurrent status change could create an active listing
-// after the check but before the soft-delete commits.
-//
-// The active listing guard includes (expires_at IS NULL OR expires_at > NOW())
-// so expired listings — which can never be reactivated from 'expired' status —
-// do not falsely block property deletion.
 export const deleteProperty = async (ownerId, propertyId) => {
 	await assertOwnerVerified(ownerId);
 
@@ -351,7 +333,6 @@ export const deleteProperty = async (ownerId, propertyId) => {
 	try {
 		await client.query("BEGIN");
 
-		// Step 1: lock the property row.
 		const { rows: propertyRows } = await client.query(
 			`SELECT property_id
        FROM properties
@@ -366,7 +347,6 @@ export const deleteProperty = async (ownerId, propertyId) => {
 			throw new AppError("Property not found", 404);
 		}
 
-		// Step 2: lock all non-deleted listing rows for this property.
 		await client.query(
 			`SELECT listing_id
        FROM listings
@@ -376,9 +356,6 @@ export const deleteProperty = async (ownerId, propertyId) => {
 			[propertyId],
 		);
 
-		// Step 3: check for non-expired active listings under the lock.
-		// Expired listings (status = 'expired' or expires_at in the past) are
-		// terminal and can never be reactivated, so they do not block deletion.
 		const { rows: activeListingRows } = await client.query(
 			`SELECT 1
        FROM listings
@@ -394,7 +371,6 @@ export const deleteProperty = async (ownerId, propertyId) => {
 			throw new AppError("Deactivate or remove all active listings before deleting this property", 409);
 		}
 
-		// Step 4: soft-delete the property.
 		await client.query(
 			`UPDATE properties
        SET deleted_at = NOW()

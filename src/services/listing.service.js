@@ -1,33 +1,14 @@
 // src/services/listing.service.js
-//
-// ─── THE PAISE RULE ───────────────────────────────────────────────────────────
-//
-// rent_per_month and deposit_amount are stored in PAISE (smallest INR unit)
-// in the database. 1 rupee = 100 paise. Rs 8,500/month → stored as 850,000.
-//
-// This file is the ONLY place where the conversion happens:
-//   write path:  rupees × 100  before any INSERT or UPDATE
-//   read path:   paise  ÷ 100  after any SELECT, before returning to caller
-//
-// ─── GUEST ACCESS ────────────────────────────────────────────────────────────
-//
-// searchListings and getListing accept a nullable userId (null for guests).
-// When userId is null:
-//   - Compatibility scoring is skipped (no user preferences to compare against)
-//   - compatibilityScore is always 0, compatibilityAvailable is always false
-//   - All other listing data is returned normally
-// ─────────────────────────────────────────────────────────────────────────────
 
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { assertPgOwnerVerified } from "../db/utils/pgOwner.js";
-import { scoreListingsForUser } from "../db/utils/compatibility.js";
 import { expirePendingRequestsForListing } from "./interest.service.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 import { dedupePreferencesByKey } from "../config/preferences.js";
+import { getPincode } from "./pincode.service.js";
 
-// ─── Location fields that belong to the parent property for pg/hostel listings ─
 const PROPERTY_OWNED_LOCATION_FIELDS = new Set([
 	"addressLine",
 	"city",
@@ -46,6 +27,22 @@ const toRupees = (listing) => {
 		depositAmount: listing.deposit_amount / 100,
 		rent_per_month: undefined,
 		deposit_amount: undefined,
+	};
+};
+
+const rentDeviationPct = (rentPaise, p50Paise) => {
+	if (p50Paise == null || p50Paise === 0) return null;
+	return Math.round(((rentPaise - p50Paise) / p50Paise) * 100);
+};
+// Helper that converts paise rent-index fields to rupees for the JSON response.
+const formatRentIndex = (row) => {
+	if (row.ri_p50 == null) return null;
+	return {
+		p25: Math.round(row.ri_p25 / 100),
+		p50: Math.round(row.ri_p50 / 100),
+		p75: Math.round(row.ri_p75 / 100),
+		sampleCount: row.ri_sample_count,
+		resolution: row.ri_resolution, // 'locality' | 'city' | null
 	};
 };
 
@@ -149,6 +146,7 @@ const fetchListingDetail = async (listingId, client = pool) => {
         FROM listing_photos ph
         WHERE ph.listing_id = l.listing_id
           AND ph.deleted_at IS NULL
+          AND ph.photo_url NOT LIKE 'processing:%'
       ) AS photos,
 
       CASE WHEN p.property_id IS NOT NULL THEN
@@ -165,7 +163,18 @@ const fetchListingDetail = async (listingId, client = pool) => {
           'averageRating', p.average_rating,
           'ratingCount',   p.rating_count
         )
-      ELSE NULL END AS property
+      ELSE NULL END AS property,
+
+      -- Rent index (locality-level preferred, city-wide fallback)
+      COALESCE(ri_loc.p25,          ri_city.p25)          AS ri_p25,
+      COALESCE(ri_loc.p50,          ri_city.p50)          AS ri_p50,
+      COALESCE(ri_loc.p75,          ri_city.p75)          AS ri_p75,
+      COALESCE(ri_loc.sample_count, ri_city.sample_count) AS ri_sample_count,
+      CASE
+        WHEN ri_loc.rent_index_id  IS NOT NULL THEN 'locality'
+        WHEN ri_city.rent_index_id IS NOT NULL THEN 'city'
+        ELSE NULL
+      END AS ri_resolution
 
     FROM listings l
     JOIN users u ON u.user_id = l.posted_by
@@ -175,6 +184,14 @@ const fetchListingDetail = async (listingId, client = pool) => {
     LEFT JOIN amenities a           ON a.amenity_id  = la.amenity_id
     LEFT JOIN listing_preferences lp ON lp.listing_id = l.listing_id
     LEFT JOIN properties p          ON p.property_id  = l.property_id AND p.deleted_at IS NULL
+    LEFT JOIN rent_index ri_loc
+      ON ri_loc.city      = l.city
+     AND ri_loc.locality  = NULLIF(LOWER(TRIM(COALESCE(l.locality, ''))), '')
+     AND ri_loc.room_type = l.room_type
+    LEFT JOIN rent_index ri_city
+      ON ri_city.city      = l.city
+     AND ri_city.locality  IS NULL
+     AND ri_city.room_type = l.room_type
     WHERE l.listing_id = $1
       AND l.deleted_at IS NULL
     GROUP BY
@@ -182,7 +199,9 @@ const fetchListingDetail = async (listingId, client = pool) => {
       sp.full_name, pop.owner_full_name, p.property_id,
       p.property_name, p.property_type, p.address_line, p.city,
       p.locality, p.latitude, p.longitude, p.house_rules,
-      p.average_rating, p.rating_count`,
+      p.average_rating, p.rating_count,
+      ri_loc.p25, ri_loc.p50, ri_loc.p75, ri_loc.sample_count, ri_loc.rent_index_id,
+      ri_city.p25, ri_city.p50, ri_city.p75, ri_city.sample_count, ri_city.rent_index_id`,
 		[listingId],
 	);
 
@@ -254,7 +273,8 @@ export const createListing = async (posterId, posterRoles, body) => {
         longitude,
         expires_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+        $1, $2, $3::listing_type_enum, $4, $5, $6, $7, $8, $9, $10::room_type_enum,
+        $11::bed_type_enum, $12, $13::gender_enum,
         $14, $15, $16, $17, $18, $19, $20, $21, $22,
         NOW() + INTERVAL '60 days'
       )
@@ -287,8 +307,8 @@ export const createListing = async (posterId, posterRoles, body) => {
 
 		const listingId = rows[0].listing_id;
 
-		await bulkInsertListingAmenities(client, listingId, body.amenityIds);
-		await bulkInsertListingPreferences(client, listingId, body.preferences);
+		await bulkInsertListingAmenities(client, listingId, body.amenityIds ?? []);
+		await bulkInsertListingPreferences(client, listingId, body.preferences ?? []);
 
 		await client.query("COMMIT");
 
@@ -297,8 +317,8 @@ export const createListing = async (posterId, posterRoles, body) => {
 				posterId,
 				listingId,
 				listingType: body.listingType,
-				amenityCount: body.amenityIds.length,
-				preferenceCount: body.preferences.length,
+				amenityCount: (body.amenityIds ?? []).length,
+				preferenceCount: (body.preferences ?? []).length,
 			},
 			"Listing created",
 		);
@@ -313,33 +333,29 @@ export const createListing = async (posterId, posterRoles, body) => {
 	}
 };
 
-// ─── Get single listing ───────────────────────────────────────────────────────
-//
-// userId may be null for guest callers. The listing detail is returned
-// regardless — guests see all listing data except compatibility scoring,
-// which requires a logged-in user's preferences.
 export const getListing = async (listingId) => {
 	const listing = await fetchListingDetail(listingId);
 	if (!listing) throw new AppError("Listing not found", 404);
 
+	// Increment view count fire-and-forget
 	void pool
 		.query(`UPDATE listings SET views_count = views_count + 1 WHERE listing_id = $1`, [listingId])
 		.catch((err) => {
 			logger.warn({ err, listingId }, "Failed to increment listing view count");
 		});
 
-	return toRupees(listing);
+	const converted = toRupees(listing);
+
+	return {
+		...converted,
+		rentDeviation: rentDeviationPct(listing.rent_per_month, listing.ri_p50),
+		rentIndex: formatRentIndex(listing),
+	};
 };
 
-// ─── Search listings ──────────────────────────────────────────────────────────
-//
-// userId may be null when called for a guest (optionalAuthenticate set no user).
-// When null:
-//   - scoreListingsForUser is skipped entirely
-//   - every item gets compatibilityScore: 0 and compatibilityAvailable: false
-//   - all filter/sort/pagination logic is identical to the authenticated path
 export const searchListings = async (userId, filters) => {
 	const {
+		sortBy = "recent",
 		city,
 		minRent,
 		maxRent,
@@ -348,27 +364,47 @@ export const searchListings = async (userId, filters) => {
 		preferredGender,
 		listingType,
 		availableFrom,
-		lat,
-		lng,
 		radius,
 		amenityIds = [],
 		cursorTime,
+		cursorScore,
 		cursorId,
 		limit = 20,
 	} = filters;
+
+	// lat/lng may come directly from the client (GPS, native geolocation) or
+	// be resolved here from a pincode (web pincode-search path — PRD:
+	// Proximity Search v2). Pulled out separately as `let`, not part of the
+	// destructuring above, because they may be reassigned by the pincode
+	// resolution block below. lat/lng wins over pincode when both are
+	// present — GPS is strictly more precise than a pincode centroid.
+	let { lat, lng } = filters;
+
+	if ((lat === undefined || lng === undefined) && filters.pincode !== undefined) {
+		try {
+			({ latitude: lat, longitude: lng } = await getPincode(filters.pincode));
+		} catch (err) {
+			if (!(err instanceof AppError && err.statusCode === 404)) {
+				throw err;
+			}
+			logger.warn(
+				{ pincode: filters.pincode },
+				"searchListings: pincode not found in reference table — proceeding without proximity filter",
+			);
+		}
+	}
 
 	const clauses = [`l.status = 'active'`, `l.deleted_at IS NULL`, `l.expires_at > NOW()`];
 	const params = [];
 	let p = 1;
 
 	if (lat !== undefined && lng !== undefined) {
-		clauses.push(
-			`ST_DWithin(
-        COALESCE(l.location, p.location)::geography,
-        ST_SetSRID(ST_MakePoint($${p + 1}, $${p}), 4326)::geography,
-        $${p + 2}
-      )`,
-		);
+		const pointExpr = `ST_SetSRID(ST_MakePoint($${p + 1}, $${p}), 4326)::geography`;
+		clauses.push(`(
+			(l.location IS NOT NULL AND ST_DWithin(l.location::geography, ${pointExpr}, $${p + 2}))
+			OR
+			(l.location IS NULL AND p.location IS NOT NULL AND ST_DWithin(p.location::geography, ${pointExpr}, $${p + 2}))
+		)`);
 		params.push(lat, lng, radius);
 		p += 3;
 	}
@@ -393,25 +429,25 @@ export const searchListings = async (userId, filters) => {
 	}
 
 	if (roomType !== undefined) {
-		clauses.push(`l.room_type = $${p}`);
+		clauses.push(`l.room_type = $${p}::room_type_enum`);
 		params.push(roomType);
 		p++;
 	}
 
 	if (bedType !== undefined) {
-		clauses.push(`l.bed_type = $${p}`);
+		clauses.push(`l.bed_type = $${p}::bed_type_enum`);
 		params.push(bedType);
 		p++;
 	}
 
 	if (preferredGender !== undefined) {
-		clauses.push(`(l.preferred_gender = $${p} OR l.preferred_gender IS NULL)`);
+		clauses.push(`(l.preferred_gender = $${p}::gender_enum OR l.preferred_gender IS NULL)`);
 		params.push(preferredGender);
 		p++;
 	}
 
 	if (listingType !== undefined) {
-		clauses.push(`l.listing_type = $${p}`);
+		clauses.push(`l.listing_type = $${p}::listing_type_enum`);
 		params.push(listingType);
 		p++;
 	}
@@ -439,14 +475,31 @@ export const searchListings = async (userId, filters) => {
 	}
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
-	if (hasCursor) {
+	if (hasCursor && sortBy === "recent") {
 		clauses.push(`(l.created_at < $${p} OR (l.created_at = $${p} AND l.listing_id > $${p + 1}::uuid))`);
 		params.push(cursorTime, cursorId);
 		p += 2;
 	}
 
+	if (sortBy === "compatibility" && cursorScore !== undefined && cursorId !== undefined) {
+		clauses.push(`(
+      compatibility_score.score < $${p}
+      OR (compatibility_score.score = $${p} AND l.listing_id > $${p + 1}::uuid)
+    )`);
+		params.push(cursorScore, cursorId);
+		p += 2;
+	}
+
+	const userIdParam = p;
+	params.push(userId);
+	p++;
+
 	params.push(limit + 1);
 	const limitParam = p;
+	const orderBy =
+		sortBy === "compatibility" ?
+			`compatibility_score.score DESC, l.listing_id ASC`
+		:	`l.created_at DESC, l.listing_id ASC`;
 
 	const { rows } = await pool.query(
 		`SELECT
@@ -464,6 +517,8 @@ export const searchListings = async (userId, filters) => {
       l.available_from,
       l.status,
       l.created_at,
+      COALESCE(l.latitude,  p.latitude)  AS latitude,
+      COALESCE(l.longitude, p.longitude) AS longitude,
       COALESCE(p.property_name, NULL) AS property_name,
       COALESCE(p.average_rating, u.average_rating) AS average_rating,
       (
@@ -472,13 +527,50 @@ export const searchListings = async (userId, filters) => {
         WHERE ph.listing_id = l.listing_id
           AND ph.is_cover   = TRUE
           AND ph.deleted_at IS NULL
+          AND ph.photo_url NOT LIKE 'processing:%'
         LIMIT 1
-      ) AS cover_photo_url
+      ) AS cover_photo_url,
+      COALESCE(ri_loc.p50,  ri_city.p50)  AS ri_p50,
+      CASE
+        WHEN ri_loc.rent_index_id  IS NOT NULL THEN 'locality'
+        WHEN ri_city.rent_index_id IS NOT NULL THEN 'city'
+        ELSE NULL
+      END AS ri_resolution,
+      compatibility_score.score AS compatibility_score,
+      listing_preference_count.preference_count AS listing_preference_count,
+      EXISTS (
+        SELECT 1 FROM user_preferences up_exists WHERE up_exists.user_id = $${userIdParam}::uuid
+      ) AS user_has_preferences
     FROM listings l
     JOIN users u ON u.user_id = l.posted_by
     LEFT JOIN properties p ON p.property_id = l.property_id AND p.deleted_at IS NULL
+    CROSS JOIN LATERAL (
+      SELECT CASE
+        WHEN $${userIdParam}::uuid IS NULL THEN 0
+        ELSE COUNT(*)::int
+      END AS score
+      FROM listing_preferences lp_score
+      JOIN user_preferences up_score
+        ON up_score.preference_key   = lp_score.preference_key
+       AND up_score.preference_value = lp_score.preference_value
+       AND up_score.user_id          = $${userIdParam}::uuid
+      WHERE lp_score.listing_id = l.listing_id
+    ) compatibility_score
+    CROSS JOIN LATERAL (
+      SELECT COUNT(*)::int AS preference_count
+      FROM listing_preferences lp_count
+      WHERE lp_count.listing_id = l.listing_id
+    ) listing_preference_count
+    LEFT JOIN rent_index ri_loc
+      ON ri_loc.city      = l.city
+     AND ri_loc.locality  = NULLIF(LOWER(TRIM(COALESCE(l.locality, ''))), '')
+     AND ri_loc.room_type = l.room_type
+    LEFT JOIN rent_index ri_city
+      ON ri_city.city      = l.city
+     AND ri_city.locality  IS NULL
+     AND ri_city.room_type = l.room_type
     WHERE ${clauses.join(" AND ")}
-    ORDER BY l.created_at DESC, l.listing_id ASC
+    ORDER BY ${orderBy}
     LIMIT $${limitParam}`,
 		params,
 	);
@@ -486,49 +578,34 @@ export const searchListings = async (userId, filters) => {
 	const hasNextPage = rows.length > limit;
 	const items = hasNextPage ? rows.slice(0, limit) : rows;
 
-	// Compatibility scoring requires an authenticated user with saved preferences.
-	// For guests (userId === null), skip both DB queries and return zero scores.
-	let scoreMap = {};
-	let userHasPreferences = false;
-	let listingPreferenceCounts = new Map();
-
-	if (userId !== null) {
-		const listingIds = items.map((r) => r.listing_id);
-		scoreMap = await scoreListingsForUser(userId, listingIds);
-
-		const { rows: preferenceRows } = await pool.query(
-			`SELECT EXISTS (
-        SELECT 1 FROM user_preferences WHERE user_id = $1
-      ) AS has_preferences`,
-			[userId],
-		);
-		userHasPreferences = preferenceRows[0]?.has_preferences === true;
-
-		if (listingIds.length) {
-			const { rows: listingPreferenceRows } = await pool.query(
-				`SELECT listing_id, COUNT(*)::int AS preference_count
-         FROM listing_preferences
-         WHERE listing_id = ANY($1::uuid[])
-         GROUP BY listing_id`,
-				[listingIds],
-			);
-
-			listingPreferenceCounts = new Map(
-				listingPreferenceRows.map((row) => [row.listing_id, Number(row.preference_count)]),
-			);
-		}
-	}
-
 	const enrichedItems = items.map((row) => ({
 		...row,
 		rentPerMonth: row.rent_per_month / 100,
 		depositAmount: row.deposit_amount / 100,
 		rent_per_month: undefined,
 		deposit_amount: undefined,
-		compatibilityScore: userId !== null ? (scoreMap[row.listing_id] ?? 0) : 0,
+		compatibilityScore: userId !== null ? Number(row.compatibility_score ?? 0) : 0,
 		compatibilityAvailable:
-			userId !== null && userHasPreferences && (listingPreferenceCounts.get(row.listing_id) ?? 0) > 0,
+			userId !== null && row.user_has_preferences === true && Number(row.listing_preference_count ?? 0) > 0,
+		rentDeviation: rentDeviationPct(row.rent_per_month, row.ri_p50),
+		compatibility_score: undefined,
+		listing_preference_count: undefined,
+		user_has_preferences: undefined,
+		ri_p50: undefined,
+		ri_resolution: undefined,
 	}));
+
+	if (sortBy === "compatibility") {
+		const nextCursor =
+			hasNextPage ?
+				{
+					cursorScore: enrichedItems[enrichedItems.length - 1].compatibilityScore,
+					cursorId: enrichedItems[enrichedItems.length - 1].listing_id,
+				}
+			:	null;
+
+		return { items: enrichedItems, nextCursor };
+	}
 
 	const nextCursor =
 		hasNextPage ?
@@ -562,13 +639,20 @@ export const updateListing = async (posterId, listingId, body) => {
 		longitude: "longitude",
 	};
 
+	const enumCasts = {
+		room_type: "::room_type_enum",
+		bed_type: "::bed_type_enum",
+		preferred_gender: "::gender_enum",
+	};
+
 	const setClauses = [];
 	const values = [];
 	let paramIndex = 1;
 
 	for (const [key, column] of Object.entries(columnMap)) {
 		if (body[key] !== undefined) {
-			setClauses.push(`${column} = $${paramIndex}`);
+			const cast = enumCasts[column] ?? "";
+			setClauses.push(`${column} = $${paramIndex}${cast}`);
 			values.push(body[key]);
 			paramIndex++;
 		}
@@ -695,6 +779,7 @@ export const deleteListing = async (posterId, listingId) => {
 const ALLOWED_STATUS_TRANSITIONS = {
 	active: ["filled", "deactivated"],
 	deactivated: ["active"],
+	filled: ["active"],
 };
 
 export const updateListingStatus = async (posterId, listingId, newStatus) => {
@@ -724,22 +809,26 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 	}
 
 	const deactivating = newStatus === "filled" || newStatus === "deactivated";
+	const reactivatingFromFilled = currentStatus === "filled" && newStatus === "active";
 
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
 
+		const occupancyReset = reactivatingFromFilled ? `, current_occupants = 0` : "";
+
 		const { rows: updatedRows } = await client.query(
 			`UPDATE listings l
-       SET status     = $1,
-           filled_at  = CASE WHEN $1 = 'filled' THEN NOW() ELSE l.filled_at END
+       SET status     = $1::listing_status_enum,
+           filled_at  = CASE WHEN $1::listing_status_enum = 'filled'::listing_status_enum THEN NOW() ELSE l.filled_at END
+           ${occupancyReset}
        WHERE l.listing_id = $2
          AND l.posted_by  = $3
-         AND l.status     = $4
+         AND l.status     = $4::listing_status_enum
          AND l.deleted_at IS NULL
-				 AND ($1 <> 'active' OR l.expires_at > NOW())
+         AND ($1::listing_status_enum <> 'active'::listing_status_enum OR l.expires_at > NOW())
          AND (
-           $1 <> 'active'
+           $1::listing_status_enum <> 'active'::listing_status_enum
            OR l.property_id IS NULL
            OR EXISTS (
              SELECT 1
@@ -793,7 +882,16 @@ export const updateListingStatus = async (posterId, listingId, newStatus) => {
 		client.release();
 	}
 
-	logger.info({ posterId, listingId, from: currentStatus, to: newStatus }, "Listing status updated");
+	logger.info(
+		{
+			posterId,
+			listingId,
+			from: currentStatus,
+			to: newStatus,
+			...(reactivatingFromFilled && { occupancyReset: true }),
+		},
+		"Listing status updated",
+	);
 	return { listingId, status: newStatus };
 };
 
@@ -927,6 +1025,7 @@ export const getSavedListings = async (userId, { cursorTime, cursorId, limit = 2
         WHERE ph.listing_id = l.listing_id
           AND ph.is_cover   = TRUE
           AND ph.deleted_at IS NULL
+          AND ph.photo_url NOT LIKE 'processing:%'
         LIMIT 1
       ) AS cover_photo_url
     FROM saved_listings sl

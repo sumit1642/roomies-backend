@@ -6,15 +6,23 @@
 	"scripts": {
 		"dev": "nodemon src/server.js",
 		"dev:azure": "ENV_FILE=.env.azure nodemon src/server.js",
+		"dev:render": "ENV_FILE=.env.render nodemon src/server.js",
 		"start": "node src/server.js",
 		"start:azure": "ENV_FILE=.env.azure node src/server.js",
-		"seed:amenities": "ENV_FILE=.env.local node src/db/seeds/amenities.js",
-		"migrate": "node src/db/migrate.js",
-		"migrate:azure": "ENV_FILE=.env.azure node src/db/migrate.js",
-		"migrate:status": "node src/db/migrate.js --status",
-		"migrate:status:azure": "ENV_FILE=.env.azure node src/db/migrate.js --status",
-		"migrate:dry-run": "node src/db/migrate.js --dry-run",
-		"test": "node --experimental-vm-modules node_modules/.bin/jest"
+		"seed:amenities:local": "ENV_FILE=.env.local node src/db/seeds/amenities.js",
+		"seed:pincodes:local": "ENV_FILE=.env.local node src/db/seeds/pincodes.js",
+		"seed:amenities:render": "ENV_FILE=.env.render node src/db/seeds/amenities.js",
+		"seed:pincodes:render": "ENV_FILE=.env.render node src/db/seeds/pincodes.js",
+		"seed:amenities:azure": "ENV_FILE=.env.azure node src/db/seeds/amenities.js",
+		"seed:pincodes:azure": "ENV_FILE=.env.azure node src/db/seeds/pincodes.js",
+		"test": "npm run test:up && npm run test:migrate && npm run test:run; npm run test:down",
+		"test:up": "docker compose -f docker-compose.test.yml up -d --wait",
+		"test:down": "docker compose -f docker-compose.test.yml down -v",
+		"test:migrate": "cross-env ENV_FILE=.env.test node src/db/migrate.js",
+		"test:run": "cross-env ENV_FILE=.env.test NODE_OPTIONS=--experimental-vm-modules node_modules/.bin/jest --runInBand",
+		"test:watch": "npm run test:run -- --watch",
+		"test:coverage": "npm run test:up && npm run test:migrate && cross-env ENV_FILE=.env.test NODE_OPTIONS=--experimental-vm-modules node_modules/.bin/jest --runInBand --coverage; npm run test:down",
+		"test:summary": "npm run test:up && npm run test:migrate && cross-env ENV_FILE=.env.test LOG_LEVEL=silent NODE_OPTIONS=--experimental-vm-modules node_modules/.bin/jest --runInBand  --colors; npm run test:down"
 	},
 	"keywords": [],
 	"author": "",
@@ -37,7 +45,7 @@
 		"jsonwebtoken": "^9.0.3",
 		"multer": "^2.1.1",
 		"node-cron": "^4.2.1",
-		"nodemailer": "^8.0.3",
+		"nodemailer": "^9.0.3",
 		"pg": "^8.20.0",
 		"pino": "^10.3.1",
 		"pino-http": "^11.0.0",
@@ -55,6 +63,10 @@
 		"@types/node": "^25.5.0",
 		"@types/nodemailer": "^7.0.11",
 		"@types/pg": "^8.20.0",
-		"nodemon": "^3.1.14"
+		"cross-env": "^10.1.0",
+		"jest": "^30.4.2",
+		"nodemailer-mock": "^2.0.13",
+		"nodemon": "^3.1.14",
+		"supertest": "^7.2.2"
 	}
 }

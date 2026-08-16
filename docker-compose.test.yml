@@ -1,0 +1,29 @@
+name: roomies-test
+
+services:
+  test-db:
+    image: postgis/postgis:16-3.4-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: roomies_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data   # RAM-backed — fast, and wiped on container removal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d roomies_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  test-redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    command: ["redis-server", "--save", ""]   # no persistence needed for test runs
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20

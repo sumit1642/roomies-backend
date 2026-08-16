@@ -1,5 +1,3 @@
-// src/services/student.service.js
-
 import { pool } from "../db/client.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { logger } from "../logger/index.js";
@@ -34,6 +32,20 @@ export const getStudentProfile = async (requestingUserId, targetUserId) => {
 			sp.institution_id,
 			sp.is_aadhaar_verified,
 			CASE WHEN $2::uuid = sp.user_id THEN u.email ELSE NULL END AS email,
+			CASE
+				WHEN $2::uuid = sp.user_id THEN u.phone
+				WHEN EXISTS (
+					SELECT 1 FROM connections c
+					WHERE c.confirmation_status = 'confirmed'
+					  AND c.deleted_at IS NULL
+					  AND (
+					    (c.initiator_id = $2::uuid AND c.counterpart_id = sp.user_id)
+					    OR
+					    (c.counterpart_id = $2::uuid AND c.initiator_id = sp.user_id)
+					  )
+				) THEN u.phone
+				ELSE NULL
+			END AS phone,
 			u.is_email_verified,
 			u.average_rating,
 			u.rating_count,
@@ -50,24 +62,6 @@ export const getStudentProfile = async (requestingUserId, targetUserId) => {
 	return rows[0];
 };
 
-// Returns contact details for a student.
-//
-// Access control and tier determination are handled ENTIRELY upstream by
-// optionalAuthenticate and contactRevealGate before this service is ever
-// reached. The gate sets req.contactReveal.emailOnly based on whether the
-// caller is a verified user (false = full contact) or a guest/unverified
-// user (true = email only). This service TRUSTS that decision — it does not
-// re-derive or override it.
-//
-// Previous implementation re-evaluated ownership (requestingUserId === targetUserId)
-// and forced emailOnly=true for any cross-user access, which silently broke the
-// product requirement that verified users receive full contact for any profile
-// they look up. That logic has been removed.
-//
-// emailOnly: false  — verified callers; returns full bundle: email + whatsapp_phone
-// emailOnly: true   — guests and unverified callers; returns email only.
-//                     The whatsapp_phone field is stripped at this boundary so
-//                     it never exists on any object that leaves this function.
 export const getStudentContactReveal = async (targetUserId, emailOnly = false) => {
 	const { rows } = await pool.query(
 		`SELECT
@@ -89,8 +83,6 @@ export const getStudentContactReveal = async (targetUserId, emailOnly = false) =
 	const row = rows[0];
 
 	if (emailOnly) {
-		// Strip whatsapp_phone at this boundary — it must never appear in the
-		// response object for guests or unverified callers, not even as null.
 		return {
 			user_id: row.user_id,
 			full_name: row.full_name,
@@ -127,26 +119,77 @@ export const updateStudentProfile = async (requestingUserId, targetUserId, updat
 		}
 	}
 
-	if (!setClauses.length) {
+	const updatePhone = updates.phone !== undefined;
+
+	if (!setClauses.length && !updatePhone) {
 		throw new AppError("No valid fields provided for update", 400);
 	}
 
-	values.push(targetUserId);
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
 
-	const { rows } = await pool.query(
-		`UPDATE student_profiles
-		SET ${setClauses.join(", ")}
-		WHERE user_id = $${paramIndex}
-		AND deleted_at IS NULL
-		RETURNING *`,
-		values,
-	);
+		let profileRow;
 
-	if (!rows.length) {
-		throw new AppError("Student profile not found", 404);
+		if (setClauses.length) {
+			const profileValues = [...values, targetUserId];
+			const { rows } = await client.query(
+				`UPDATE student_profiles
+				SET ${setClauses.join(", ")}
+				WHERE user_id = $${paramIndex}
+				AND deleted_at IS NULL
+				RETURNING *`,
+				profileValues,
+			);
+
+			if (!rows.length) {
+				throw new AppError("Student profile not found", 404);
+			}
+			profileRow = rows[0];
+		} else {
+			const { rows } = await client.query(
+				`SELECT * FROM student_profiles WHERE user_id = $1 AND deleted_at IS NULL`,
+				[targetUserId],
+			);
+			if (!rows.length) {
+				throw new AppError("Student profile not found", 404);
+			}
+			profileRow = rows[0];
+		}
+
+		let phone;
+		if (updatePhone) {
+			const { rowCount, rows: userRows } = await client.query(
+				`UPDATE users
+				SET phone = $1
+				WHERE user_id = $2
+				AND deleted_at IS NULL
+				RETURNING phone`,
+				[updates.phone, targetUserId],
+			);
+			if (rowCount === 0) {
+				throw new AppError("User not found", 404);
+			}
+			phone = userRows[0].phone;
+		} else {
+			// Always include phone in the response for a consistent shape,
+			// even when this call didn't touch it.
+			const { rows: userRows } = await client.query(
+				`SELECT phone FROM users WHERE user_id = $1 AND deleted_at IS NULL`,
+				[targetUserId],
+			);
+			phone = userRows[0]?.phone ?? null;
+		}
+
+		await client.query("COMMIT");
+
+		return { ...profileRow, phone };
+	} catch (err) {
+		await client.query("ROLLBACK");
+		throw err;
+	} finally {
+		client.release();
 	}
-
-	return rows[0];
 };
 
 const bulkInsertUserPreferences = async (client, userId, preferences) => {

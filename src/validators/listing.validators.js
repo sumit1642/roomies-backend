@@ -1,10 +1,6 @@
-// src/validators/listing.validators.js
-
 import { z } from "zod";
 import { buildKeysetPaginationQuerySchema, keysetPaginationQuerySchema } from "./pagination.validators.js";
 import { preferencesSchema, requiredPreferencesSchema } from "./preferences.validators.js";
-
-// ─── Shared sub-schemas ───────────────────────────────────────────────────────
 
 const amenityIdsSchema = z.array(z.uuid({ error: "Each amenity ID must be a valid UUID" })).default([]);
 
@@ -19,47 +15,58 @@ const withCoordinateRefinement = (schema) =>
 			path: ["latitude"],
 		});
 
-// ─── Listing params ───────────────────────────────────────────────────────────
-
 export const listingParamsSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
 	}),
 });
 
-// ─── Search listings ──────────────────────────────────────────────────────────
-
 export const searchListingsSchema = z.object({
-	query: buildKeysetPaginationQuerySchema({
-		city: z.string().min(1).max(100).optional(),
+	query: buildKeysetPaginationQuerySchema(
+		{
+			sortBy: z.enum(["recent", "compatibility"]).default("recent"),
 
-		minRent: z.coerce.number().int().min(0).optional(),
-		maxRent: z.coerce.number().int().min(0).optional(),
+			city: z.string().min(1).max(100).optional(),
 
-		roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
-		bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
+			minRent: z.coerce.number().int().min(0).optional(),
+			maxRent: z.coerce.number().int().min(0).optional(),
 
-		preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
+			roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
+			bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
 
-		listingType: z.enum(["student_room", "pg_room", "hostel_bed"]).optional(),
+			preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
 
-		availableFrom: z.string().date({ error: "availableFrom must be a valid date (YYYY-MM-DD)" }).optional(),
+			listingType: z.enum(["student_room", "pg_room", "hostel_bed"]).optional(),
 
-		lat: z.coerce.number().min(-90).max(90).optional(),
-		lng: z.coerce.number().min(-180).max(180).optional(),
-		radius: z.coerce.number().int().min(100).max(50_000).default(5_000),
+			availableFrom: z.string().date({ error: "availableFrom must be a valid date (YYYY-MM-DD)" }).optional(),
 
-		amenityIds: z.preprocess(
-			(val) => {
-				if (typeof val !== "string") return val;
-				return val
-					.split(",")
-					.map((s) => s.trim())
-					.filter(Boolean);
-			},
-			z.array(z.uuid({ error: "Each amenity ID must be a valid UUID" })).default([]),
-		),
-	})
+			lat: z.coerce.number().min(-90).max(90).optional(),
+			lng: z.coerce.number().min(-180).max(180).optional(),
+			radius: z.coerce.number().int().min(100).max(50_000).default(5_000),
+
+			// Web pincode-search path (PRD: Proximity Search v2). No refinement
+			// forcing mutual exclusivity with lat/lng — both are legal to send;
+			// the service layer (searchListings) decides precedence: lat/lng
+			// wins when both are present, since GPS is strictly more precise
+			// than a pincode centroid.
+			pincode: z
+				.string()
+				.regex(/^\d{6}$/, { error: "pincode must be exactly 6 digits" })
+				.optional(),
+
+			amenityIds: z.preprocess(
+				(val) => {
+					if (typeof val !== "string") return val;
+					return val
+						.split(",")
+						.map((s) => s.trim())
+						.filter(Boolean);
+				},
+				z.array(z.uuid({ error: "Each amenity ID must be a valid UUID" })).default([]),
+			),
+		},
+		{ allowCursorScore: true },
+	)
 		.refine(
 			(data) => {
 				if (data.minRent !== undefined && data.maxRent !== undefined) {
@@ -79,10 +86,18 @@ export const searchListingsSchema = z.object({
 				error: "lat and lng must be provided together for proximity search",
 				path: ["lng"],
 			},
+		)
+		.refine(
+			(data) => {
+				if (data.sortBy === "compatibility") return data.cursorTime === undefined;
+				return data.cursorScore === undefined;
+			},
+			{
+				error: "compatibility sorting uses cursorScore; recent sorting uses cursorTime",
+				path: ["cursorScore"],
+			},
 		),
 });
-
-// ─── Create listing ───────────────────────────────────────────────────────────
 
 export const createListingSchema = z.object({
 	body: withCoordinateRefinement(
@@ -160,63 +175,78 @@ export const createListingSchema = z.object({
 					error: "Coordinates are not accepted for pg_room or hostel_bed listings — location is inherited from the property",
 					path: ["latitude"],
 				},
+			)
+			.refine(
+				(data) =>
+					data.listingType !== "student_room" ||
+					(data.latitude !== undefined && data.longitude !== undefined),
+				{
+					error: "latitude and longitude are required for student_room listings — without them the listing cannot appear in proximity or pincode searches",
+					path: ["latitude"],
+				},
+			)
+			.refine(
+				(data) => !data.availableFrom || !data.availableUntil || data.availableFrom <= data.availableUntil,
+				{
+					error: "availableUntil must be on or after availableFrom",
+					path: ["availableUntil"],
+				},
 			),
 	),
 });
-
-// ─── Update listing ───────────────────────────────────────────────────────────
 
 export const updateListingSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
 	}),
 	body: withCoordinateRefinement(
-		z.object({
-			title: z.string().min(5).max(255).optional(),
-			description: z.string().max(2000).optional(),
+		z
+			.object({
+				title: z.string().min(5).max(255).optional(),
+				description: z.string().max(2000).optional(),
 
-			rentPerMonth: z.coerce.number().int().min(0).optional(),
-			depositAmount: z.coerce.number().int().min(0).optional(),
-			rentIncludesUtilities: z.boolean().optional(),
-			isNegotiable: z.boolean().optional(),
+				rentPerMonth: z.coerce.number().int().min(0).optional(),
+				depositAmount: z.coerce.number().int().min(0).optional(),
+				rentIncludesUtilities: z.boolean().optional(),
+				isNegotiable: z.boolean().optional(),
 
-			roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
-			bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
+				roomType: z.enum(["single", "double", "triple", "entire_flat"]).optional(),
+				bedType: z.enum(["single_bed", "double_bed", "bunk_bed"]).optional(),
 
-			totalCapacity: z.coerce.number().int().min(1).max(20).optional(),
-			preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
+				totalCapacity: z.coerce.number().int().min(1).max(20).optional(),
+				preferredGender: z.enum(["male", "female", "other", "prefer_not_to_say"]).optional(),
 
-			availableFrom: z.string().date({ error: "availableFrom must be a valid date (YYYY-MM-DD)" }).optional(),
-			availableUntil: z.string().date({ error: "availableUntil must be a valid date (YYYY-MM-DD)" }).optional(),
+				availableFrom: z.string().date({ error: "availableFrom must be a valid date (YYYY-MM-DD)" }).optional(),
+				availableUntil: z
+					.string()
+					.date({ error: "availableUntil must be a valid date (YYYY-MM-DD)" })
+					.optional(),
 
-			// Address fields — only meaningful for student listings.
-			// For pg_room and hostel_bed, the service rejects these fields entirely
-			// (Fix for QA finding #2 — location invariant enforcement).
-			addressLine: z.string().min(5).max(500).optional(),
-			city: z.string().min(2).max(100).optional(),
-			locality: z.string().max(100).optional(),
-			landmark: z.string().max(255).optional(),
-			pincode: z
-				.string()
-				.regex(/^\d{6}$/, { error: "Pincode must be exactly 6 digits" })
-				.optional(),
+				addressLine: z.string().min(5).max(500).optional(),
+				city: z.string().min(2).max(100).optional(),
+				locality: z.string().max(100).optional(),
+				landmark: z.string().max(255).optional(),
+				pincode: z
+					.string()
+					.regex(/^\d{6}$/, { error: "Pincode must be exactly 6 digits" })
+					.optional(),
 
-			latitude: z.coerce.number().min(-90).max(90).optional(),
-			longitude: z.coerce.number().min(-180).max(180).optional(),
+				latitude: z.coerce.number().min(-90).max(90).optional(),
+				longitude: z.coerce.number().min(-180).max(180).optional(),
 
-			amenityIds: amenityIdsSchema.optional(),
-			preferences: preferencesSchema.optional(),
-		}),
+				amenityIds: amenityIdsSchema.optional(),
+				preferences: preferencesSchema.optional(),
+			})
+			.refine(
+				(data) => !data.availableFrom || !data.availableUntil || data.availableFrom <= data.availableUntil,
+				{
+					error: "availableUntil must be on or after availableFrom",
+					path: ["availableUntil"],
+				},
+			),
 	),
 });
 
-// ─── Update listing status ────────────────────────────────────────────────────
-
-// PATCH /api/v1/listings/:listingId/status
-// Poster-initiated lifecycle transitions only. 'expired' is intentionally
-// excluded — it is set exclusively by the cron job, never by user action.
-// The service enforces the full ALLOWED_STATUS_TRANSITIONS state machine;
-// the validator only ensures the value is a known user-facing target status.
 export const updateListingStatusSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
@@ -228,8 +258,6 @@ export const updateListingStatusSchema = z.object({
 	}),
 });
 
-// ─── Listing preferences (standalone) ────────────────────────────────────────
-
 export const updatePreferencesSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
@@ -239,15 +267,11 @@ export const updatePreferencesSchema = z.object({
 	}),
 });
 
-// ─── Save / unsave ────────────────────────────────────────────────────────────
-
 export const saveListingSchema = z.object({
 	params: z.object({
 		listingId: z.uuid({ error: "Invalid listing ID" }),
 	}),
 });
-
-// ─── Saved listings feed ──────────────────────────────────────────────────────
 
 export const savedListingsSchema = z.object({
 	query: keysetPaginationQuerySchema,

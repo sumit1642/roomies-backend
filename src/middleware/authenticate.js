@@ -1,5 +1,3 @@
-// src/middleware/authenticate.js
-
 import jwt from "jsonwebtoken";
 import { config } from "../config/env.js";
 import { AppError } from "./errorHandler.js";
@@ -12,27 +10,24 @@ const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
 const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
 const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
 
-// Cookie options are module-scope constants because a cookie set with a given
-// sameSite/secure configuration must be cleared or replaced with the exact same
-// flags — mismatched options cause browsers to treat them as different cookies.
-const ACCESS_COOKIE_OPTIONS = {
+const IS_PROD = config.NODE_ENV === "production";
+
+export const ACCESS_COOKIE_OPTIONS = {
 	httpOnly: true,
-	secure: config.NODE_ENV === "production",
-	sameSite: "strict",
+	secure: IS_PROD,
+	sameSite: IS_PROD ? "none" : "lax",
 	maxAge: ACCESS_TTL_SECONDS * 1000,
 };
-const REFRESH_COOKIE_OPTIONS = {
+
+export const REFRESH_COOKIE_OPTIONS = {
 	httpOnly: true,
-	secure: config.NODE_ENV === "production",
-	sameSite: "strict",
+	secure: IS_PROD,
+	sameSite: IS_PROD ? "none" : "lax",
 	maxAge: REFRESH_TTL_SECONDS * 1000,
 };
 
 const refreshTokenKey = (userId, sid) => `refreshToken:${userId}:${sid}`;
 
-// Extracts the access token from req.cookies.accessToken (priority) or the
-// Authorization: Bearer header. Returns { token, source } or null.
-// Cookie takes priority so browser clients always use the secure HttpOnly path.
 const extractToken = (req) => {
 	const cookieToken = req.cookies?.accessToken;
 	if (cookieToken) {
@@ -47,23 +42,12 @@ const extractToken = (req) => {
 	return null;
 };
 
-// Attempts a silent refresh when the access token cookie is expired.
-// Uses verifyRefreshTokenPayload (which migrates legacy tokens that lack a sid)
-// rather than raw jwt.verify, so users with pre-sid tokens are not forced to
-// re-login when their access token expires.
-//
-// On success: issues a new access token and rotates the refresh token via CAS,
-// sets replacement cookies, and returns { userId, sid }.
-// On any failure: returns null — the caller will respond with 401.
 const attemptSilentRefresh = async (req, res) => {
 	const refreshToken = req.cookies?.refreshToken;
 	if (!refreshToken) return null;
 
 	let refreshPayload;
 	try {
-		// verifyRefreshTokenPayload handles legacy tokens (no sid) by migrating them
-		// to the per-session key scheme. Raw jwt.verify would reject those tokens,
-		// forcing a re-login unnecessarily.
 		refreshPayload = await verifyRefreshTokenPayload(refreshToken);
 	} catch {
 		return null;
@@ -73,13 +57,11 @@ const attemptSilentRefresh = async (req, res) => {
 		return null;
 	}
 
-	// Verify the token is still stored in Redis (not revoked via logout/revokeSession).
 	const storedToken = await redis.get(refreshTokenKey(refreshPayload.userId, refreshPayload.sid));
 	if (!storedToken || storedToken !== refreshToken) {
 		return null;
 	}
 
-	// Load fresh user state — the refresh token payload can be up to 7 days old.
 	const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [
 		refreshPayload.userId,
 	]);
@@ -123,9 +105,6 @@ const attemptSilentRefresh = async (req, res) => {
 	return { userId: refreshPayload.userId, sid: refreshPayload.sid };
 };
 
-// Verifies the access token, loads the user from DB, and attaches req.user.
-// Cookie-source expired tokens trigger a silent refresh (browser UX).
-// Header-source expired tokens return 401 immediately (Android handles refresh explicitly).
 export const authenticate = async (req, res, next) => {
 	try {
 		const extracted = extractToken(req);

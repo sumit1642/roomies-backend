@@ -66,9 +66,12 @@ const envSchema = z.object({
 	// Cross-field guards after the schema parse enforce that the right variables
 	// are present for the chosen provider, and exit with a clear per-variable
 	// error message if anything is missing.
+	/**
+	 * "brevo-api": For tier0 deployment, Render doesn't provide SMTP on the free tier, so we use the Brevo HTTP API as a fallback option.
+	 */
 	EMAIL_PROVIDER: z
-		.enum(["ethereal", "brevo"], {
-			error: 'EMAIL_PROVIDER must be either "ethereal" or "brevo"',
+		.enum(["ethereal", "brevo", "brevo-api"], {
+			error: 'EMAIL_PROVIDER must be "ethereal", "brevo", or "brevo-api"',
 		})
 		.default("ethereal"),
 
@@ -103,6 +106,7 @@ const envSchema = z.object({
 	BREVO_SMTP_LOGIN: z.email({ error: "BREVO_SMTP_LOGIN must be a valid email address" }).optional(),
 	BREVO_SMTP_KEY: z.string().min(1).optional(),
 	BREVO_SMTP_FROM: z.email({ error: "BREVO_SMTP_FROM must be a valid email address" }).optional(),
+	BREVO_API_KEY: z.string().min(1).optional(),
 
 	// ── Storage ─────────────────────────────────────────────────────────────────
 	//
@@ -187,15 +191,34 @@ if (parsed.data.EMAIL_PROVIDER === "brevo") {
 		process.exit(1);
 	}
 
-	// Guard against the most common Brevo credential mistake: pasting the API
-	// key (xkeysib-...) where the SMTP key (xsmtpsib-...) is expected. Both
-	// look similar but the SMTP key is a separate credential generated in the
-	// SMTP tab of Brevo's settings.
-	if (parsed.data.BREVO_SMTP_KEY?.startsWith("xkeysib-")) {
+	if (parsed.data.BREVO_API_KEY && !parsed.data.BREVO_API_KEY.startsWith("xkeysib-")) {
 		console.error(
-			`❌  BREVO_SMTP_KEY starts with "xkeysib-" which is an API key, not an SMTP key.\n` +
-				`   The correct SMTP key starts with "xsmtpsib-".\n` +
-				`   Find it in Brevo → Settings → SMTP & API → SMTP tab → "Generate a new SMTP key".\n`,
+			`❌  BREVO_API_KEY does not look like a valid Brevo API key.\n` +
+				`   It must start with "xkeysib-".\n` +
+				`   Find the API key in Brevo → Settings → SMTP & API → API Keys (not the SMTP tab).\n`,
+		);
+		process.exit(1);
+	}
+}
+
+// Add this block after the existing brevo guard:
+if (parsed.data.EMAIL_PROVIDER === "brevo-api") {
+	const missing = [];
+	if (!parsed.data.BREVO_API_KEY) missing.push("BREVO_API_KEY");
+	if (!parsed.data.BREVO_SMTP_FROM) missing.push("BREVO_SMTP_FROM");
+	if (missing.length > 0) {
+		console.error(
+			`❌  EMAIL_PROVIDER is "brevo-api" but these required variables are missing:\n` +
+				missing.map((v) => `   ${v}`).join("\n") +
+				`\n\nBREVO_API_KEY starts with "xkeysib-". Find it in Brevo → Settings → SMTP & API → API Keys.\n`,
+		);
+		process.exit(1);
+	}
+	if (parsed.data.BREVO_API_KEY && !parsed.data.BREVO_API_KEY.startsWith("xkeysib-")) {
+		console.error(
+			`❌  BREVO_API_KEY does not look like a valid Brevo API key.\n` +
+				`   It must start with "xkeysib-".\n` +
+				`   Find the API key in Brevo → Settings → SMTP & API → API Keys (not the SMTP tab).\n`,
 		);
 		process.exit(1);
 	}

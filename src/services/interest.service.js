@@ -1,5 +1,3 @@
-// src/services/interest.service.js
-
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
@@ -17,10 +15,6 @@ const LISTING_TYPE_TO_CONNECTION_TYPE = {
 	hostel_bed: "hostel_stay",
 };
 
-// ─── Create interest request ─────────────────────────────────────────────────
-// A student expresses interest in a listing. Only one active (pending or
-// accepted) interest request per student per listing is allowed; the partial
-// unique index idx_interest_requests_no_duplicates enforces this at DB level.
 export const createInterestRequest = async (studentId, listingId, data) => {
 	const { message } = data;
 
@@ -57,19 +51,13 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 		throw new AppError("You cannot express interest in your own listing", 422);
 	}
 
-	// ON CONFLICT predicate must exactly match the partial unique index:
-	//   idx_interest_requests_no_duplicates ON (sender_id, listing_id)
-	//   WHERE status IN ('pending','accepted') AND deleted_at IS NULL
-	// The original clause incorrectly included "AND deleted_at IS NULL" inside
-	// the ON CONFLICT WHERE, which caused PostgreSQL to skip conflict detection
-	// for soft-deleted rows and allowed duplicate active requests to be inserted.
-	// The fix removes that extra predicate so the clause matches the index exactly.
 	const { rows } = await pool.query(
 		`INSERT INTO interest_requests
        (sender_id, listing_id, message, status)
-     VALUES ($1, $2, $3, 'pending')
+     VALUES ($1, $2, $3, 'pending'::request_status_enum)
      ON CONFLICT (sender_id, listing_id)
        WHERE status IN ('pending', 'accepted')
+         AND deleted_at IS NULL
      DO NOTHING
      RETURNING request_id, sender_id, listing_id, message, status, created_at`,
 		[studentId, listingId, message ?? null],
@@ -100,9 +88,6 @@ export const createInterestRequest = async (studentId, listingId, data) => {
 	};
 };
 
-// ─── Transition interest request status ──────────────────────────────────────
-// Routes accepted → _acceptInterestRequest (atomic multi-step).
-// Routes declined/withdrawn → simple UPDATE with actor ownership check.
 export const transitionInterestRequest = async (callerId, requestId, targetStatus) => {
 	const ALLOWED_STATUSES = new Set(["accepted", "declined", "withdrawn"]);
 	if (!ALLOWED_STATUSES.has(targetStatus)) {
@@ -122,7 +107,7 @@ export const transitionInterestRequest = async (callerId, requestId, targetStatu
      FROM listings l
      WHERE ir.request_id  = $1
        AND ir.listing_id  = l.listing_id
-       AND ir.status      = 'pending'
+       AND ir.status      = 'pending'::request_status_enum
        AND ir.deleted_at  IS NULL
        ${ownershipClause}
      RETURNING
@@ -187,20 +172,12 @@ export const transitionInterestRequest = async (callerId, requestId, targetStatu
 	};
 };
 
-// ─── Accept interest request (internal) ──────────────────────────────────────
-// Atomically: accepts the request, creates the connection row, increments
-// current_occupants, and (if capacity exhausted) marks the listing 'filled'
-// and expires all remaining pending requests. All within one BEGIN/COMMIT.
-// Post-commit notifications are fire-and-forget via enqueueNotification.
 const _acceptInterestRequest = async (posterId, requestId) => {
 	const client = await pool.connect();
 
 	try {
 		await client.query("BEGIN");
 
-		// Lock both the interest request and its parent listing simultaneously.
-		// FOR UPDATE on the JOIN prevents concurrent accepts or listing status
-		// changes for the duration of this transaction.
 		const { rows: irRows } = await client.query(
 			`SELECT
          ir.request_id,
@@ -299,7 +276,7 @@ const _acceptInterestRequest = async (posterId, requestId) => {
              status             = 'filled'::listing_status_enum,
              filled_at          = NOW()
          WHERE listing_id = $2
-           AND status     = 'active'
+           AND status     = 'active'::listing_status_enum
            AND deleted_at IS NULL`,
 				[newOccupantCount, ir.listing_id],
 			);
@@ -315,7 +292,7 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 				`UPDATE listings
          SET current_occupants = $1
          WHERE listing_id = $2
-           AND status     = 'active'
+           AND status     = 'active'::listing_status_enum
            AND deleted_at IS NULL`,
 				[newOccupantCount, ir.listing_id],
 			);
@@ -386,8 +363,11 @@ const _acceptInterestRequest = async (posterId, requestId) => {
 	}
 };
 
-// ─── Get single interest request ─────────────────────────────────────────────
-// Both the sender and the listing poster can fetch detail. Third parties get 404.
+// ── getInterestRequest ────────────────────────────────────────────────────────
+//
+// Now fetches poster phone + name so we can build a WhatsApp link for the
+// student — they may want to reach the poster directly after their request is
+// accepted. The link is null when the poster hasn't provided a phone number.
 export const getInterestRequest = async (callerId, requestId) => {
 	const { rows } = await pool.query(
 		`SELECT
@@ -399,21 +379,41 @@ export const getInterestRequest = async (callerId, requestId) => {
        ir.created_at,
        ir.updated_at,
        l.posted_by,
-       l.title        AS listing_title,
-       l.city         AS listing_city,
-       l.listing_type AS listing_type,
-       COALESCE(sp.full_name, u_sender.email) AS sender_name,
-       sp.profile_photo_url                   AS sender_photo_url
+       l.title          AS listing_title,
+       l.city           AS listing_city,
+       l.listing_type   AS listing_type,
+
+       -- Sender (student who expressed interest)
+       COALESCE(sp.full_name, u_sender.email)  AS sender_name,
+       sp.profile_photo_url                    AS sender_photo_url,
+
+       -- Poster contact info for WhatsApp link (only meaningful when accepted)
+       CASE
+         WHEN l.listing_type = 'student_room' THEN u_poster.phone
+         ELSE pop.business_phone
+       END AS poster_phone,
+       COALESCE(pop.business_name, sp_poster.full_name, u_poster.email) AS poster_name
+
      FROM interest_requests ir
      JOIN listings l
-       ON l.listing_id  = ir.listing_id
-      AND l.deleted_at  IS NULL
+       ON l.listing_id    = ir.listing_id
+      AND l.deleted_at    IS NULL
      JOIN users u_sender
-       ON u_sender.user_id   = ir.sender_id
+       ON u_sender.user_id    = ir.sender_id
       AND u_sender.deleted_at IS NULL
      LEFT JOIN student_profiles sp
        ON sp.user_id    = ir.sender_id
       AND sp.deleted_at IS NULL
+     -- Poster joins for WhatsApp link
+     JOIN users u_poster
+       ON u_poster.user_id    = l.posted_by
+      AND u_poster.deleted_at IS NULL
+     LEFT JOIN student_profiles sp_poster
+       ON sp_poster.user_id    = l.posted_by
+      AND sp_poster.deleted_at IS NULL
+     LEFT JOIN pg_owner_profiles pop
+       ON pop.user_id    = l.posted_by
+      AND pop.deleted_at IS NULL
      WHERE ir.request_id = $1
        AND (ir.sender_id = $2 OR l.posted_by = $2)
        AND ir.deleted_at IS NULL`,
@@ -426,6 +426,14 @@ export const getInterestRequest = async (callerId, requestId) => {
 
 	const row = rows[0];
 
+	// Only surface the WhatsApp link when the request is accepted — before that
+	// it's noise, and surfacing a phone number pre-acceptance would bypass the
+	// platform's connection flow.
+	const whatsappLink =
+		row.status === "accepted" && row.poster_phone ?
+			_buildWhatsAppLink(row.poster_phone, `Hi ${row.poster_name}, regarding my interest in ${row.listing_title}`)
+		:	null;
+
 	return {
 		interestRequestId: row.request_id,
 		studentId: row.sender_id,
@@ -434,6 +442,7 @@ export const getInterestRequest = async (callerId, requestId) => {
 		status: row.status,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
+		whatsappLink,
 		listing: {
 			listingId: row.listing_id,
 			title: row.listing_title,
@@ -448,8 +457,6 @@ export const getInterestRequest = async (callerId, requestId) => {
 	};
 };
 
-// ─── Get interest requests for a listing (poster's view) ─────────────────────
-// Only the listing poster can call this. Returns keyset-paginated requests.
 export const getInterestRequestsForListing = async (posterId, listingId, filters) => {
 	const { rows: listingRows } = await pool.query(
 		`SELECT listing_id FROM listings
@@ -542,8 +549,6 @@ export const getInterestRequestsForListing = async (posterId, listingId, filters
 	};
 };
 
-// ─── Get my interest requests (student's view) ───────────────────────────────
-// Returns all requests the authenticated student has sent, keyset-paginated.
 export const getMyInterestRequests = async (studentId, filters) => {
 	const { status, cursorTime, cursorId, limit = 20 } = filters;
 
@@ -619,9 +624,6 @@ export const getMyInterestRequests = async (studentId, filters) => {
 	};
 };
 
-// ─── Expire pending requests for a listing ───────────────────────────────────
-// Bulk-expires all pending interest requests on a listing. Called inside
-// transactions when a listing is deactivated, deleted, or filled.
 export const expirePendingRequestsForListing = async (listingId, client = pool, excludeRequestId = null) => {
 	const params = [listingId];
 	let excludeClause = "";
@@ -635,7 +637,7 @@ export const expirePendingRequestsForListing = async (listingId, client = pool, 
 		`UPDATE interest_requests
      SET status = 'expired'::request_status_enum, updated_at = NOW()
      WHERE listing_id = $1
-       AND status     = 'pending'
+       AND status     = 'pending'::request_status_enum
        AND deleted_at IS NULL
        ${excludeClause}`,
 		params,

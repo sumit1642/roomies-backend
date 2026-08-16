@@ -1,87 +1,15 @@
 // src/cron/hardDeleteCleanup.js
-//
-// Scheduled maintenance job: permanently remove rows that have been soft-deleted
-// for more than N days across all tables that carry a deleted_at column.
-//
-// ─── DESIGN NOTES ────────────────────────────────────────────────────────────
-//
-// Soft-delete tables in this schema (from roomies_db_setup.sql):
-//   users, student_profiles, pg_owner_profiles, user_preferences,
-//   verification_requests, institutions, properties, listings, listing_photos,
-//   listing_preferences (via CASCADE from listings), listing_amenities (CASCADE),
-//   saved_listings, interest_requests, connections, notifications,
-//   ratings, rating_reports
-//
-// Deletion order matters because of foreign key constraints. We delete child
-// rows before parent rows. The schema uses ON DELETE CASCADE on many junction
-// tables, but ON DELETE RESTRICT on the core entity tables — so we must follow
-// the dependency graph manually:
-//
-//   rating_reports → ratings (FK: rating_id)
-//   ratings → connections (FK: connection_id) and users (FK: reviewer_id)
-//   notifications → users (FK: recipient_id, actor_id)
-//   interest_requests → listings (FK: listing_id) and users (FK: sender_id)
-//   connections → interest_requests (FK), listings (FK), users (FK)
-//   saved_listings → listings (FK) and users (FK)
-//   listing_photos, listing_preferences, listing_amenities → listings (CASCADE)
-//   listings → properties (FK) and users (FK)
-//   verification_requests → users (FK)
-//   pg_owner_profiles, student_profiles → users (FK)
-//
-// ─── THE FK-VIOLATION PROBLEM AND ITS FIX ────────────────────────────────────
-//
-// A naive "delete children before parents" approach has a critical gap:
-// the WHERE clause `deleted_at < cutoff` creates a temporal window where a
-// soft-deleted child that hasn't yet aged past the retention window will NOT be
-// deleted in the children step, but will still block its parent's hard-delete
-// via ON DELETE RESTRICT FK constraint.
-//
-// Concrete scenario:
-//   - user soft-deleted 100 days ago → eligible for hard-delete (past 90-day cutoff)
-//   - connection soft-deleted 30 days ago → NOT eligible (hasn't reached cutoff)
-//   - Step 4 skips the connection (deleted_at < cutoff = false)
-//   - Step 14 tries to DELETE FROM users → PostgreSQL raises 23503 (FK violation)
-//     because the connection still references the user → entire transaction rolls back
-//
-// The fix: each parent-table DELETE includes NOT EXISTS guards that check whether
-// any soft-deleted (but not yet aged) child row still references the parent.
-// If so, the parent is skipped — it will be cleaned up in a future run once all
-// its children have also aged past the retention cutoff.
-//
-// ─── CONNECTIONS → RATINGS FK GUARD ─────────────────────────────────────────
-//
-// ratings.connection_id references connections.connection_id ON DELETE RESTRICT.
-// Step 2 hard-deletes aged ratings, but a connection aged enough for hard-delete
-// may still have a recently-soft-deleted (not-yet-aged) rating referencing it.
-// Without a guard, Step 4 (DELETE connections) would be blocked by that rating
-// and the entire transaction would roll back.
-//
-// Fix: Step 4's DELETE skips any connection that still has a not-yet-aged
-// soft-deleted rating (i.e. a rating whose deleted_at >= cutoff OR is NULL).
-//
-// ─── ALIAS NAMING ────────────────────────────────────────────────────────────
-//
-// PostgreSQL treats `no` as an unreserved keyword (used in NO ACTION, NO MAXVALUE
-// etc.) and it is legal as an alias in most contexts. However, using reserved or
-// near-reserved words as aliases is error-prone and confusing to human readers.
-// The notifications alias is renamed to `nt` throughout this file for clarity.
-//
-// ─── RETENTION VALIDATION ────────────────────────────────────────────────────
-//
-// SOFT_DELETE_RETENTION_DAYS is validated at module load time (fail-fast pattern).
-// The strict parse (/^[0-9]+$/ before numeric conversion) intentionally rejects
-// values like "90days", "-30", "1e2" that parseInt() would silently accept.
 
 import cron from "node-cron";
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
+import { storageService } from "../storage/index.js";
 
-const SCHEDULE = process.env.CRON_HARD_DELETE ?? "0 4 * * 0"; // Sundays at 04:00
+const SCHEDULE = process.env.CRON_HARD_DELETE ?? "0 4 * * 0";
 const DEFAULT_RETENTION_DAYS = 90;
 const MIN_RETENTION_DAYS = 1;
-const MAX_RETENTION_DAYS = 3650; // ~10 years
+const MAX_RETENTION_DAYS = 3650;
 
-// ─── Strict retention parsing (runs at module load, not per tick) ─────────────
 const _envRetention = process.env.SOFT_DELETE_RETENTION_DAYS;
 const _trimmed = typeof _envRetention === "string" ? _envRetention.trim() : undefined;
 const STRICT_DECIMAL_INTEGER_RE = /^[0-9]+$/;
@@ -134,18 +62,19 @@ const runHardDeleteCleanup = async () => {
 	let client;
 	const results = {};
 
+	// Collected inside the transaction so we know exactly which rows were
+	// deleted; blob deletion happens after COMMIT so storage errors never
+	// interfere with the DB transaction.
+	let photoUrlsToDelete = [];
+
 	try {
 		client = await pool.connect();
 		await client.query("BEGIN");
 
-		// The cutoff expression: rows older than this timestamp are eligible.
-		// Passed as a parameter so the query plan is stable across runs and
-		// there is no possibility of SQL injection from env vars.
 		const cutoffExpr = `NOW() - ($1::int * INTERVAL '1 day')`;
 		const p = [RETENTION_DAYS];
 
-		// ── Step 1: rating_reports (depends on ratings) ───────────────────────
-		// No children reference rating_reports directly, so no guard needed.
+		// ── rating_reports ────────────────────────────────────────────────────────
 		const { rowCount: rr } = await client.query(
 			`DELETE FROM rating_reports
        WHERE deleted_at IS NOT NULL
@@ -154,9 +83,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.rating_reports = rr;
 
-		// ── Step 2: ratings (depends on connections and users) ────────────────
-		// rating_reports rows that reference this rating were deleted in step 1.
-		// No other ON DELETE RESTRICT child references ratings directly.
+		// ── ratings ───────────────────────────────────────────────────────────────
 		const { rowCount: ra } = await client.query(
 			`DELETE FROM ratings
        WHERE deleted_at IS NOT NULL
@@ -165,9 +92,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.ratings = ra;
 
-		// ── Step 3: notifications (depends on users) ──────────────────────────
-		// No children reference notifications. Alias 'nt' used (not 'no') to
-		// avoid ambiguity with PostgreSQL's unreserved keyword NO.
+		// ── notifications ─────────────────────────────────────────────────────────
 		const { rowCount: no } = await client.query(
 			`DELETE FROM notifications
        WHERE deleted_at IS NOT NULL
@@ -176,16 +101,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.notifications = no;
 
-		// ── Step 4: connections (depends on interest_requests, listings, users) ─
-		//
-		// ratings.connection_id ON DELETE RESTRICT means we must NOT hard-delete a
-		// connection if a not-yet-aged rating still references it. Step 2 removed
-		// aged ratings, but a rating soft-deleted recently (deleted_at >= cutoff)
-		// or not yet soft-deleted (deleted_at IS NULL) still holds the FK.
-		//
-		// Guard A (ratings): skip connections that still have a live or recently
-		// soft-deleted rating. We check both NULL (not soft-deleted) and
-		// recent (deleted_at >= cutoff) to cover every RESTRICT scenario.
+		// ── connections ───────────────────────────────────────────────────────────
 		const { rowCount: co } = await client.query(
 			`DELETE FROM connections
        WHERE deleted_at IS NOT NULL
@@ -199,8 +115,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.connections = co;
 
-		// ── Step 5: interest_requests (depends on listings and users) ─────────
-		// connections that reference this interest_request were deleted in step 4.
+		// ── interest_requests ─────────────────────────────────────────────────────
 		const { rowCount: ir } = await client.query(
 			`DELETE FROM interest_requests
        WHERE deleted_at IS NOT NULL
@@ -209,7 +124,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.interest_requests = ir;
 
-		// ── Step 6: saved_listings (depends on listings and users) ────────────
+		// ── saved_listings ────────────────────────────────────────────────────────
 		const { rowCount: sl } = await client.query(
 			`DELETE FROM saved_listings
        WHERE deleted_at IS NOT NULL
@@ -218,7 +133,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.saved_listings = sl;
 
-		// ── Step 7: listing_photos (soft-deleted photos outliving their listing) ─
+		// ── listing_photos ────────────────────────────────────────────────────────
 		const { rowCount: lp } = await client.query(
 			`DELETE FROM listing_photos
        WHERE deleted_at IS NOT NULL
@@ -227,20 +142,11 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.listing_photos = lp;
 
-		// ── Step 8: listings ──────────────────────────────────────────────────
-		// Cascade handles listing_preferences and listing_amenities automatically.
-		//
-		// GUARD: Only delete a listing when no soft-deleted-but-not-yet-aged child
-		// rows still reference it via ON DELETE RESTRICT.
-		//
-		// Children that use ON DELETE RESTRICT on listings:
-		//   - interest_requests (listing_id) — deleted in step 5 if aged, otherwise block
-		//   - connections (listing_id) — deleted in step 4 if aged, otherwise block
-		//   - saved_listings (listing_id) — deleted in step 6 if aged, otherwise block
-		//
-		// The NOT EXISTS guards check for soft-deleted children that have NOT yet
-		// reached the cutoff — those will block a FK delete and must skip this parent.
-		const { rowCount: li } = await client.query(
+		// ── listings — capture IDs of actually-deleted rows ───────────────────────
+		// rent_observations are deleted AFTER this using the returned IDs so we
+		// only remove observations for listings that were truly hard-deleted (not
+		// ones blocked by the NOT EXISTS guards).
+		const { rows: deletedListingRows } = await client.query(
 			`DELETE FROM listings
        WHERE deleted_at IS NOT NULL
          AND deleted_at < ${cutoffExpr}
@@ -261,15 +167,28 @@ const runHardDeleteCleanup = async () => {
            WHERE sl.listing_id  = listings.listing_id
              AND sl.deleted_at  IS NOT NULL
              AND sl.deleted_at  >= ${cutoffExpr}
-         )`,
-			// We need the cutoff twice in the same query (for the outer WHERE and for
-			// each NOT EXISTS). PostgreSQL allows referencing $1 multiple times in the
-			// same parameterized query — each occurrence refers to the same value.
+         )
+       RETURNING listing_id`,
 			p,
 		);
-		results.listings = li;
+		results.listings = deletedListingRows.length;
 
-		// ── Step 9: verification_requests (depends on users) ──────────────────
+		// ── rent_observations — scoped to actually-deleted listings only ───────────
+		// Deleting before the listings DELETE (as the original code did) would
+		// remove observations for listings that the NOT EXISTS guards then keep
+		// alive, producing orphaned rows / incorrect data loss.
+		let ro = 0;
+		if (deletedListingRows.length > 0) {
+			const deletedListingIds = deletedListingRows.map((r) => r.listing_id);
+			const { rowCount: roCount } = await client.query(
+				`DELETE FROM rent_observations WHERE listing_id = ANY($1::uuid[])`,
+				[deletedListingIds],
+			);
+			ro = roCount;
+		}
+		results.rent_observations = ro;
+
+		// ── verification_requests ─────────────────────────────────────────────────
 		const { rowCount: vr } = await client.query(
 			`DELETE FROM verification_requests
        WHERE deleted_at IS NOT NULL
@@ -278,8 +197,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.verification_requests = vr;
 
-		// ── Step 10: pg_owner_profiles and student_profiles ───────────────────
-		// These depend on users. No other ON DELETE RESTRICT children reference them.
+		// ── pg_owner_profiles ─────────────────────────────────────────────────────
 		const { rowCount: pop } = await client.query(
 			`DELETE FROM pg_owner_profiles
        WHERE deleted_at IS NOT NULL
@@ -288,6 +206,19 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.pg_owner_profiles = pop;
 
+		// Collect blob URLs before deleting student_profiles rows so we know what
+		// to clean up from storage. Actual storageService.delete calls happen after
+		// COMMIT — storage errors must not roll back the DB transaction.
+		const { rows: photoRows } = await client.query(
+			`SELECT profile_photo_url FROM student_profiles
+       WHERE deleted_at IS NOT NULL
+         AND deleted_at < ${cutoffExpr}
+         AND profile_photo_url IS NOT NULL`,
+			p,
+		);
+		photoUrlsToDelete = photoRows.map((r) => r.profile_photo_url);
+
+		// ── student_profiles ──────────────────────────────────────────────────────
 		const { rowCount: sp } = await client.query(
 			`DELETE FROM student_profiles
        WHERE deleted_at IS NOT NULL
@@ -296,15 +227,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.student_profiles = sp;
 
-		// ── Step 11: properties ───────────────────────────────────────────────
-		//
-		// GUARD: Only delete a property when no soft-deleted-but-not-yet-aged
-		// listing still references it (listings.property_id ON DELETE RESTRICT).
-		//
-		// Note: ratings with reviewee_type = 'property' are polymorphic — they
-		// reference property_id in the ratings.reviewee_id column, but this is NOT
-		// a FK constraint in the schema (polymorphic references cannot use standard
-		// FKs). So ratings do not block property deletion at the DB level.
+		// ── properties ────────────────────────────────────────────────────────────
 		const { rowCount: pr } = await client.query(
 			`DELETE FROM properties
        WHERE deleted_at IS NOT NULL
@@ -319,9 +242,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.properties = pr;
 
-		// ── Step 12: institutions ─────────────────────────────────────────────
-		// student_profiles references institutions via ON DELETE SET NULL, so
-		// institutions have no RESTRICT children after the profiles are cleaned.
+		// ── institutions ──────────────────────────────────────────────────────────
 		const { rowCount: ins } = await client.query(
 			`DELETE FROM institutions
        WHERE deleted_at IS NOT NULL
@@ -330,23 +251,7 @@ const runHardDeleteCleanup = async () => {
 		);
 		results.institutions = ins;
 
-		// ── Step 13: users — last, after all dependents are cleared ───────────
-		//
-		// GUARD: Only delete a user when no soft-deleted-but-not-yet-aged child
-		// rows still reference it via ON DELETE RESTRICT.
-		//
-		// Children that use ON DELETE RESTRICT on users (after all cascades):
-		//   - connections (initiator_id, counterpart_id)
-		//   - interest_requests (sender_id)
-		//   - ratings (reviewer_id)
-		//   - notifications (recipient_id) — actor_id is SET NULL so only
-		//     recipient_id is RESTRICT; alias 'nt' used (not 'no')
-		//   - verification_requests (user_id)
-		//   - student_profiles (user_id)
-		//   - pg_owner_profiles (user_id)
-		//
-		// Steps 1–10 cleared the aged children. The NOT EXISTS guards here protect
-		// against recently soft-deleted children that haven't aged past the cutoff.
+		// ── users ─────────────────────────────────────────────────────────────────
 		const { rowCount: us } = await client.query(
 			`DELETE FROM users
        WHERE deleted_at IS NOT NULL
@@ -389,7 +294,7 @@ const runHardDeleteCleanup = async () => {
          )
          AND NOT EXISTS (
            SELECT 1 FROM pg_owner_profiles pop
-           WHERE pop.user_id   = users.user_id
+           WHERE pop.user_id    = users.user_id
              AND pop.deleted_at IS NOT NULL
              AND pop.deleted_at >= ${cutoffExpr}
          )`,
@@ -424,9 +329,30 @@ const runHardDeleteCleanup = async () => {
 			{ err, retentionDays: RETENTION_DAYS, durationMs: Date.now() - startedAt },
 			"cron:hardDeleteCleanup — run failed",
 		);
+		return; // skip blob cleanup if the transaction failed
 	} finally {
 		if (client) {
 			client.release();
+		}
+	}
+
+	// Delete blobs after the transaction has committed. Storage errors are
+	// logged but do not affect the DB state — the rows are already gone and
+	// orphaned blobs can be reconciled manually or by a future storage audit.
+	for (const url of photoUrlsToDelete) {
+		let redactedUrl = url;
+		try {
+			redactedUrl = new URL(url).pathname;
+		} catch {
+		}
+
+		try {
+			await storageService.delete(url);
+		} catch (storageErr) {
+			logger.error(
+				{ storageErr, profile_photo_url: redactedUrl },
+				"cron:hardDeleteCleanup — failed to delete profile photo blob",
+			);
 		}
 	}
 };

@@ -2,12 +2,14 @@
 node_modules/
 
 # Environment files — never commit any .env variant
+# Environment files — never commit
 .env
 .env.local
 .env.azure
+.env.render
 .env.*.local
+env.render
 .env.test
-
 # Local file uploads — stored on disk in dev, Azure Blob in prod
 uploads/
 
@@ -25,3 +27,9 @@ Thumbs.db
 
 client_secret_535680244018-fd6emgcmkbqs9em1a0tov7p9bepbd9ki.apps.googleusercontent.com.json
 roomies_backend.zip
+
+postman/
+.github/agents
+AllIndiaPincodeDataSet.csv
+
+coverage
