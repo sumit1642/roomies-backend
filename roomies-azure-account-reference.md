@@ -3,11 +3,10 @@
 **Purpose:** A strict, safe superset of the original 2026-07-28 Azure reference. This is a factual account record, not
 an execution plan; see `roomies-infra-migration-prd.md` for planned work.
 
-**Last live verification:** 2026-08-15 (Asia/Kolkata) — RBAC/identity section only; all other sections retain their 2026-08-14 verification timestamp unless individually re-verified below.
+**Last live verification:** 2026-08-16 (UTC) — GitHub deploy configuration, GitHub repo secrets presence, OIDC role assignment, and App Settings names/value parity with `.env.azure` were re-verified during the first live deploy debugging session; other sections retain their earlier timestamps unless individually noted.
 
 **Safety rule:** No credential, token, password, connection
-string, key, or publishing credential is recorded. App-setting values were deliberately not read; names only are
-retained.
+string, key, or publishing credential is recorded. App-setting values are not retained; only names and sanitized host/context notes are recorded.
 
 ## Evidence labels
 
@@ -110,7 +109,7 @@ OIDC (workload identity federation), with no client secret stored anywhere.
 branch; it currently holds minimal content. `tier0`
 (`https://github.com/sumit1642/roomies-backend/tree/tier0`) is the active development branch
 holding the full application. The operator's stated plan is to merge `tier0` → `main`, and that
-merge (a push to `main`) is what will trigger the Azure deploy workflow once it exists.
+merge (a push to `main`) now triggers `.github/workflows/deploy.yml`, the Azure deploy workflow added on 2026-08-16.
 
 **Scope decision rationale:** `Contributor` was assigned at the `roomies-rg` resource-group
 level rather than scoped to the single `roomies-api` Web App resource. This was a deliberate
@@ -310,9 +309,9 @@ plan is instead co-located with storage in Southeast Asia. [Graph verified], [Hi
 
 ### App Settings
 
-The scoped app-settings query found **24 names**; all have `slotSetting: false`. Values were not queried. Azure
+The scoped app-settings query found **24 names**; all have `slotSetting: false`. Values were checked only for parity against `.env.azure` during the 2026-08-16 incident fix and are still not recorded here. Azure
 documents that App Service app settings are encrypted at rest and injected into the app environment, which is why this
-reference retains names but no values. [CLI verified],
+reference retains names but no secret values. [CLI verified],
 [Microsoft Learn](https://learn.microsoft.com/en-us/azure/app-service/configure-common?tabs=portalfli)
 
 | Setting name                      | Stored value                                        | Source         |
@@ -344,7 +343,7 @@ reference retains names but no values. [CLI verified],
 
 **Historical verification note:** the original 2026-07-28 follow-up verified 23 `.env.azure` variables plus
 `WEBSITES_PORT` and warned that the `appsettings set` echo can show `null` values. The list operation, not that echo, is
-the authoritative presence check. [Historical], [CLI verified]
+the authoritative presence check. On 2026-08-16, a startup failure revealed that Azure `DATABASE_URL` still pointed at a stale Neon host (`ep-divine-field-a16dgg7p-pooler.ap-southeast-1`). It was replaced with the verified `.env.azure` Neon target (`ep-gentle-meadow-ax07bhxf-pooler.c-4.us-east-2`), and all 24 App Settings were re-listed for parity with `.env.azure`; values remain intentionally omitted from this reference. [Historical], [CLI verified]
 
 **Pre-rebuild value handling:** the immediately preceding reference displayed some non-secret setting values. Those
 fields are retained above by name, but all values are now uniformly replaced by the required placeholder so this
@@ -393,7 +392,7 @@ profile references, and timestamps are intentionally not copied because this ref
 | Storage lifecycle-management policy                       | None documented                       | [Historical] — prior `ManagementPolicyNotFound` result retained.                                  |
 | Custom domain bindings / certificates                     | None documented                       | [Historical] — prior resource-scoped lists were empty.                                            |
 | Azure deployment credentials (secrets/passwords/publish profiles) | None exist — OIDC federation was chosen specifically to avoid this class of credential. A GitHub Actions OIDC identity (App Registration + federated credential + service principal + RBAC role) now exists as of 2026-08-15 — see §3, "GitHub Actions OIDC federation." That identity has no password, secret, or certificate credential attached. | [CLI verified] |
-| GitHub Actions deployment configuration or GitHub secrets | Not an Azure resource and not queried | [Unavailable]                                                                                     |
+| GitHub Actions deployment configuration or GitHub secrets | Deploy workflow exists and repo secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` were confirmed present on 2026-08-16; secret values are not recorded. | [CLI verified] |
 
 ---
 
@@ -662,3 +661,4 @@ classified below; **unclassified old fields: 0**.
 | 2026-07-28 | Web App was recorded Running with 24 App Settings.                                                                                                                                 | [Historical]                     |
 | 2026-08-14 | Complete safe rebuild: Graph inventory/RBAC/policy counts, live policy allow-list, scoped CLI corroboration, identity correction, sanitized appendices, and field checklist added. | [Graph verified], [CLI verified] |
 | 2026-08-15 | GitHub Actions OIDC federation established for automated Azure deploys (PRD Phase 1.9–1.10). Created App Registration, federated credential (subject scoped to `refs/heads/main` only — not `tier0`, not PRs), service principal, and `Contributor` role assignment at `roomies-rg` scope. Every step was independently re-queried and corroborated via CLI before the next step was taken. No client secret was created at any point — OIDC token exchange only. This is an identity/RBAC-only change; no new Azure resources (storage, compute, database) were created, so the §2 live inventory count (3 resources) is unaffected. | [CLI verified] |
+| 2026-08-16 | First live deploy debugging update: `.github/workflows/deploy.yml` exists and is scoped to `main` pushes; GitHub repo secrets required by `azure/login@v2` were confirmed present; first `test` and `deploy` jobs passed. Post-deploy startup failed because `DATABASE_URL` in App Settings referenced a stale Neon host; the value was corrected to the verified `.env.azure` Neon target and all 24 App Settings were re-listed for parity. Secret values remain intentionally omitted here despite having been exposed in the debugging chat. | [CLI verified] |
