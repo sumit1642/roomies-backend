@@ -9,8 +9,121 @@ const BATCH_SIZE = 10;
 
 const MAX_ATTEMPTS = 5;
 
+// ─── Event handler registry ────────────────────────────────────────────────
+// Each handler receives (event, client, ctx) where ctx = { email, owner_full_name,
+// business_name, verification_status } from pg_owner_profiles/users, and returns
+// an array of deferred side-effect closures (matching EMAIL_HANDLERS'/
+// NOTIFICATION_MESSAGES' existing map-based dispatch pattern used by the sibling
+// workers). Adding a new verification_* event type means adding one entry here —
+// no existing branch needs to be touched or re-read.
+const VERIFICATION_EVENT_HANDLERS = {
+	verification_approved: async (event, client, ctx) => {
+		const { user_id, request_id } = event;
+		const { email, owner_full_name, business_name, verification_status } = ctx;
+
+		if (verification_status !== "verified") {
+			await client.query(
+				`UPDATE pg_owner_profiles
+                 SET verification_status = 'verified',
+                     verified_at         = NOW()
+                 WHERE user_id    = $1
+                   AND deleted_at IS NULL`,
+				[user_id],
+			);
+			logger.info(
+				{ user_id, event_id: event.event_id },
+				"verificationEventWorker: pg_owner_profiles.verification_status corrected to verified",
+			);
+		}
+
+		logger.info(
+			{ user_id, request_id, event_id: event.event_id },
+			"verificationEventWorker: approval event processed — notification + email enqueued",
+		);
+
+		return [
+			() =>
+				enqueueNotification({
+					recipientId: user_id,
+					type: "verification_approved",
+					entityType: "verification_request",
+					entityId: request_id,
+				}),
+			() =>
+				enqueueEmail({
+					type: "verification_approved",
+					to: email,
+					data: { ownerName: owner_full_name, businessName: business_name },
+				}),
+		];
+	},
+
+	verification_rejected: async (event, client, ctx) => {
+		const { user_id, request_id, rejection_reason } = event;
+		const { email, owner_full_name, verification_status } = ctx;
+
+		if (verification_status !== "rejected") {
+			await client.query(
+				`UPDATE pg_owner_profiles
+                 SET verification_status = 'rejected',
+                     rejection_reason    = $2
+                 WHERE user_id    = $1
+                   AND deleted_at IS NULL`,
+				[user_id, rejection_reason],
+			);
+			logger.info(
+				{ user_id, event_id: event.event_id },
+				"verificationEventWorker: pg_owner_profiles.verification_status corrected to rejected",
+			);
+		}
+
+		logger.info(
+			{ user_id, request_id, event_id: event.event_id },
+			"verificationEventWorker: rejection event processed — notification + email enqueued",
+		);
+
+		return [
+			() =>
+				enqueueNotification({
+					recipientId: user_id,
+					type: "verification_rejected",
+					entityType: "verification_request",
+					entityId: request_id,
+				}),
+			() =>
+				enqueueEmail({
+					type: "verification_rejected",
+					to: email,
+					data: {
+						ownerName: owner_full_name,
+						rejectionReason: rejection_reason ?? "Please review the requirements and resubmit.",
+					},
+				}),
+		];
+	},
+
+	verification_pending: async (event, client, ctx) => {
+		const { user_id, request_id } = event;
+		const { email, owner_full_name, business_name } = ctx;
+
+		logger.info(
+			{ user_id, request_id, event_id: event.event_id },
+			"verificationEventWorker: pending acknowledgement email enqueued",
+		);
+
+		return [
+			() =>
+				enqueueEmail({
+					type: "verification_pending",
+					to: email,
+					data: { ownerName: owner_full_name, businessName: business_name },
+				}),
+		];
+	},
+};
+
 export const processEvent = async (event, client) => {
-	const { event_id, event_type, user_id, request_id, rejection_reason } = event;
+	const { event_id, event_type, user_id } = event;
 
 	const { rows: userRows } = await client.query(
 		`SELECT
@@ -35,102 +148,14 @@ export const processEvent = async (event, client) => {
 		return [];
 	}
 
-	const { email, owner_full_name, business_name, verification_status } = userRows[0];
-	const sideEffects = [];
+	const handler = VERIFICATION_EVENT_HANDLERS[event_type];
 
-	if (event_type === "verification_approved") {
-		if (verification_status !== "verified") {
-			await client.query(
-				`UPDATE pg_owner_profiles
-                 SET verification_status = 'verified',
-                     verified_at         = NOW()
-                 WHERE user_id    = $1
-                   AND deleted_at IS NULL`,
-				[user_id],
-			);
-			logger.info(
-				{ user_id, event_id },
-				"verificationEventWorker: pg_owner_profiles.verification_status corrected to verified",
-			);
-		}
-
-		sideEffects.push(
-			() =>
-				enqueueNotification({
-					recipientId: user_id,
-					type: "verification_approved",
-					entityType: "verification_request",
-					entityId: request_id,
-				}),
-			() =>
-				enqueueEmail({
-					type: "verification_approved",
-					to: email,
-					data: { ownerName: owner_full_name, businessName: business_name },
-				}),
-		);
-
-		logger.info(
-			{ user_id, request_id, event_id },
-			"verificationEventWorker: approval event processed — notification + email enqueued",
-		);
-	} else if (event_type === "verification_rejected") {
-		if (verification_status !== "rejected") {
-			await client.query(
-				`UPDATE pg_owner_profiles
-                 SET verification_status = 'rejected',
-                     rejection_reason    = $2
-                 WHERE user_id    = $1
-                   AND deleted_at IS NULL`,
-				[user_id, rejection_reason],
-			);
-			logger.info(
-				{ user_id, event_id },
-				"verificationEventWorker: pg_owner_profiles.verification_status corrected to rejected",
-			);
-		}
-
-		sideEffects.push(
-			() =>
-				enqueueNotification({
-					recipientId: user_id,
-					type: "verification_rejected",
-					entityType: "verification_request",
-					entityId: request_id,
-				}),
-			() =>
-				enqueueEmail({
-					type: "verification_rejected",
-					to: email,
-					data: {
-						ownerName: owner_full_name,
-						rejectionReason: rejection_reason ?? "Please review the requirements and resubmit.",
-					},
-				}),
-		);
-
-		logger.info(
-			{ user_id, request_id, event_id },
-			"verificationEventWorker: rejection event processed — notification + email enqueued",
-		);
-	} else if (event_type === "verification_pending") {
-		sideEffects.push(() =>
-			enqueueEmail({
-				type: "verification_pending",
-				to: email,
-				data: { ownerName: owner_full_name, businessName: business_name },
-			}),
-		);
-
-		logger.info(
-			{ user_id, request_id, event_id },
-			"verificationEventWorker: pending acknowledgement email enqueued",
-		);
-	} else {
+	if (!handler) {
 		logger.warn({ event_id, event_type }, "verificationEventWorker: unknown event_type — skipping without retry");
+		return [];
 	}
 
-	return sideEffects;
+	return handler(event, client, userRows[0]);
 };
 
 export const drainOutbox = async () => {

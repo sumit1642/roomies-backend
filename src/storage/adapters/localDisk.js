@@ -13,6 +13,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { logger } from "../../logger/index.js";
+import { AppError } from "../../middleware/errorHandler.js";
 
 export class LocalDiskAdapter {
 	// base is the root directory under which all listing photo subdirectories
@@ -35,16 +36,26 @@ export class LocalDiskAdapter {
 	// listingId-scoped subdirectory cannot be known at construction time.
 	async upload(buffer, listingId, filename) {
 		const dir = path.join(this.base, "listings", listingId);
-		await fs.mkdir(dir, { recursive: true });
 
-		const filePath = path.join(dir, filename);
-		await fs.writeFile(filePath, buffer);
+		try {
+			await fs.mkdir(dir, { recursive: true });
 
-		// Return a root-relative URL. Express serves /uploads at the root, so
-		// /uploads/listings/{listingId}/{filename} resolves correctly in dev.
-		const url = `/uploads/listings/${listingId}/${filename}`;
-		logger.debug({ url }, "LocalDiskAdapter: file written");
-		return url;
+			const filePath = path.join(dir, filename);
+			await fs.writeFile(filePath, buffer);
+
+			// Return a root-relative URL. Express serves /uploads at the root, so
+			// /uploads/listings/{listingId}/{filename} resolves correctly in dev.
+			const url = `/uploads/listings/${listingId}/${filename}`;
+			logger.debug({ url }, "LocalDiskAdapter: file written");
+			return url;
+		} catch (err) {
+			// Normalize to AppError so callers get the same failure contract
+			// AzureBlobAdapter already guarantees (see azureBlob.js's upload()) —
+			// without this, raw fs errors (EACCES, ENOSPC, ...) fall through
+			// errorHandler.js's generic 500 branch instead of a typed 502.
+			logger.error({ err, listingId, filename }, "LocalDiskAdapter: upload failed");
+			throw new AppError("Failed to upload photo to local disk — try again shortly", 502);
+		}
 	}
 
 	// Deletes the file at the path derived from the stored URL.
@@ -67,7 +78,8 @@ export class LocalDiskAdapter {
 				logger.debug({ url }, "LocalDiskAdapter: file already absent, skipping delete");
 				return;
 			}
-			throw err;
+			logger.error({ err, url }, "LocalDiskAdapter: delete failed");
+			throw new AppError("Failed to delete photo from local disk", 502);
 		}
 	}
 }
