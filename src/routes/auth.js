@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { validate } from "../middleware/validate.js";
-import { authLimiter, otpLimiter } from "../middleware/rateLimiter.js";
 import {
 	registerSchema,
 	loginSchema,
@@ -11,14 +10,23 @@ import {
 	revokeSessionSchema,
 	otpVerifySchema,
 	googleCallbackSchema,
+	adminLoginSchema,
+	adminLoginVerifySchema,
 } from "../validators/auth.validators.js";
+import { authLimiter, otpLimiter, adminOtpLimiter } from "../middleware/rateLimiter.js";
 import * as authController from "../controllers/auth.controller.js";
 
 export const authRouter = Router();
 
 authRouter.post("/register", authLimiter, validate(registerSchema), authController.register);
 authRouter.post("/login", authLimiter, validate(loginSchema), authController.login);
-
+authRouter.post("/admin/login", authLimiter, validate(adminLoginSchema), authController.adminLogin);
+authRouter.post(
+	"/admin/login/verify",
+	adminOtpLimiter,
+	validate(adminLoginVerifySchema),
+	authController.adminLoginVerify,
+);
 authRouter.post("/logout", validate(logoutCurrentSchema), authController.logout);
 
 authRouter.post("/logout/current", authenticate, validate(logoutCurrentSchema), authController.logout);

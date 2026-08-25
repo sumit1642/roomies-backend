@@ -36,22 +36,13 @@ export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) =
 
 const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
 const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
+export const SESSION_TOKEN_PURPOSE = "session_access";
 
 const issueAccessToken = (userId, email, roles, sid) =>
-	jwt.sign({ userId, email, roles, sid }, config.JWT_SECRET, {
+	jwt.sign({ userId, email, roles, sid, purpose: SESSION_TOKEN_PURPOSE }, config.JWT_SECRET, {
 		expiresIn: ACCESS_TTL_SECONDS,
 	});
 
-// Root-cause fix: jwt.sign is deterministic for a given payload + secret +
-// expiry — two tokens issued for the same {userId, sid} within the same
-// second (identical `iat`) previously produced the EXACT SAME token string.
-// This silently defeated refresh-token rotation: a "rotated" token could be
-// byte-for-byte identical to the one it was meant to replace, making the
-// single-use / replay-prevention guarantee untestable and, in principle,
-// bypassable if two refreshes could ever be forced within the same second.
-// Adding a unique `jti` (JWT ID) guarantees every issuance is a distinct
-// string regardless of timing, without changing anything else about how the
-// token is verified or how casRefreshToken's CAS comparison works.
 const issueRefreshToken = (userId, sid) =>
 	jwt.sign({ userId, sid, jti: crypto.randomUUID() }, config.JWT_REFRESH_SECRET, {
 		expiresIn: REFRESH_TTL_SECONDS,
@@ -729,4 +720,217 @@ export const googleOAuth = async ({ idToken, role, fullName, businessName }) => 
 	} finally {
 		client.release();
 	}
+};
+
+// ─── ADR-016: Admin Login (Password + OTP 2FA) ─────────────────────────────
+//
+// Two-step flow producing the SAME accessToken/refreshToken cookies the
+// existing `authenticate` middleware expects, so requireAdmin and every
+// downstream admin route need zero changes.
+//
+// Step 1 (adminLogin): password check -> short-lived pending-2FA JWT +
+//   OTP emailed. No session issued yet.
+// Step 2 (verifyAdminLoginOtp): pending token + OTP -> real session via the
+//   EXISTING buildTokenResponse/storeRefreshToken machinery (no new session
+//   logic, per the ADR).
+//
+// Redis key namespace is deliberately separate from the profile-verification
+// OTP (`otp:{userId}`) so the two can never collide or be confused:
+//   adminLoginOtp:{userId}          — hashed OTP, 10 min TTL
+//   adminLoginOtpAttempts:{userId}  — incorrect-attempt counter, 10 min TTL
+//
+// The pending token is a signed JWT carrying { userId, purpose: "admin_login_2fa" }.
+// It is returned in the response BODY, never as a cookie, and is only ever
+// accepted by verifyAdminLoginOtp — nothing else in the codebase should ever
+// treat a token with this purpose claim as a usable session token.
+
+const ADMIN_LOGIN_OTP_TTL = 600; // 10 minutes — matches the existing profile-verification OTP TTL
+const ADMIN_LOGIN_OTP_MAX_ATTEMPTS = 5; // matches OTP_MAX_ATTEMPTS
+const PENDING_TOKEN_TTL_SECONDS = 5 * 60; // 5 minutes
+const PENDING_TOKEN_PURPOSE = "admin_login_2fa";
+
+const adminLoginOtpKey = (userId) => `adminLoginOtp:${userId}`;
+const adminLoginOtpAttemptsKey = (userId) => `adminLoginOtpAttempts:${userId}`;
+
+const transitionAdminLoginOtpScript = `
+local storedHash = redis.call("GET", KEYS[1])
+if not storedHash or storedHash ~= ARGV[1] then
+  return 0
+end
+
+local attempts = tonumber(redis.call("GET", KEYS[2]) or "0")
+if attempts >= tonumber(ARGV[3]) then
+  return -1
+end
+
+if ARGV[2] == "valid" then
+  redis.call("DEL", KEYS[1])
+  redis.call("DEL", KEYS[2])
+  return 1
+end
+
+attempts = attempts + 1
+redis.call("SETEX", KEYS[2], tonumber(ARGV[4]), attempts)
+return attempts
+`;
+
+const transitionAdminLoginOtp = async (otpKey, attemptsKey, storedHash, outcome) =>
+	redis.eval(transitionAdminLoginOtpScript, {
+		keys: [otpKey, attemptsKey],
+		arguments: [storedHash, outcome, String(ADMIN_LOGIN_OTP_MAX_ATTEMPTS), String(ADMIN_LOGIN_OTP_TTL)],
+	});
+
+const issuePendingAdminToken = (userId) =>
+	jwt.sign({ userId, purpose: PENDING_TOKEN_PURPOSE }, config.JWT_SECRET, {
+		expiresIn: PENDING_TOKEN_TTL_SECONDS,
+	});
+
+const verifyPendingAdminToken = (pendingToken) => {
+	let payload;
+	try {
+		payload = jwt.verify(pendingToken, config.JWT_SECRET);
+	} catch (err) {
+		if (err.name === "TokenExpiredError") {
+			throw new AppError("Login session expired — please start over", 401);
+		}
+		throw new AppError("Invalid or malformed pending token", 401);
+	}
+
+	if (payload?.purpose !== PENDING_TOKEN_PURPOSE || !payload?.userId) {
+		throw new AppError("Invalid pending token", 401);
+	}
+
+	return payload;
+};
+
+/**
+ * Step 1 — POST /auth/admin/login
+ *
+ * Password-only. Never reveals whether an email belongs to an admin, or
+ * whether it exists at all — same dummy-hash timing-safe pattern as login().
+ * On success, does NOT issue any session token. It issues a pending-2FA
+ * token and enqueues an OTP email; the caller must complete step 2 to
+ * actually get a session.
+ */
+export const adminLogin = async ({ email, password }) => {
+	const user = await findUserByEmail(email);
+
+	const hashToCompare = user ? user.password_hash : DUMMY_HASH;
+	const effectiveHash = hashToCompare ?? DUMMY_HASH;
+	const passwordMatch = await bcrypt.compare(password, effectiveHash);
+
+	// Generic 401 for: wrong password, unknown email, OR a real user who
+	// simply isn't an admin. Never let the response shape leak which case it was.
+	if (!passwordMatch || !user) {
+		throw new AppError("Invalid credentials", 401);
+	}
+
+	if (INACTIVE_ACCOUNT_STATUSES.has(user.account_status)) {
+		throw new AppError(`Account is ${user.account_status}`, 401);
+	}
+
+	const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [user.user_id]);
+	const roles = roleRows.map((r) => r.role_name);
+
+	if (!roles.includes("admin")) {
+		// Deliberately identical error to "wrong password" above — do not
+		// disclose that this account exists but lacks the admin role.
+		throw new AppError("Invalid credentials", 401);
+	}
+
+	const otp = generateOtp();
+	const hash = await bcrypt.hash(otp, 10);
+
+	await Promise.all([
+		redis.setEx(adminLoginOtpKey(user.user_id), ADMIN_LOGIN_OTP_TTL, hash),
+		redis.del(adminLoginOtpAttemptsKey(user.user_id)),
+	]);
+
+	enqueueEmail({ type: "admin_login_otp", to: user.email, data: { otp } });
+
+	const pendingToken = issuePendingAdminToken(user.user_id);
+
+	logger.info({ userId: user.user_id }, "Admin login step 1 passed — OTP enqueued, session not yet issued");
+
+	return { pendingToken, message: "OTP sent" };
+};
+
+/**
+ * Step 2 — POST /auth/admin/login/verify
+ *
+ * Verifies the pending token's signature/expiry/purpose, then the OTP
+ * itself (same bcrypt-compare + attempt-counter pattern as verifyOtp).
+ * On success, deletes the OTP/attempts keys and issues a REAL session via
+ * the existing buildTokenResponse/storeRefreshToken — identical shape to
+ * login()'s output, so authController.js's existing cookie-setting logic
+ * works unmodified.
+ */
+export const verifyAdminLoginOtp = async (pendingToken, otp) => {
+	const { userId } = verifyPendingAdminToken(pendingToken);
+
+	// Re-verify the account is still a live admin at the moment of step 2 —
+	// role or status could have changed in the (short) window between steps.
+	const { rows: userRows } = await pool.query(
+		`SELECT email, is_email_verified, account_status FROM users WHERE user_id = $1 AND deleted_at IS NULL`,
+		[userId],
+	);
+	if (!userRows.length) {
+		throw new AppError("User not found", 401);
+	}
+	if (INACTIVE_ACCOUNT_STATUSES.has(userRows[0].account_status)) {
+		throw new AppError("Account inactive", 401);
+	}
+
+	const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [userId]);
+	const roles = roleRows.map((r) => r.role_name);
+	if (!roles.includes("admin")) {
+		throw new AppError("Invalid credentials", 401);
+	}
+
+	const attemptsKey = adminLoginOtpAttemptsKey(userId);
+	const otpKey = adminLoginOtpKey(userId);
+
+	const attempts = parseInt((await redis.get(attemptsKey)) ?? "0", 10);
+	if (attempts >= ADMIN_LOGIN_OTP_MAX_ATTEMPTS) {
+		throw new AppError("Too many incorrect attempts — please log in again", 429);
+	}
+
+	const storedHash = await redis.get(otpKey);
+	if (!storedHash) {
+		throw new AppError("OTP has expired or was never sent — please log in again", 400);
+	}
+
+	const match = await bcrypt.compare(otp, storedHash);
+	if (!match) {
+		const transition = await transitionAdminLoginOtp(otpKey, attemptsKey, storedHash, "invalid");
+		if (transition === 0) {
+			throw new AppError("OTP has expired or was never sent — please log in again", 400);
+		}
+		if (transition === -1) {
+			throw new AppError("Too many incorrect attempts — please log in again", 429);
+		}
+
+		const remaining = ADMIN_LOGIN_OTP_MAX_ATTEMPTS - transition;
+		throw new AppError(
+			remaining > 0 ?
+				`Incorrect OTP — ${remaining} attempt${remaining === 1 ? "" : "s"} remaining`
+			:	"Too many incorrect attempts — please log in again",
+			remaining > 0 ? 400 : 429,
+		);
+	}
+
+	const transition = await transitionAdminLoginOtp(otpKey, attemptsKey, storedHash, "valid");
+	if (transition === 0) {
+		throw new AppError("OTP has expired or was never sent — please log in again", 400);
+	}
+	if (transition === -1) {
+		throw new AppError("Too many incorrect attempts — please log in again", 429);
+	}
+
+	logger.info({ userId }, "Admin login step 2 passed — session issued");
+
+	const sid = issueSessionId();
+	const tokens = buildTokenResponse(userId, sid, userRows[0].email, roles, userRows[0].is_email_verified);
+	await storeRefreshToken(userId, sid, tokens.refreshToken);
+	return tokens;
 };

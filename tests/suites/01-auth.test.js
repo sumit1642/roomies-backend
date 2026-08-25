@@ -9,7 +9,9 @@
 // logic by auth-otp-unit.test.js — no need to duplicate that here.
 
 import request from "supertest";
+import jwt from "jsonwebtoken";
 import { app } from "../../src/app.js";
+import { config } from "../../src/config/env.js";
 import { registerStudent } from "../setup/testAuth.js";
 
 const uniqueEmail = (label) => `${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@college.edu`;
@@ -130,6 +132,17 @@ describe("GET /auth/me", () => {
 
 	test("rejects with 401 when no token is present", async () => {
 		const res = await request(app).get("/api/v1/auth/me");
+		expect(res.status).toBe(401);
+	});
+
+	test("rejects an admin-login pending token", async () => {
+		const { user } = await registerStudent({ email: uniqueEmail("me-pending-token") });
+		const pendingToken = jwt.sign({ userId: user.userId, purpose: "admin_login_2fa" }, config.JWT_SECRET, {
+			expiresIn: "5m",
+		});
+
+		const res = await request(app).get("/api/v1/auth/me").set("Authorization", `Bearer ${pendingToken}`);
+
 		expect(res.status).toBe(401);
 	});
 });

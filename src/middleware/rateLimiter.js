@@ -89,3 +89,15 @@ export const publicRatingsLimiter = rateLimit({
 		message: "Too many rating lookup requests — please wait a few minutes before trying again",
 	},
 });
+export const adminOtpLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000,
+	max: 3,
+	standardHeaders: true,
+	legacyHeaders: false,
+	store: makeRedisStore("rl:adminOtp:"),
+	passOnStoreError: true,
+	message: {
+		status: "error",
+		message: "Too many admin OTP verification attempts — please wait 15 minutes and log in again",
+	},
+});

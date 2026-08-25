@@ -8,10 +8,21 @@ import {
 	sendVerificationRejectedEmail,
 	sendVerificationPendingEmail,
 } from "../services/email.service.js";
+import {
+	sendOtpEmail,
+	sendAdminLoginOtpEmail, // <-- new
+	sendVerificationApprovedEmail,
+	sendVerificationRejectedEmail,
+	sendVerificationPendingEmail,
+} from "../services/email.service.js";
 
 const EMAIL_HANDLERS = {
 	otp: async ({ to, data }) => {
 		await sendOtpEmail(to, data.otp);
+	},
+
+	admin_login_otp: async ({ to, data }) => {
+		await sendAdminLoginOtpEmail(to, data.otp);
 	},
 
 	verification_approved: async ({ to, data }) => {

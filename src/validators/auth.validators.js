@@ -70,3 +70,16 @@ export const googleCallbackSchema = z.object({
 		businessName: z.string().min(2).max(255).optional(),
 	}),
 });
+export const adminLoginSchema = z.object({
+	body: z.object({
+		email: z.email({ error: "Must be a valid email address" }),
+		password: z.string().min(1, { error: "Password is required" }),
+	}),
+});
+
+export const adminLoginVerifySchema = z.object({
+	body: z.object({
+		pendingToken: z.string().min(1, { error: "pendingToken is required" }),
+		otp: z.string().regex(/^\d{6}$/, { error: "OTP must be exactly 6 digits" }),
+	}),
+});

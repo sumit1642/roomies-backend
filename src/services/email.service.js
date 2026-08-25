@@ -626,3 +626,134 @@ const sendViaBrevoAPI = async (to, subject, html, text) => {
 	logger.info({ to: maskedTo, messageId: result.messageId }, "Brevo API: email sent successfully");
 	return result.messageId;
 };
+export const sendAdminLoginOtpEmail = async (to, otp) => {
+	if (!to || typeof to !== "string" || !to.includes("@")) {
+		throw new AppError("Invalid recipient email address", 400);
+	}
+	if (!otp || typeof otp !== "string") {
+		throw new AppError("OTP is required", 400);
+	}
+	if (!/^[0-9]{6}$/.test(otp)) {
+		throw new AppError("Invalid OTP format — expected exactly 6 digits", 400);
+	}
+
+	const maskedTo = maskEmail(to);
+	const fromAddress = getSenderAddress();
+
+	logger.info(
+		{ to: maskedTo, provider: activeEmailProvider },
+		"Preparing admin login OTP email with configured provider",
+	);
+
+	if (config.EMAIL_PROVIDER === "brevo-api") {
+		return sendViaBrevoAPI(
+			to,
+			"Your Roomies admin login code",
+			`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/></head><body style="margin:0;padding:0;background-color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f5;padding:40px 16px;"><tr><td align="center"><table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background-color:#ffffff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.08);overflow:hidden;"><tr><td style="background-color:#18181b;padding:28px 40px 24px;"><p style="margin:0;font-size:22px;font-weight:700;color:#ffffff;">Roomies</p><p style="margin:6px 0 0;font-size:13px;color:#a1a1aa;">Admin sign-in verification</p></td></tr><tr><td style="padding:36px 40px 32px;"><p style="margin:0 0 8px;font-size:16px;font-weight:600;color:#18181b;">Complete your admin sign-in</p><p style="margin:0 0 28px;font-size:14px;line-height:1.6;color:#52525b;">Someone is signing in to the Roomies admin panel with this account's password. Enter the code below to finish signing in. It expires in <strong>10 minutes</strong>.</p><table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="background-color:#f4f4f5;border-radius:10px;padding:28px 16px;"><p style="margin:0 0 6px;font-size:11px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#71717a;">Your admin login code</p><p style="margin:0;font-size:40px;font-weight:700;letter-spacing:12px;color:#18181b;font-family:'Courier New',monospace;">${otp}</p></td></tr></table><p style="margin:24px 0 0;font-size:13px;line-height:1.6;color:#71717a;">If you did not attempt to sign in, your password may be compromised — rotate it immediately. Never share this code with anyone.</p></td></tr><tr><td style="background-color:#fafafa;border-top:1px solid #f0f0f0;padding:20px 40px;"><p style="margin:0;font-size:12px;color:#a1a1aa;">This is an automated message from Roomies. Please do not reply.</p></td></tr></table></td></tr></table></body></html>`,
+			`Your Roomies admin login code is: ${otp}\n\nSomeone is signing in to the Roomies admin panel with this account's password. This code expires in 10 minutes.\n\nIf you did not attempt to sign in, your password may be compromised — rotate it immediately. Never share this code with anyone.`,
+		);
+	}
+
+	try {
+		const info = await transport.sendMail({
+			from: fromAddress,
+			to,
+			subject: "Your Roomies admin login code",
+
+			text: `Your Roomies admin login code is: ${otp}\n\nSomeone is signing in to the Roomies admin panel with this account's password. This code expires in 10 minutes.\n\nIf you did not attempt to sign in, your password may be compromised — rotate it immediately. Never share this code with anyone.`,
+
+			html: `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Your Roomies admin login code</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f4f4f5; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background-color:#f4f4f5; padding:40px 16px;">
+    <tr>
+      <td align="center">
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:480px; background-color:#ffffff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.08); overflow:hidden;">
+ 
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#18181b; padding:28px 40px 24px;">
+              <p style="margin:0; font-size:22px; font-weight:700; color:#ffffff; letter-spacing:-0.3px;">Roomies</p>
+              <p style="margin:6px 0 0; font-size:13px; color:#a1a1aa;">Admin sign-in verification</p>
+            </td>
+          </tr>
+ 
+          <!-- Body -->
+          <tr>
+            <td style="padding:36px 40px 32px;">
+              <p style="margin:0 0 8px; font-size:16px; font-weight:600; color:#18181b;">Complete your admin sign-in</p>
+              <p style="margin:0 0 28px; font-size:14px; line-height:1.6; color:#52525b;">
+                Someone is signing in to the Roomies admin panel with this account's password.
+                Enter the code below to finish signing in. It expires in <strong>10 minutes</strong>.
+              </p>
+ 
+              <!-- OTP box -->
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+                <tr>
+                  <td align="center" style="background-color:#f4f4f5; border-radius:10px; padding:28px 16px;">
+                    <p style="margin:0 0 6px; font-size:11px; font-weight:600; letter-spacing:1.5px; text-transform:uppercase; color:#71717a;">Your admin login code</p>
+                    <p style="margin:0; font-size:40px; font-weight:700; letter-spacing:12px; color:#18181b; font-family:'Courier New', Courier, monospace;">${otp}</p>
+                  </td>
+                </tr>
+              </table>
+ 
+              <p style="margin:24px 0 0; font-size:13px; line-height:1.6; color:#71717a;">
+                If you did not attempt to sign in, your password may be compromised — rotate it immediately.
+                Never share this code with anyone.
+              </p>
+            </td>
+          </tr>
+ 
+          <!-- Footer -->
+          <tr>
+            <td style="background-color:#fafafa; border-top:1px solid #f0f0f0; padding:20px 40px;">
+              <p style="margin:0; font-size:12px; color:#a1a1aa; line-height:1.5;">
+                This is an automated message from Roomies. Please do not reply to this email.
+              </p>
+            </td>
+          </tr>
+ 
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+			`,
+		});
+
+		const previewUrl =
+			typeof nodemailer.getTestMessageUrl === "function" ? nodemailer.getTestMessageUrl(info) : undefined;
+		if (previewUrl) {
+			logger.info(
+				{ to: maskedTo, previewUrl, provider: "ethereal" },
+				"Admin login OTP email sent — open preview URL to read the code",
+			);
+		} else {
+			logger.info(
+				{ to: maskedTo, messageId: info.messageId, provider: config.EMAIL_PROVIDER },
+				"Admin login OTP email sent",
+			);
+		}
+
+		return info.messageId;
+	} catch (err) {
+		logger.error(
+			{
+				to: maskedTo,
+				provider: config.EMAIL_PROVIDER,
+				errCode: err.code,
+				errMessage: err.message,
+			},
+			"Failed to send admin login OTP email",
+		);
+
+		throw new AppError("Failed to send admin login OTP email — try again shortly", 502);
+	}
+};
