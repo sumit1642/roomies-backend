@@ -181,3 +181,22 @@ export const googleCallback = async (req, res, next) => {
 		next(err);
 	}
 };
+
+export const adminLogin = async (req, res, next) => {
+	try {
+		const result = await authService.adminLogin(req.body);
+		res.json({ status: "success", data: result });
+	} catch (err) {
+		next(err);
+	}
+};
+
+export const adminLoginVerify = async (req, res, next) => {
+	try {
+		const tokens = await authService.verifyAdminLoginOtp(req.body.pendingToken, req.body.otp);
+		setAuthCookies(res, tokens.accessToken, tokens.refreshToken);
+		res.json({ status: "success", data: authResponseData(req, tokens) });
+	} catch (err) {
+		next(err);
+	}
+};
