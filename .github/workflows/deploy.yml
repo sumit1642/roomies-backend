@@ -40,9 +40,49 @@ jobs:
             - name: Run tests
               run: npm test
 
-    deploy:
+    migrate:
         needs: test
         runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  persist-credentials: false
+
+            - name: Setup Node.js 24.15.0
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "24.15.0"
+                  cache: "npm"
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Show migration status (pending vs applied)
+              env:
+                  DATABASE_URL: ${{ secrets.AZURE_DATABASE_URL }}
+              run: node src/db/migrate.js --status
+
+            - name: Apply pending migrations to Azure/Neon
+              env:
+                  DATABASE_URL: ${{ secrets.AZURE_DATABASE_URL }}
+              run: node src/db/migrate.js
+
+    deploy:
+        needs: [test, migrate]
+        runs-on: ubuntu-latest
+        # Requires a one-time manual setup: GitHub repo -> Settings ->
+        # Environments -> New environment -> name it exactly "production" ->
+        # add yourself as a required reviewer. Once configured, every run of
+        # this job pauses here (after tests pass AND migrations have already
+        # been applied to Azure/Neon) until manually approved in the Actions
+        # tab. This is the last human checkpoint before traffic-affecting
+        # App Service deploy — it does NOT block the migration step above,
+        # since schema changes need to land before code that depends on them
+        # deploys anyway. If the environment is not configured yet, this key
+        # is simply ignored and the job runs immediately (no gate).
+        environment: production
 
         steps:
             - name: Checkout code
