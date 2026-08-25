@@ -36,9 +36,10 @@ export const parseTtlSeconds = (expiresIn, fallbackSeconds = 7 * 24 * 60 * 60) =
 
 const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
 const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
+export const SESSION_TOKEN_PURPOSE = "session_access";
 
 const issueAccessToken = (userId, email, roles, sid) =>
-	jwt.sign({ userId, email, roles, sid }, config.JWT_SECRET, {
+	jwt.sign({ userId, email, roles, sid, purpose: SESSION_TOKEN_PURPOSE }, config.JWT_SECRET, {
 		expiresIn: ACCESS_TTL_SECONDS,
 	});
 
@@ -751,6 +752,34 @@ const PENDING_TOKEN_PURPOSE = "admin_login_2fa";
 const adminLoginOtpKey = (userId) => `adminLoginOtp:${userId}`;
 const adminLoginOtpAttemptsKey = (userId) => `adminLoginOtpAttempts:${userId}`;
 
+const transitionAdminLoginOtpScript = `
+local storedHash = redis.call("GET", KEYS[1])
+if not storedHash or storedHash ~= ARGV[1] then
+  return 0
+end
+
+local attempts = tonumber(redis.call("GET", KEYS[2]) or "0")
+if attempts >= tonumber(ARGV[3]) then
+  return -1
+end
+
+if ARGV[2] == "valid" then
+  redis.call("DEL", KEYS[1])
+  redis.call("DEL", KEYS[2])
+  return 1
+end
+
+attempts = attempts + 1
+redis.call("SETEX", KEYS[2], tonumber(ARGV[4]), attempts)
+return attempts
+`;
+
+const transitionAdminLoginOtp = async (otpKey, attemptsKey, storedHash, outcome) =>
+	redis.eval(transitionAdminLoginOtpScript, {
+		keys: [otpKey, attemptsKey],
+		arguments: [storedHash, outcome, String(ADMIN_LOGIN_OTP_MAX_ATTEMPTS), String(ADMIN_LOGIN_OTP_TTL)],
+	});
+
 const issuePendingAdminToken = (userId) =>
 	jwt.sign({ userId, purpose: PENDING_TOKEN_PURPOSE }, config.JWT_SECRET, {
 		expiresIn: PENDING_TOKEN_TTL_SECONDS,
@@ -873,8 +902,15 @@ export const verifyAdminLoginOtp = async (pendingToken, otp) => {
 
 	const match = await bcrypt.compare(otp, storedHash);
 	if (!match) {
-		await redis.setEx(attemptsKey, ADMIN_LOGIN_OTP_TTL, String(attempts + 1));
-		const remaining = ADMIN_LOGIN_OTP_MAX_ATTEMPTS - (attempts + 1);
+		const transition = await transitionAdminLoginOtp(otpKey, attemptsKey, storedHash, "invalid");
+		if (transition === 0) {
+			throw new AppError("OTP has expired or was never sent — please log in again", 400);
+		}
+		if (transition === -1) {
+			throw new AppError("Too many incorrect attempts — please log in again", 429);
+		}
+
+		const remaining = ADMIN_LOGIN_OTP_MAX_ATTEMPTS - transition;
 		throw new AppError(
 			remaining > 0 ?
 				`Incorrect OTP — ${remaining} attempt${remaining === 1 ? "" : "s"} remaining`
@@ -883,7 +919,13 @@ export const verifyAdminLoginOtp = async (pendingToken, otp) => {
 		);
 	}
 
-	await Promise.all([redis.del(otpKey), redis.del(attemptsKey)]);
+	const transition = await transitionAdminLoginOtp(otpKey, attemptsKey, storedHash, "valid");
+	if (transition === 0) {
+		throw new AppError("OTP has expired or was never sent — please log in again", 400);
+	}
+	if (transition === -1) {
+		throw new AppError("Too many incorrect attempts — please log in again", 429);
+	}
 
 	logger.info({ userId }, "Admin login step 2 passed — session issued");
 

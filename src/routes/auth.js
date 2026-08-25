@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { validate } from "../middleware/validate.js";
-import { authLimiter, otpLimiter } from "../middleware/rateLimiter.js";
 import {
 	registerSchema,
 	loginSchema,
@@ -11,21 +10,11 @@ import {
 	revokeSessionSchema,
 	otpVerifySchema,
 	googleCallbackSchema,
-} from "../validators/auth.validators.js";
-import * as authController from "../controllers/auth.controller.js";
-import {
-	registerSchema,
-	loginSchema,
-	refreshSchema,
-	logoutCurrentSchema,
-	listSessionsSchema,
-	revokeSessionSchema,
-	otpVerifySchema,
-	googleCallbackSchema,
-	adminLoginSchema, // <-- new
-	adminLoginVerifySchema, // <-- new
+	adminLoginSchema,
+	adminLoginVerifySchema,
 } from "../validators/auth.validators.js";
 import { authLimiter, otpLimiter, adminOtpLimiter } from "../middleware/rateLimiter.js";
+import * as authController from "../controllers/auth.controller.js";
 
 export const authRouter = Router();
 

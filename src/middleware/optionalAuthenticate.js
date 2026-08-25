@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import { config } from "../config/env.js";
 import { findUserById } from "../db/utils/auth.js";
+import { SESSION_TOKEN_PURPOSE } from "../services/auth.service.js";
 
 const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
 
@@ -28,7 +29,7 @@ export const optionalAuthenticate = async (req, res, next) => {
 			return next();
 		}
 
-		if (!payload?.userId) {
+		if (payload?.purpose !== SESSION_TOKEN_PURPOSE || !payload?.userId || !payload?.sid) {
 			return next();
 		}
 

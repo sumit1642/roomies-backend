@@ -4,7 +4,7 @@ import { AppError } from "./errorHandler.js";
 import { findUserById } from "../db/utils/auth.js";
 import { redis } from "../cache/client.js";
 import { pool } from "../db/client.js";
-import { casRefreshToken, parseTtlSeconds, verifyRefreshTokenPayload } from "../services/auth.service.js";
+import { casRefreshToken, parseTtlSeconds, SESSION_TOKEN_PURPOSE, verifyRefreshTokenPayload } from "../services/auth.service.js";
 
 const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
 const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
@@ -76,7 +76,13 @@ const attemptSilentRefresh = async (req, res) => {
 	const roles = roleRows.map((r) => r.role_name);
 
 	const newAccessToken = jwt.sign(
-		{ userId: refreshPayload.userId, email: userRows[0].email, roles, sid: refreshPayload.sid },
+		{
+			userId: refreshPayload.userId,
+			email: userRows[0].email,
+			roles,
+			sid: refreshPayload.sid,
+			purpose: SESSION_TOKEN_PURPOSE,
+		},
 		config.JWT_SECRET,
 		{ expiresIn: ACCESS_TTL_SECONDS },
 	);
@@ -102,7 +108,7 @@ const attemptSilentRefresh = async (req, res) => {
 	res.cookie("accessToken", newAccessToken, ACCESS_COOKIE_OPTIONS);
 	res.cookie("refreshToken", newRefreshToken, REFRESH_COOKIE_OPTIONS);
 
-	return { userId: refreshPayload.userId, sid: refreshPayload.sid };
+	return { userId: refreshPayload.userId, sid: refreshPayload.sid, purpose: SESSION_TOKEN_PURPOSE };
 };
 
 export const authenticate = async (req, res, next) => {
@@ -128,6 +134,10 @@ export const authenticate = async (req, res, next) => {
 			} else {
 				return next(err);
 			}
+		}
+
+		if (payload?.purpose !== SESSION_TOKEN_PURPOSE || !payload?.sid) {
+			return next(new AppError("Invalid session token", 401));
 		}
 
 		const user = await findUserById(payload.userId);
