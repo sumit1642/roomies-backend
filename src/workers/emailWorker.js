@@ -4,12 +4,6 @@ import { bullConnection } from "./bullConnection.js";
 import { EMAIL_QUEUE_NAME } from "./emailQueue.js";
 import {
 	sendOtpEmail,
-	sendVerificationApprovedEmail,
-	sendVerificationRejectedEmail,
-	sendVerificationPendingEmail,
-} from "../services/email.service.js";
-import {
-	sendOtpEmail,
 	sendAdminLoginOtpEmail, // <-- new
 	sendVerificationApprovedEmail,
 	sendVerificationRejectedEmail,
