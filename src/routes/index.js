@@ -18,6 +18,7 @@ import { testUtilsRouter } from "./testUtils.js";
 import { verificationRouter } from "./verification.js";
 import { reportRouter } from "./report.js";
 import { config } from "../config/env.js";
+import { adminUserRouter } from "./adminUser.js";
 
 export const rootRouter = Router();
 
@@ -38,6 +39,7 @@ rootRouter.use("/pincodes", pincodeRouter);
 rootRouter.use("/saved-searches", savedSearchRouter);
 rootRouter.use("/verification", verificationRouter);
 rootRouter.use("/reports", reportRouter);
+rootRouter.use("/admin/users", adminUserRouter);
 
 if (config.NODE_ENV !== "production") {
 	rootRouter.use("/test-utils", testUtilsRouter);
