@@ -39,6 +39,7 @@ export const getUserDetail = async (userId) => {
          '{}'
        ) AS roles,
 
+       sp.user_id             AS student_profile_user_id,
        sp.full_name          AS student_full_name,
        sp.bio                AS student_bio,
        sp.course             AS student_course,
@@ -85,7 +86,7 @@ export const getUserDetail = async (userId) => {
 		updatedAt: row.updated_at,
 		roles,
 		studentProfile:
-			row.student_full_name !== null || roles.includes("student") ?
+			row.student_profile_user_id !== null ?
 				{
 					fullName: row.student_full_name,
 					bio: row.student_bio,
