@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { keysetPaginationQuerySchema } from "./pagination.validators.js";
+import { buildKeysetPaginationQuerySchema, keysetPaginationQuerySchema } from "./pagination.validators.js";
 
 export const submitDocumentSchema = z.object({
 	params: z.object({
@@ -36,5 +36,19 @@ export const rejectRequestSchema = z.object({
 			.min(1, { error: "Rejection reason cannot be empty" })
 			.max(1000),
 		adminNotes: z.string().max(1000).optional(),
+	}),
+});
+
+// Insert after getQueueSchema. Optional status filter narrows to a single
+// resolved outcome; omitting it returns both verified and rejected. Uses
+// buildKeysetPaginationQuerySchema (not .extend() on the already-.refine()'d
+// keysetPaginationQuerySchema) — same reason interest.validators.js and
+// roommate.validators.js do this: extending a refined schema is fragile,
+// the builder function is the established way to add fields to the shared
+// pagination shape in this codebase.
+
+export const getHistorySchema = z.object({
+	query: buildKeysetPaginationQuerySchema({
+		status: z.enum(["verified", "rejected"]).optional(),
 	}),
 });
