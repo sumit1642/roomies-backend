@@ -12,6 +12,7 @@
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { emailSender } from "../email/index.js";
+import { z } from "zod";
 import {
 	buildOtpEmail,
 	buildAdminLoginOtpEmail,
@@ -28,7 +29,7 @@ const maskEmail = (email) => {
 };
 
 const assertValidRecipient = (to) => {
-	if (!to || typeof to !== "string" || !to.includes("@")) {
+	if (!z.email().safeParse(to).success) {
 		throw new AppError("Invalid recipient email address", 400);
 	}
 };

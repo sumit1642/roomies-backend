@@ -124,16 +124,20 @@ export const buildAdminLoginOtpEmail = (otp) => ({
 </html>`,
 });
 
-export const buildVerificationApprovedEmail = (ownerName, businessName) => ({
-	subject: "Your Roomies PG owner account has been verified",
-	text:
-		`Hi ${ownerName},\n\n` +
-		`Great news! Your PG owner account on Roomies has been verified.\n\n` +
-		`You can now create properties and post listings for students to discover.\n\n` +
-		`Log in to get started: https://roomies.in/dashboard\n\n` +
-		`If you have any questions, please contact our support team.\n\n` +
-		`— The Roomies Team`,
-	html: `
+export const buildVerificationApprovedEmail = (ownerName, businessName) => {
+	const safeOwnerName = escapeHtml(ownerName);
+	const safeBusinessName = escapeHtml(businessName ?? "your business");
+
+	return {
+		subject: "Your Roomies PG owner account has been verified",
+		text:
+			`Hi ${ownerName},\n\n` +
+			`Great news! Your PG owner account on Roomies has been verified.\n\n` +
+			`You can now create properties and post listings for students to discover.\n\n` +
+			`Log in to get started: https://roomies.in/dashboard\n\n` +
+			`If you have any questions, please contact our support team.\n\n` +
+			`— The Roomies Team`,
+		html: `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -157,8 +161,7 @@ export const buildVerificationApprovedEmail = (ownerName, businessName) => ({
               <p style="margin:0 0 8px; font-size:22px;">✅</p>
               <p style="margin:0 0 8px; font-size:16px; font-weight:600; color:#18181b;">Account verified!</p>
               <p style="margin:0 0 20px; font-size:14px; line-height:1.6; color:#52525b;">
-                Hi ${ownerName}, your PG owner account for <strong>${businessName ?? "your business"}</strong>
-                has been reviewed and approved by our team.
+                Hi ${safeOwnerName}, your PG owner account for <strong>${safeBusinessName}</strong> has been reviewed and approved by our team.
               </p>
               <p style="margin:0 0 28px; font-size:14px; line-height:1.6; color:#52525b;">
                 You can now create properties and post listings for students across India to discover.
@@ -189,10 +192,15 @@ export const buildVerificationApprovedEmail = (ownerName, businessName) => ({
   </table>
 </body>
 </html>`,
-});
+	};
+};
 
 export const buildVerificationRejectedEmail = (ownerName, rejectionReason) => {
-	const reasonText = rejectionReason?.trim() || "Please review your submitted documents and try again.";
+	const reasonText =
+		(typeof rejectionReason === "string" ? rejectionReason.trim() : rejectionReason) ||
+		"Please review your submitted documents and try again.";
+	const safeOwnerName = escapeHtml(ownerName);
+	const safeReasonText = escapeHtml(reasonText);
 	return {
 		subject: "Update on your Roomies verification request",
 		text:
@@ -225,15 +233,14 @@ export const buildVerificationRejectedEmail = (ownerName, rejectionReason) => {
             <td style="padding:36px 40px 32px;">
               <p style="margin:0 0 8px; font-size:16px; font-weight:600; color:#18181b;">Verification update</p>
               <p style="margin:0 0 20px; font-size:14px; line-height:1.6; color:#52525b;">
-                Hi ${ownerName}, we've reviewed your verification request but were unable to approve it
-                with the documents currently on file.
+                Hi ${safeOwnerName}, we've reviewed your verification request but were unable to approve it with the documents currently on file.
               </p>
               <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:24px;">
                 <tr>
                   <td style="background-color:#fef2f2; border-left:3px solid #ef4444; border-radius:4px; padding:16px 20px;">
                     <p style="margin:0 0 4px; font-size:11px; font-weight:600; letter-spacing:1px; text-transform:uppercase; color:#dc2626;">Reason</p>
-                    <p style="margin:0; font-size:14px; color:#18181b; line-height:1.5;">${reasonText}</p>
-                  </td>
+                    <p style="margin:0; font-size:14px; color:#18181b; line-height:1.5;">${safeReasonText}</p>
+					</td>
                 </tr>
               </table>
               <p style="margin:0 0 28px; font-size:14px; line-height:1.6; color:#52525b;">
@@ -271,6 +278,9 @@ export const buildVerificationRejectedEmail = (ownerName, rejectionReason) => {
 
 export const buildVerificationPendingEmail = (ownerName, businessName) => {
 	const displayBusiness = businessName ?? "your business";
+	const safeOwnerName = escapeHtml(ownerName);
+	const safeDisplayBusiness = escapeHtml(displayBusiness);
+
 	return {
 		subject: "We received your Roomies verification documents",
 		text:
@@ -304,8 +314,8 @@ export const buildVerificationPendingEmail = (ownerName, businessName) => {
               <p style="margin:0 0 8px; font-size:22px;">📋</p>
               <p style="margin:0 0 8px; font-size:16px; font-weight:600; color:#18181b;">Documents received</p>
               <p style="margin:0 0 20px; font-size:14px; line-height:1.6; color:#52525b;">
-                Hi ${ownerName}, we've received the verification documents for
-                <strong>${displayBusiness}</strong>.
+                Hi ${safeOwnerName}, we've received the verification documents for
+                <strong>${safeDisplayBusiness}</strong>.
               </p>
               <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:24px;">
                 <tr>

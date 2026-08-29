@@ -32,7 +32,7 @@ const DEFAULT_RECENT_DAYS = 7;
 
 export const getDashboardStats = async ({ recentDays = DEFAULT_RECENT_DAYS } = {}) => {
 	const safeRecentDays =
-		Number.isFinite(recentDays) && recentDays > 0 ? Math.min(recentDays, 90) : DEFAULT_RECENT_DAYS;
+		Number.isInteger(recentDays) && recentDays > 0 ? Math.min(recentDays, 90) : DEFAULT_RECENT_DAYS;
 
 	const { rows } = await pool.query(
 		`WITH

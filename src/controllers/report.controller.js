@@ -43,6 +43,7 @@ export const getReportHistory = async (req, res, next) => {
 			cursorId,
 			limit: limit ? Number(limit) : undefined,
 		});
+		res.setHeader("Cache-Control", "no-store");
 		res.json({ status: "success", data: result });
 	} catch (err) {
 		next(err);

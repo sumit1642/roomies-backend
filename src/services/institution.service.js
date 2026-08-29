@@ -122,7 +122,8 @@ export const listInstitutions = async (filters) => {
 	const whereClause = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
 	const { rows } = await pool.query(
-		`SELECT institution_id, name, city, state, email_domain, type, created_at, updated_at, deleted_at
+		`SELECT institution_id, name, city, state, email_domain, type, created_at, updated_at, deleted_at,
+       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at
      FROM institutions
      ${whereClause}
      ORDER BY created_at DESC, institution_id ASC
@@ -136,7 +137,7 @@ export const listInstitutions = async (filters) => {
 	const nextCursor =
 		hasNextPage ?
 			{
-				cursorTime: items[items.length - 1].created_at.toISOString(),
+				cursorTime: items[items.length - 1].cursor_created_at,
 				cursorId: items[items.length - 1].institution_id,
 			}
 		:	null;

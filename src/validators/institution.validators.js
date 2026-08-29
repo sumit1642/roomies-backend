@@ -31,7 +31,15 @@ export const listInstitutionsSchema = z.object({
 		city: z.string().trim().min(1).max(100).optional(),
 		state: z.string().trim().min(1).max(100).optional(),
 		emailDomain: z.string().trim().min(1).max(100).optional(),
-		includeDeactivated: z.coerce.boolean().default(false),
+		includeDeactivated: z
+			.preprocess((val) => {
+				if (typeof val === "string") {
+					if (val.toLowerCase() === "true") return true;
+					if (val.toLowerCase() === "false") return false;
+				}
+				return val;
+			}, z.boolean())
+			.default(false),
 	}),
 });
 

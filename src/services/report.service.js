@@ -76,7 +76,7 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
        -- it across pages. to_char with US preserves all 6 fractional digits
        -- Postgres stores for TIMESTAMPTZ, round-tripped as plain text so no
        -- client-side Date parsing (and its precision loss) ever happens.
-       to_char(rr.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at,
+       to_char(rr.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at,
 
        r.overall_score,
        r.cleanliness_score,
@@ -344,7 +344,7 @@ export const getReportHistory = async ({ resolution, cursorTime, cursorId, limit
        rr.created_at                           AS submitted_at,
        rr.reviewed_at,
        rr.reviewed_by,
-       to_char(rr.reviewed_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_reviewed_at,
+       to_char(rr.reviewed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_reviewed_at,
  
        r.overall_score,
        r.review_text                           AS rating_comment,

@@ -26,6 +26,7 @@ export class BrevoSmtpSender {
 			host: "smtp-relay.brevo.com",
 			port: 587,
 			secure: false,
+			requireTLS: true,
 			auth: {
 				user: config.BREVO_SMTP_LOGIN,
 				pass: config.BREVO_SMTP_KEY,
