@@ -4,6 +4,7 @@ import { Router } from "express";
 import { authenticate } from "../middleware/authenticate.js";
 import { authorize } from "../middleware/authorize.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
+import { validate } from "../middleware/validate.js";
 import * as vc from "../controllers/verification.controller.js";
 import { getQueueSchema, getHistorySchema } from "../validators/verification.validators.js";
 export const verificationRouter = Router();
