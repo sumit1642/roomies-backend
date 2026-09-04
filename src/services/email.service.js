@@ -12,6 +12,7 @@
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { emailSender } from "../email/index.js";
+import { maskEmail } from "../email/utils.js";
 import { z } from "zod";
 import {
 	buildOtpEmail,
@@ -20,13 +21,6 @@ import {
 	buildVerificationRejectedEmail,
 	buildVerificationPendingEmail,
 } from "../email/templates.js";
-
-const maskEmail = (email) => {
-	const [local, domain] = email.split("@");
-	if (!domain) return "****";
-	const prefix = local?.length > 0 ? local[0] : "*";
-	return `${prefix}****@${domain}`;
-};
 
 const assertValidRecipient = (to) => {
 	if (!z.email().safeParse(to).success) {

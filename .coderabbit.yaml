@@ -4,7 +4,7 @@ reviews:
     profile: strict # strict | chill | balanced
     request_changes_workflow: true
     high_level_summary: true
-    high_level_summary_placeholder: true
+    high_level_summary_placeholder: "@coderabbitai summary"
     auto_review:
         enabled: true
         drafts: false

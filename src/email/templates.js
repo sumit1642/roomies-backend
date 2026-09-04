@@ -9,6 +9,8 @@
 // here as the single source of truth for all providers, since the visual
 // difference was never a deliberate provider-specific design decision).
 
+import { escapeHtml } from "./utils.js";
+
 export const buildOtpEmail = (otp) => ({
 	subject: "Your Roomies verification code",
 	text: `Your Roomies verification code is: ${otp}\n\nThis code expires in 10 minutes. Do not share it with anyone.\n\nIf you did not request this code, you can safely ignore this email.`,

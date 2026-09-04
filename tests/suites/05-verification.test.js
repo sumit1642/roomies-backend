@@ -156,6 +156,19 @@ describe("GET /verification/queue — admin", () => {
 		expect(res.status).toBe(401);
 	});
 
+	test("rejects cursorTime without cursorId", async () => {
+		const { agent: adminAgent, user: admin } = await registerPgOwner({
+			email: uniqueEmail("queue-partial-cursor-admin"),
+		});
+		await makeAdmin(admin.userId);
+
+		const res = await adminAgent
+			.get("/api/v1/verification/queue")
+			.query({ cursorTime: new Date().toISOString() });
+
+		expect(res.status).toBe(400);
+	});
+
 	test("supports cursor pagination", async () => {
 		const { agent: adminAgent, user: admin } = await registerPgOwner({
 			email: uniqueEmail("queue-paginate-admin"),

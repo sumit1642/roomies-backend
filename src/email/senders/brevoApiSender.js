@@ -11,13 +11,7 @@
 import { config } from "../../config/env.js";
 import { logger } from "../../logger/index.js";
 import { AppError } from "../../middleware/errorHandler.js";
-
-const maskEmail = (email) => {
-	const [local, domain] = email.split("@");
-	if (!domain) return "****";
-	const prefix = local?.length > 0 ? local[0] : "*";
-	return `${prefix}****@${domain}`;
-};
+import { maskEmail } from "../utils.js";
 
 export class BrevoApiSender {
 	constructor() {
@@ -50,6 +44,7 @@ export class BrevoApiSender {
 				logger.error({ to: maskedTo }, "BrevoApiSender: request timed out after 15s");
 				throw new AppError("Email delivery timed out — try again shortly", 504);
 			}
+			logger.error({ err, to: maskedTo, provider: "brevo-api" }, "BrevoApiSender: request failed");
 			throw new AppError("Failed to send email via Brevo API — try again shortly", 502);
 		}
 

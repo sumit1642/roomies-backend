@@ -12,7 +12,7 @@ export const verificationRouter = Router();
 verificationRouter.post("/submit", authenticate, authorize("pg_owner"), vc.submitDocument);
 
 // ── Admin routes ───────────────────────────────────────────────────────────────
-verificationRouter.get("/queue", authenticate, ...requireAdmin, vc.getVerificationQueue);
+verificationRouter.get("/queue", authenticate, ...requireAdmin, validate(getQueueSchema), vc.getVerificationQueue);
 verificationRouter.get(
 	"/history",
 	authenticate,

@@ -12,13 +12,7 @@ import nodemailer from "nodemailer";
 import { config } from "../../config/env.js";
 import { logger } from "../../logger/index.js";
 import { AppError } from "../../middleware/errorHandler.js";
-
-const maskEmail = (email) => {
-	const [local, domain] = email.split("@");
-	if (!domain) return "****";
-	const prefix = local?.length > 0 ? local[0] : "*";
-	return `${prefix}****@${domain}`;
-};
+import { maskEmail } from "../utils.js";
 
 export class BrevoSmtpSender {
 	constructor() {
