@@ -33,3 +33,19 @@ export const resolveReport = async (req, res, next) => {
 		next(err);
 	}
 };
+
+export const getReportHistory = async (req, res, next) => {
+	try {
+		const { resolution, cursorTime, cursorId, limit } = req.query;
+		const result = await reportService.getReportHistory({
+			resolution,
+			cursorTime,
+			cursorId,
+			limit: limit ? Number(limit) : undefined,
+		});
+		res.setHeader("Cache-Control", "no-store");
+		res.json({ status: "success", data: result });
+	} catch (err) {
+		next(err);
+	}
+};

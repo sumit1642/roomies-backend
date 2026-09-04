@@ -76,7 +76,7 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
        -- it across pages. to_char with US preserves all 6 fractional digits
        -- Postgres stores for TIMESTAMPTZ, round-tripped as plain text so no
        -- client-side Date parsing (and its precision loss) ever happens.
-       to_char(rr.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at,
+       to_char(rr.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at,
 
        r.overall_score,
        r.cleanliness_score,
@@ -304,4 +304,164 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 	} finally {
 		client.release();
 	}
+};
+
+export const getReportHistory = async ({ resolution, cursorTime, cursorId, limit = 20 }) => {
+	const safeLimit = Math.min(100, Math.max(1, Number(limit) || 20));
+
+	const clauses = [`rr.status != 'open'`, `rr.deleted_at IS NULL`];
+	const params = [];
+	let p = 1;
+
+	if (resolution !== undefined) {
+		clauses.push(`rr.status = $${p}::report_status_enum`);
+		params.push(resolution);
+		p++;
+	}
+
+	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
+	if (hasCursor) {
+		// reviewed_at is set alongside status whenever resolveReport transitions
+		// out of 'open' (see report.service.js's resolveReport UPDATE), so it is
+		// never NULL for any row this query can return.
+		clauses.push(`(rr.reviewed_at, rr.report_id) < ($${p}::timestamptz, $${p + 1}::uuid)`);
+		params.push(cursorTime, cursorId);
+		p += 2;
+	}
+
+	params.push(safeLimit + 1);
+	const limitParam = p;
+
+	const { rows } = await pool.query(
+		`SELECT
+       rr.report_id,
+       rr.reporter_id,
+       rr.rating_id,
+       rr.reason,
+       rr.explanation,
+       rr.status,
+       rr.admin_notes,
+       rr.created_at                           AS submitted_at,
+       rr.reviewed_at,
+       rr.reviewed_by,
+       to_char(rr.reviewed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_reviewed_at,
+ 
+       r.overall_score,
+       r.review_text                           AS rating_comment,
+       r.reviewee_type,
+       r.reviewee_id,
+       r.is_visible                            AS rating_is_visible,
+ 
+       COALESCE(sp_rep.full_name, pop_rep.owner_full_name, u_rep.email)
+                                               AS reporter_name,
+ 
+       COALESCE(sp_rev.full_name, pop_rev.owner_full_name, u_rev.email)
+                                               AS reviewer_name,
+ 
+       COALESCE(sp_reviewedby.full_name, pop_reviewedby.owner_full_name, u_reviewedby.email)
+                                               AS reviewed_by_name,
+ 
+       CASE
+         WHEN r.reviewee_type = 'user'
+         THEN COALESCE(sp_rvee.full_name, pop_rvee.owner_full_name, u_rvee.email)
+         ELSE p_rvee.property_name
+       END                                     AS reviewee_name
+ 
+     FROM rating_reports rr
+ 
+     LEFT JOIN ratings r
+       ON r.rating_id   = rr.rating_id
+      AND r.deleted_at  IS NULL
+ 
+     LEFT JOIN users u_rep
+       ON u_rep.user_id    = rr.reporter_id
+      AND u_rep.deleted_at IS NULL
+     LEFT JOIN student_profiles sp_rep
+       ON sp_rep.user_id    = rr.reporter_id
+      AND sp_rep.deleted_at IS NULL
+     LEFT JOIN pg_owner_profiles pop_rep
+       ON pop_rep.user_id   = rr.reporter_id
+      AND pop_rep.deleted_at IS NULL
+ 
+     LEFT JOIN users u_rev
+       ON u_rev.user_id    = r.reviewer_id
+      AND u_rev.deleted_at IS NULL
+     LEFT JOIN student_profiles sp_rev
+       ON sp_rev.user_id    = r.reviewer_id
+      AND sp_rev.deleted_at IS NULL
+     LEFT JOIN pg_owner_profiles pop_rev
+       ON pop_rev.user_id   = r.reviewer_id
+      AND pop_rev.deleted_at IS NULL
+ 
+     LEFT JOIN users u_reviewedby
+       ON u_reviewedby.user_id    = rr.reviewed_by
+      AND u_reviewedby.deleted_at IS NULL
+     LEFT JOIN student_profiles sp_reviewedby
+       ON sp_reviewedby.user_id    = rr.reviewed_by
+      AND sp_reviewedby.deleted_at IS NULL
+     LEFT JOIN pg_owner_profiles pop_reviewedby
+       ON pop_reviewedby.user_id   = rr.reviewed_by
+      AND pop_reviewedby.deleted_at IS NULL
+ 
+     LEFT JOIN users u_rvee
+       ON u_rvee.user_id    = r.reviewee_id
+      AND r.reviewee_type   = 'user'
+      AND u_rvee.deleted_at IS NULL
+     LEFT JOIN student_profiles sp_rvee
+       ON sp_rvee.user_id    = r.reviewee_id
+      AND r.reviewee_type    = 'user'
+      AND sp_rvee.deleted_at IS NULL
+     LEFT JOIN pg_owner_profiles pop_rvee
+       ON pop_rvee.user_id   = r.reviewee_id
+      AND r.reviewee_type    = 'user'
+      AND pop_rvee.deleted_at IS NULL
+ 
+     LEFT JOIN properties p_rvee
+       ON p_rvee.property_id  = r.reviewee_id
+      AND r.reviewee_type     = 'property'
+      AND p_rvee.deleted_at   IS NULL
+ 
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY rr.reviewed_at DESC, rr.report_id DESC
+     LIMIT $${limitParam}`,
+		params,
+	);
+
+	const hasNextPage = rows.length > safeLimit;
+	const items = hasNextPage ? rows.slice(0, safeLimit) : rows;
+
+	const nextCursor =
+		hasNextPage && items.length > 0 ?
+			{
+				cursorTime: items[items.length - 1].cursor_reviewed_at,
+				cursorId: items[items.length - 1].report_id,
+			}
+		:	null;
+
+	return {
+		items: items.map((row) => ({
+			reportId: row.report_id,
+			reporterId: row.reporter_id,
+			ratingId: row.rating_id,
+			reason: row.reason,
+			explanation: row.explanation,
+			status: row.status,
+			adminNotes: row.admin_notes,
+			submittedAt: row.submitted_at,
+			reviewedAt: row.reviewed_at,
+			reviewedBy: row.reviewed_by,
+			reviewedByName: row.reviewed_by_name,
+			rating: {
+				overallScore: row.overall_score,
+				comment: row.rating_comment,
+				revieweeType: row.reviewee_type,
+				revieweeId: row.reviewee_id,
+				isVisible: row.rating_is_visible,
+				reviewer: { fullName: row.reviewer_name },
+				reviewee: { fullName: row.reviewee_name },
+			},
+			reporter: { fullName: row.reporter_name },
+		})),
+		nextCursor,
+	};
 };

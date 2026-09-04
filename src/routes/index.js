@@ -19,6 +19,10 @@ import { verificationRouter } from "./verification.js";
 import { reportRouter } from "./report.js";
 import { config } from "../config/env.js";
 import { adminUserRouter } from "./adminUser.js";
+import { institutionRouter } from "./institution.js";
+import { adminAmenityRouter } from "./adminAmenity.js";
+import { adminListingRouter } from "./adminListing.js";
+import { adminDashboardRouter } from "./adminDashboard.js";
 
 export const rootRouter = Router();
 
@@ -40,6 +44,10 @@ rootRouter.use("/saved-searches", savedSearchRouter);
 rootRouter.use("/verification", verificationRouter);
 rootRouter.use("/reports", reportRouter);
 rootRouter.use("/admin/users", adminUserRouter);
+rootRouter.use("/admin/institutions", institutionRouter);
+rootRouter.use("/admin/amenities", adminAmenityRouter);
+rootRouter.use("/admin/listings", adminListingRouter);
+rootRouter.use("/admin/dashboard", adminDashboardRouter);
 
 if (config.NODE_ENV !== "production") {
 	rootRouter.use("/test-utils", testUtilsRouter);

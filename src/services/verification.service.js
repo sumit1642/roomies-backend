@@ -110,7 +110,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
       vr.document_type,
       vr.document_url,
       vr.submitted_at,
-      to_char(vr.submitted_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_submitted_at,
+      to_char(vr.submitted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_submitted_at,
       pop.business_name,
       pop.owner_full_name,
       pop.verification_status,
@@ -138,6 +138,104 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 		:	null;
 
 	return { items, nextCursor };
+};
+
+// Insert this function anywhere after getVerificationQueue. It mirrors that
+// function's cursor-pagination shape exactly (same to_char(...,'US') fix as
+// report.service.js's getReportQueue, since node-postgres truncates
+// TIMESTAMPTZ to millisecond precision when parsing into a JS Date).
+//
+// Difference from getVerificationQueue: status IN ('verified','rejected')
+// instead of hardcoded 'pending', and orders DESC (most recently resolved
+// first) since this is a review-the-past view, not a work queue.
+
+export const getVerificationHistory = async ({ status, cursorTime, cursorId, limit = 20 }) => {
+	const safeLimit = Math.min(Math.max(1, Number(limit) || 20), 100);
+
+	const clauses = [`vr.status IN ('verified', 'rejected')`, `vr.deleted_at IS NULL`];
+	const params = [];
+	let p = 1;
+
+	if (status !== undefined) {
+		clauses.push(`vr.status = $${p}::verification_status_enum`);
+		params.push(status);
+		p++;
+	}
+
+	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
+	if (hasCursor) {
+		// reviewed_at is the resolution timestamp — NULL is impossible here since
+		// both 'verified' and 'rejected' are only ever set alongside reviewed_at = NOW()
+		// (see approveRequest/rejectRequest), so no COALESCE needed.
+		clauses.push(`(vr.reviewed_at, vr.request_id) < ($${p}::timestamptz, $${p + 1}::uuid)`);
+		params.push(cursorTime, cursorId);
+		p += 2;
+	}
+
+	params.push(safeLimit + 1);
+	const limitParam = p;
+
+	const { rows } = await pool.query(
+		`SELECT
+      vr.request_id,
+      vr.user_id,
+      vr.document_type,
+      vr.document_url,
+      vr.status,
+      vr.submitted_at,
+      vr.reviewed_at,
+      vr.reviewed_by,
+      vr.admin_notes,
+      vr.rejection_reason,
+      to_char(vr.reviewed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_reviewed_at,
+      pop.business_name,
+      pop.owner_full_name,
+      u.email,
+      COALESCE(sp_reviewer.full_name, pop_reviewer.owner_full_name, u_reviewer.email) AS reviewed_by_name
+    FROM verification_requests vr
+    JOIN pg_owner_profiles pop ON pop.user_id = vr.user_id
+    JOIN users u ON u.user_id = vr.user_id
+    LEFT JOIN users u_reviewer ON u_reviewer.user_id = vr.reviewed_by AND u_reviewer.deleted_at IS NULL
+    LEFT JOIN student_profiles sp_reviewer
+      ON sp_reviewer.user_id = vr.reviewed_by AND sp_reviewer.deleted_at IS NULL
+    LEFT JOIN pg_owner_profiles pop_reviewer
+      ON pop_reviewer.user_id = vr.reviewed_by AND pop_reviewer.deleted_at IS NULL
+    WHERE ${clauses.join(" AND ")}
+    ORDER BY vr.reviewed_at DESC, vr.request_id DESC
+    LIMIT $${limitParam}`,
+		params,
+	);
+
+	const hasNextPage = rows.length > safeLimit;
+	const items = hasNextPage ? rows.slice(0, safeLimit) : rows;
+
+	const nextCursor =
+		hasNextPage ?
+			{
+				cursorTime: items[items.length - 1].cursor_reviewed_at,
+				cursorId: items[items.length - 1].request_id,
+			}
+		:	null;
+
+	return {
+		items: items.map((row) => ({
+			requestId: row.request_id,
+			userId: row.user_id,
+			documentType: row.document_type,
+			documentUrl: row.document_url,
+			status: row.status,
+			submittedAt: row.submitted_at,
+			reviewedAt: row.reviewed_at,
+			reviewedBy: row.reviewed_by,
+			reviewedByName: row.reviewed_by_name,
+			adminNotes: row.admin_notes,
+			rejectionReason: row.rejection_reason,
+			businessName: row.business_name,
+			ownerFullName: row.owner_full_name,
+			email: row.email,
+		})),
+		nextCursor,
+	};
 };
 
 export const approveRequest = async (adminUserId, requestId, { adminNotes } = {}) => {

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { keysetPaginationQuerySchema } from "./pagination.validators.js";
+import { keysetPaginationQuerySchema, buildKeysetPaginationQuerySchema } from "./pagination.validators.js";
 
 export const submitReportSchema = z.object({
 	params: z.object({
@@ -15,6 +15,11 @@ export const submitReportSchema = z.object({
 
 export const getReportQueueSchema = z.object({
 	query: keysetPaginationQuerySchema,
+});
+export const getReportHistorySchema = z.object({
+	query: buildKeysetPaginationQuerySchema({
+		resolution: z.enum(["resolved_removed", "resolved_kept"]).optional(),
+	}),
 });
 
 export const resolveReportSchema = z.object({

@@ -46,3 +46,18 @@ export const rejectRequest = async (req, res, next) => {
 		next(err);
 	}
 };
+
+export const getVerificationHistory = async (req, res, next) => {
+	try {
+		const { status, cursorTime, cursorId, limit } = req.query;
+		const result = await verificationService.getVerificationHistory({
+			status,
+			cursorTime,
+			cursorId,
+			limit: limit ? Number(limit) : undefined,
+		});
+		res.json({ status: "success", data: result });
+	} catch (err) {
+		next(err);
+	}
+};
