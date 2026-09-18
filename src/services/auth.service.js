@@ -38,12 +38,12 @@ const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
 const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
 export const SESSION_TOKEN_PURPOSE = "session_access";
 
-const issueAccessToken = (userId, email, roles, sid) =>
+export const issueAccessToken = (userId, email, roles, sid) =>
 	jwt.sign({ userId, email, roles, sid, purpose: SESSION_TOKEN_PURPOSE }, config.JWT_SECRET, {
 		expiresIn: ACCESS_TTL_SECONDS,
 	});
 
-const issueRefreshToken = (userId, sid) =>
+export const issueRefreshToken = (userId, sid) =>
 	jwt.sign({ userId, sid, jti: crypto.randomUUID() }, config.JWT_REFRESH_SECRET, {
 		expiresIn: REFRESH_TTL_SECONDS,
 	});
@@ -97,6 +97,29 @@ export const casRefreshToken = async (
 		arguments: [expectedOldToken, newToken, String(ttl), sid, String(expiryTimestamp)],
 	});
 	return result === 1;
+};
+
+// Shared by authService.refresh() and authenticate.js's silent-refresh path so
+// both issue tokens the same way (same claims, same jti) and both go through
+// the same CAS rotation. Returns null when the CAS fails (old token was
+// already rotated/replayed), so callers can treat that as "refresh failed"
+// without needing to know CAS internals.
+export const rotateSession = async (userId, sid, email, roles, isEmailVerified, oldRefreshToken) => {
+	const accessToken = issueAccessToken(userId, email, roles, sid);
+	const newRefreshToken = issueRefreshToken(userId, sid);
+	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL_SECONDS;
+
+	const rotated = await casRefreshToken(
+		userId,
+		sid,
+		oldRefreshToken,
+		newRefreshToken,
+		REFRESH_TTL_SECONDS,
+		expiryTimestamp,
+	);
+	if (!rotated) return null;
+
+	return { accessToken, refreshToken: newRefreshToken, user: { userId, email, roles, isEmailVerified }, sid };
 };
 
 export const verifyRefreshTokenPayload = async (incomingRefreshToken) => {
@@ -442,19 +465,15 @@ export const refresh = async (incomingRefreshToken) => {
 	const { rows: roleRows } = await pool.query(`SELECT role_name FROM user_roles WHERE user_id = $1`, [userId]);
 	const roles = roleRows.map((r) => r.role_name);
 
-	const tokens = buildTokenResponse(userId, sid, userRows[0].email, roles, userRows[0].is_email_verified);
-
-	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL_SECONDS;
-
-	const rotated = await casRefreshToken(
+	const tokens = await rotateSession(
 		userId,
 		sid,
+		userRows[0].email,
+		roles,
+		userRows[0].is_email_verified,
 		incomingRefreshToken,
-		tokens.refreshToken,
-		REFRESH_TTL_SECONDS,
-		expiryTimestamp,
 	);
-	if (!rotated) {
+	if (!tokens) {
 		throw new AppError("Refresh token is invalid or has been revoked", 401);
 	}
 

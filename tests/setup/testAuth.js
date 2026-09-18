@@ -9,6 +9,8 @@
 
 import request from "supertest";
 import { app } from "../../src/app.js";
+import jwt from "jsonwebtoken";
+import { config } from "../../src/config/env.js";
 
 export const registerUser = async ({ role = "student", ...overrides } = {}) => {
 	const agent = request.agent(app);
@@ -36,3 +38,17 @@ export const registerUser = async ({ role = "student", ...overrides } = {}) => {
 // forbidden cross-user access, or a poster + an interested student).
 export const registerStudent = (overrides = {}) => registerUser({ role: "student", ...overrides });
 export const registerPgOwner = (overrides = {}) => registerUser({ role: "pg_owner", ...overrides });
+// Builds an already-expired access-token JWT with the same claim shape
+// issueAccessToken produces, for exercising authenticate.js's silent-refresh
+// path directly (bypassing the normal ~15m wait for a real token to expire).
+export const expiredAccessToken = ({ userId, email, roles = [], sid }) =>
+	jwt.sign({ userId, email, roles, sid, purpose: "session_access" }, config.JWT_SECRET, { expiresIn: -10 });
+
+// Fetches the sid of the agent's current session via GET /auth/sessions,
+// which every registered agent already has exactly one of.
+export const getCurrentSid = async (agent) => {
+	const res = await agent.get("/api/v1/auth/sessions");
+	const current = res.body.data.find((s) => s.isCurrent);
+	if (!current) throw new Error("getCurrentSid: no current session found");
+	return current.sid;
+};

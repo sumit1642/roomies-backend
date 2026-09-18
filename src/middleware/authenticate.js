@@ -4,8 +4,12 @@ import { AppError } from "./errorHandler.js";
 import { findUserById } from "../db/utils/auth.js";
 import { redis } from "../cache/client.js";
 import { pool } from "../db/client.js";
-import { casRefreshToken, parseTtlSeconds, SESSION_TOKEN_PURPOSE, verifyRefreshTokenPayload } from "../services/auth.service.js";
-
+import {
+	parseTtlSeconds,
+	SESSION_TOKEN_PURPOSE,
+	verifyRefreshTokenPayload,
+	rotateSession,
+} from "../services/auth.service.js";
 const INACTIVE_STATUSES = new Set(["suspended", "banned", "deactivated"]);
 const ACCESS_TTL_SECONDS = parseTtlSeconds(config.JWT_EXPIRES_IN, 15 * 60);
 const REFRESH_TTL_SECONDS = parseTtlSeconds(config.JWT_REFRESH_EXPIRES_IN, 7 * 24 * 60 * 60);
@@ -75,38 +79,20 @@ const attemptSilentRefresh = async (req, res) => {
 
 	const roles = roleRows.map((r) => r.role_name);
 
-	const newAccessToken = jwt.sign(
-		{
-			userId: refreshPayload.userId,
-			email: userRows[0].email,
-			roles,
-			sid: refreshPayload.sid,
-			purpose: SESSION_TOKEN_PURPOSE,
-		},
-		config.JWT_SECRET,
-		{ expiresIn: ACCESS_TTL_SECONDS },
-	);
-	const newRefreshToken = jwt.sign(
-		{ userId: refreshPayload.userId, sid: refreshPayload.sid },
-		config.JWT_REFRESH_SECRET,
-		{ expiresIn: REFRESH_TTL_SECONDS },
-	);
-	const expiryTimestamp = Math.floor(Date.now() / 1000) + REFRESH_TTL_SECONDS;
-
-	const rotated = await casRefreshToken(
+	const rotated = await rotateSession(
 		refreshPayload.userId,
 		refreshPayload.sid,
+		userRows[0].email,
+		roles,
+		userRows[0].is_email_verified,
 		refreshToken,
-		newRefreshToken,
-		REFRESH_TTL_SECONDS,
-		expiryTimestamp,
 	);
 	if (!rotated) {
 		return null;
 	}
 
-	res.cookie("accessToken", newAccessToken, ACCESS_COOKIE_OPTIONS);
-	res.cookie("refreshToken", newRefreshToken, REFRESH_COOKIE_OPTIONS);
+	res.cookie("accessToken", rotated.accessToken, ACCESS_COOKIE_OPTIONS);
+	res.cookie("refreshToken", rotated.refreshToken, REFRESH_COOKIE_OPTIONS);
 
 	return { userId: refreshPayload.userId, sid: refreshPayload.sid, purpose: SESSION_TOKEN_PURPOSE };
 };

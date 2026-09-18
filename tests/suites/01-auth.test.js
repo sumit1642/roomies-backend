@@ -12,8 +12,7 @@ import request from "supertest";
 import jwt from "jsonwebtoken";
 import { app } from "../../src/app.js";
 import { config } from "../../src/config/env.js";
-import { registerStudent } from "../setup/testAuth.js";
-
+import { registerStudent, expiredAccessToken, getCurrentSid } from "../setup/testAuth.js";
 const uniqueEmail = (label) => `${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@college.edu`;
 
 describe("POST /auth/register", () => {
@@ -215,7 +214,113 @@ describe("POST /auth/refresh", () => {
 		expect(replay.status).toBe(401);
 	});
 });
+describe("silent refresh (expired access cookie, valid refresh cookie)", () => {
+	// Registers a fresh user directly (not via registerStudent's agent) so we
+	// have the raw refreshToken value in hand, then builds a request with an
+	// explicit Cookie header: a hand-crafted EXPIRED accessToken paired with
+	// the REAL refreshToken. This bypasses supertest's agent jar entirely —
+	// there is no reliable public API to overwrite a single cookie in an
+	// existing agent jar, so building the header directly is more explicit
+	// and less fragile than fighting the jar's internals.
+	const registerRawWithSession = async (email) => {
+		const regRes = await request(app).post("/api/v1/auth/register").send({
+			email,
+			password: "TestPass123!",
+			role: "student",
+			fullName: "Silent Refresh Test",
+		});
+		const user = regRes.body.data.user;
+		const setCookies = regRes.headers["set-cookie"];
+		const refreshToken = setCookies
+			.find((c) => c.startsWith("refreshToken="))
+			.split(";")[0]
+			.split("=")[1];
 
+		// sid isn't in the register response body, so decode it straight off
+		// the issued refresh token rather than making a second authenticated
+		// call just to look it up.
+		const sid = jwt.decode(refreshToken).sid;
+
+		return { user, refreshToken, sid };
+	};
+
+	const meWithExpiredAccess = ({ user, refreshToken, sid }) => {
+		const expired = expiredAccessToken({ userId: user.userId, email: user.email, roles: user.roles, sid });
+		return request(app)
+			.get("/api/v1/auth/me")
+			.set("Cookie", [`accessToken=${expired}`, `refreshToken=${refreshToken}`]);
+	};
+
+	test("silently refreshes and returns 200 with new cookies", async () => {
+		const session = await registerRawWithSession(uniqueEmail("silent-ok"));
+
+		const res = await meWithExpiredAccess(session);
+
+		expect(res.status).toBe(200);
+		const cookies = res.headers["set-cookie"];
+		expect(cookies).toBeDefined();
+		expect(cookies.some((c) => c.startsWith("accessToken="))).toBe(true);
+		expect(cookies.some((c) => c.startsWith("refreshToken="))).toBe(true);
+	});
+
+	test("rotated refresh token contains a jti", async () => {
+		const session = await registerRawWithSession(uniqueEmail("silent-jti"));
+
+		const res = await meWithExpiredAccess(session);
+		const rotatedCookie = res.headers["set-cookie"].find((c) => c.startsWith("refreshToken="));
+		const rotatedToken = rotatedCookie.split(";")[0].split("=")[1];
+		const decoded = jwt.decode(rotatedToken);
+
+		expect(decoded.jti).toEqual(expect.any(String));
+		expect(decoded.jti.length).toBeGreaterThan(0);
+	});
+
+	test("rotated refresh token differs from the original", async () => {
+		const session = await registerRawWithSession(uniqueEmail("silent-diff"));
+
+		const res = await meWithExpiredAccess(session);
+		const rotatedCookie = res.headers["set-cookie"].find((c) => c.startsWith("refreshToken="));
+		const rotatedToken = rotatedCookie.split(";")[0].split("=")[1];
+
+		expect(rotatedToken).not.toBe(session.refreshToken);
+	});
+
+	test("original refresh token is dead after silent refresh (single-use)", async () => {
+		const session = await registerRawWithSession(uniqueEmail("silent-replay-raw"));
+
+		const meRes = await meWithExpiredAccess(session);
+		expect(meRes.status).toBe(200);
+
+		const replay = await request(app).post("/api/v1/auth/refresh").send({ refreshToken: session.refreshToken });
+
+		expect(replay.status).toBe(401);
+	});
+
+	test("expired token via Authorization header does NOT silently refresh (cookie-only feature)", async () => {
+		const session = await registerRawWithSession(uniqueEmail("silent-header-noauth"));
+		const expired = expiredAccessToken({
+			userId: session.user.userId,
+			email: session.user.email,
+			roles: session.user.roles,
+			sid: session.sid,
+		});
+
+		const res = await request(app).get("/api/v1/auth/me").set("Authorization", `Bearer ${expired}`);
+
+		expect(res.status).toBe(401);
+	});
+
+	test("suspended account blocks silent refresh even with a valid refresh cookie", async () => {
+		const session = await registerRawWithSession(uniqueEmail("silent-suspended"));
+
+		const { pool } = await import("../../src/db/client.js");
+		await pool.query(`UPDATE users SET account_status = 'suspended' WHERE user_id = $1`, [session.user.userId]);
+
+		const res = await meWithExpiredAccess(session);
+
+		expect(res.status).toBe(401);
+	});
+});
 describe("sessions: GET /auth/sessions, DELETE /auth/sessions/:sid", () => {
 	test("lists the current session after login", async () => {
 		const { agent } = await registerStudent({ email: uniqueEmail("sessions-list") });
