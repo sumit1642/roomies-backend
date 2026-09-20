@@ -1,7 +1,9 @@
+// src/services/connection.service.js
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { enqueueNotification } from "../workers/notificationQueue.js";
+import { cursorText, clampLimit, buildPage } from "../db/utils/pagination.js";
 
 export const confirmConnection = async (callerId, connectionId) => {
 	let client;
@@ -221,7 +223,7 @@ export const getConnection = async (callerId, connectionId) => {
 
 export const getMyConnections = async (userId, filters) => {
 	const { confirmationStatus, connectionType, cursorTime, cursorId, limit: rawLimit = 20 } = filters;
-	const limit = Math.min(Math.max(1, rawLimit), 100);
+	const limit = clampLimit(rawLimit);
 
 	const clauses = [`(c.initiator_id = $1 OR c.counterpart_id = $1)`, `c.deleted_at IS NULL`];
 	const params = [userId];
@@ -241,7 +243,9 @@ export const getMyConnections = async (userId, filters) => {
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (hasCursor) {
-		clauses.push(`(c.created_at < $${p} OR (c.created_at = $${p} AND c.connection_id > $${p + 1}::uuid))`);
+		clauses.push(
+			`(c.created_at < $${p}::timestamptz OR (c.created_at = $${p}::timestamptz AND c.connection_id > $${p + 1}::uuid))`,
+		);
 		params.push(cursorTime, cursorId);
 		p += 2;
 	}
@@ -262,6 +266,7 @@ export const getMyConnections = async (userId, filters) => {
        c.end_date,
        c.created_at,
        c.updated_at,
+       ${cursorText("c.created_at")} AS cursor_time,
 
        c.listing_id,
        l.title          AS listing_title,
@@ -306,16 +311,7 @@ export const getMyConnections = async (userId, filters) => {
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].connection_id,
-			}
-		:	null;
+	const { items, nextCursor } = buildPage(rows, limit, { idKey: "connection_id" });
 
 	return {
 		items: items.map((row) => ({
