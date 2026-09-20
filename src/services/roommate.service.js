@@ -5,14 +5,16 @@ import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { scoreUsersForUser, hasPreferences } from "../db/utils/roommateCompatibility.js";
+import { cursorText, clampLimit, buildPage } from "../db/utils/pagination.js";
 
 const MAX_BLOCKS_PER_USER = 200;
+const MAX_FEED_LIMIT = 50;
 
 // ─── getRoommateFeed ──────────────────────────────────────────────────────────
 
 export const getRoommateFeed = async (requestingUserId, filters) => {
 	const { city, cursorTime, cursorId, limit = 20 } = filters;
-	const safeLimit = Math.min(Math.max(1, Number(limit) || 20), 50);
+	const safeLimit = clampLimit(limit, { max: MAX_FEED_LIMIT });
 
 	const callerHasPrefs = await hasPreferences(requestingUserId);
 
@@ -52,7 +54,7 @@ export const getRoommateFeed = async (requestingUserId, filters) => {
 	if (hasCursor) {
 		// looking_updated_at DESC, user_id ASC tie-break (UUID ordering)
 		clauses.push(
-			`(sp.looking_updated_at < $${p} OR (sp.looking_updated_at = $${p} AND sp.user_id > $${p + 1}::uuid))`,
+			`(sp.looking_updated_at < $${p}::timestamptz OR (sp.looking_updated_at = $${p}::timestamptz AND sp.user_id > $${p + 1}::uuid))`,
 		);
 		params.push(cursorTime, cursorId);
 		p += 2;
@@ -71,6 +73,7 @@ export const getRoommateFeed = async (requestingUserId, filters) => {
        sp.course,
        sp.year_of_study,
        sp.looking_updated_at,
+       ${cursorText("sp.looking_updated_at")} AS cursor_time,
        u.average_rating,
        u.rating_count,
        i.name           AS institution_name,
@@ -87,8 +90,7 @@ export const getRoommateFeed = async (requestingUserId, filters) => {
 		params,
 	);
 
-	const hasNextPage = candidates.length > safeLimit;
-	const items = hasNextPage ? candidates.slice(0, safeLimit) : candidates;
+	const { items, nextCursor } = buildPage(candidates, safeLimit, { idKey: "user_id" });
 
 	// Fetch all preferences for candidates in one query (avoids N+1).
 	let preferenceMap = {};
@@ -121,15 +123,6 @@ export const getRoommateFeed = async (requestingUserId, filters) => {
 			}
 		}
 	}
-
-	const lastItem = hasNextPage ? items[items.length - 1] : null;
-	const nextCursor =
-		hasNextPage && lastItem?.looking_updated_at != null ?
-			{
-				cursorTime: lastItem.looking_updated_at.toISOString(),
-				cursorId: lastItem.user_id,
-			}
-		:	null;
 
 	return {
 		items: items.map((row) => ({
