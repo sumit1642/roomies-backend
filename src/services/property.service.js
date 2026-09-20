@@ -1,7 +1,9 @@
+// src/services/property.service.js
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { assertPgOwnerVerified as assertOwnerVerified } from "../db/utils/pgOwner.js";
+import { cursorText, clampLimit, buildPage } from "../db/utils/pagination.js";
 
 const bulkInsertAmenities = async (client, propertyId, amenityIds) => {
 	if (!amenityIds.length) return;
@@ -141,14 +143,15 @@ export const getProperty = async (propertyId) => {
 	return property;
 };
 
-export const listProperties = async (ownerId, { cursorTime, cursorId, limit = 20 }) => {
+export const listProperties = async (ownerId, { cursorTime, cursorId, limit: rawLimit = 20 }) => {
+	const limit = clampLimit(rawLimit);
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	const params = [ownerId, limit + 1];
 	let cursorClause = "";
 
 	if (hasCursor) {
 		params.push(cursorTime, cursorId);
-		cursorClause = `AND (p.created_at < $3 OR (p.created_at = $3 AND p.property_id > $4::uuid))`;
+		cursorClause = `AND (p.created_at < $3::timestamptz OR (p.created_at = $3::timestamptz AND p.property_id > $4::uuid))`;
 	}
 
 	const { rows } = await pool.query(
@@ -163,6 +166,7 @@ export const listProperties = async (ownerId, { cursorTime, cursorId, limit = 20
       p.rating_count,
       p.created_at,
       p.updated_at,
+      ${cursorText("p.created_at")} AS cursor_time,
       (
         SELECT COUNT(*)::int
         FROM property_amenities pa
@@ -185,18 +189,8 @@ export const listProperties = async (ownerId, { cursorTime, cursorId, limit = 20
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].property_id,
-			}
-		:	null;
-
-	return { items, nextCursor };
+	const { items, nextCursor } = buildPage(rows, limit, { idKey: "property_id" });
+	return { items: items.map(({ cursor_time, ...rest }) => rest), nextCursor };
 };
 
 export const updateProperty = async (ownerId, propertyId, body) => {
