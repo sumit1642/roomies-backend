@@ -12,6 +12,7 @@
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { cursorText, clampLimit, buildPage } from "../db/utils/pagination.js";
 
 const toCamelCase = (row) => ({
 	institutionId: row.institution_id,
@@ -81,7 +82,7 @@ export const listInstitutions = async (filters) => {
 		cursorId,
 		limit: rawLimit = 20,
 	} = filters;
-	const limit = Math.min(Math.max(1, rawLimit), 100);
+	const limit = clampLimit(rawLimit);
 
 	const clauses = [];
 	const params = [];
@@ -111,7 +112,9 @@ export const listInstitutions = async (filters) => {
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (hasCursor) {
-		clauses.push(`(created_at < $${p} OR (created_at = $${p} AND institution_id > $${p + 1}::uuid))`);
+		clauses.push(
+			`(created_at < $${p}::timestamptz OR (created_at = $${p}::timestamptz AND institution_id > $${p + 1}::uuid))`,
+		);
 		params.push(cursorTime, cursorId);
 		p += 2;
 	}
@@ -123,7 +126,7 @@ export const listInstitutions = async (filters) => {
 
 	const { rows } = await pool.query(
 		`SELECT institution_id, name, city, state, email_domain, type, created_at, updated_at, deleted_at,
-       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at
+       ${cursorText("created_at")} AS cursor_created_at
      FROM institutions
      ${whereClause}
      ORDER BY created_at DESC, institution_id ASC
@@ -131,16 +134,10 @@ export const listInstitutions = async (filters) => {
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].cursor_created_at,
-				cursorId: items[items.length - 1].institution_id,
-			}
-		:	null;
+	const { items, nextCursor } = buildPage(rows, limit, {
+		timeKey: "cursor_created_at",
+		idKey: "institution_id",
+	});
 
 	return { items: items.map(toCamelCase), nextCursor };
 };
