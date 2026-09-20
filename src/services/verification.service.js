@@ -1,6 +1,7 @@
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { cursorText, clampLimit, buildPage } from "../db/utils/pagination.js";
 
 const handleRollbackFailure = (
 	rollbackErr,
@@ -92,7 +93,8 @@ export const submitDocument = async (requestingUserId, targetUserId, { documentT
 	}
 };
 
-export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
+export const getVerificationQueue = async ({ cursorTime, cursorId, limit: rawLimit = 20 }) => {
+	const limit = clampLimit(rawLimit);
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 
 	const params = [limit + 1];
@@ -110,7 +112,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
       vr.document_type,
       vr.document_url,
       vr.submitted_at,
-      to_char(vr.submitted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_submitted_at,
+      ${cursorText("vr.submitted_at")} AS cursor_submitted_at,
       pop.business_name,
       pop.owner_full_name,
       pop.verification_status,
@@ -126,18 +128,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].cursor_submitted_at,
-				cursorId: items[items.length - 1].request_id,
-			}
-		:	null;
-
-	return { items, nextCursor };
+	return buildPage(rows, limit, { timeKey: "cursor_submitted_at", idKey: "request_id" });
 };
 
 // Insert this function anywhere after getVerificationQueue. It mirrors that
@@ -150,7 +141,7 @@ export const getVerificationQueue = async ({ cursorTime, cursorId, limit = 20 })
 // first) since this is a review-the-past view, not a work queue.
 
 export const getVerificationHistory = async ({ status, cursorTime, cursorId, limit = 20 }) => {
-	const safeLimit = Math.min(Math.max(1, Number(limit) || 20), 100);
+	const safeLimit = clampLimit(limit);
 
 	const clauses = [`vr.status IN ('verified', 'rejected')`, `vr.deleted_at IS NULL`];
 	const params = [];
@@ -187,7 +178,7 @@ export const getVerificationHistory = async ({ status, cursorTime, cursorId, lim
       vr.reviewed_by,
       vr.admin_notes,
       vr.rejection_reason,
-      to_char(vr.reviewed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_reviewed_at,
+      ${cursorText("vr.reviewed_at")} AS cursor_reviewed_at,
       pop.business_name,
       pop.owner_full_name,
       u.email,
@@ -206,16 +197,10 @@ export const getVerificationHistory = async ({ status, cursorTime, cursorId, lim
 		params,
 	);
 
-	const hasNextPage = rows.length > safeLimit;
-	const items = hasNextPage ? rows.slice(0, safeLimit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].cursor_reviewed_at,
-				cursorId: items[items.length - 1].request_id,
-			}
-		:	null;
+	const { items, nextCursor } = buildPage(rows, safeLimit, {
+		timeKey: "cursor_reviewed_at",
+		idKey: "request_id",
+	});
 
 	return {
 		items: items.map((row) => ({
