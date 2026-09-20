@@ -3,6 +3,7 @@ import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 import { enqueueNotification } from "../workers/notificationQueue.js";
+import { cursorText, clampLimit, buildPage } from "../db/utils/pagination.js";
 
 const _buildWhatsAppLink = (phone, message) => {
 	const encoded = encodeURIComponent(message);
@@ -474,7 +475,7 @@ export const getInterestRequestsForListing = async (posterId, listingId, filters
 	}
 
 	const { status, cursorTime, cursorId, limit: rawLimit = 20 } = filters;
-	const limit = Math.min(Math.max(1, rawLimit), 100);
+	const limit = clampLimit(rawLimit);
 
 	const clauses = [`ir.listing_id = $1`, `ir.deleted_at IS NULL`];
 	const params = [listingId];
@@ -488,7 +489,9 @@ export const getInterestRequestsForListing = async (posterId, listingId, filters
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (hasCursor) {
-		clauses.push(`(ir.created_at < $${p} OR (ir.created_at = $${p} AND ir.request_id > $${p + 1}::uuid))`);
+		clauses.push(
+			`(ir.created_at < $${p}::timestamptz OR (ir.created_at = $${p}::timestamptz AND ir.request_id > $${p + 1}::uuid))`,
+		);
 		params.push(cursorTime, cursorId);
 		p += 2;
 	}
@@ -503,6 +506,7 @@ export const getInterestRequestsForListing = async (posterId, listingId, filters
        ir.message,
        ir.created_at,
        ir.updated_at,
+       ${cursorText("ir.created_at")} AS cursor_time,
        COALESCE(sp.full_name, u.email) AS sender_name,
        sp.profile_photo_url            AS sender_photo_url,
        u.average_rating                AS sender_rating
@@ -519,16 +523,7 @@ export const getInterestRequestsForListing = async (posterId, listingId, filters
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].request_id,
-			}
-		:	null;
+	const { items, nextCursor } = buildPage(rows, limit, { idKey: "request_id" });
 
 	return {
 		items: items.map((row) => ({
@@ -550,7 +545,8 @@ export const getInterestRequestsForListing = async (posterId, listingId, filters
 };
 
 export const getMyInterestRequests = async (studentId, filters) => {
-	const { status, cursorTime, cursorId, limit = 20 } = filters;
+	const { status, cursorTime, cursorId, limit: rawLimit = 20 } = filters;
+	const limit = clampLimit(rawLimit);
 
 	const clauses = [`ir.sender_id = $1`, `ir.deleted_at IS NULL`];
 	const params = [studentId];
@@ -564,7 +560,9 @@ export const getMyInterestRequests = async (studentId, filters) => {
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (hasCursor) {
-		clauses.push(`(ir.created_at < $${p} OR (ir.created_at = $${p} AND ir.request_id > $${p + 1}::uuid))`);
+		clauses.push(
+			`(ir.created_at < $${p}::timestamptz OR (ir.created_at = $${p}::timestamptz AND ir.request_id > $${p + 1}::uuid))`,
+		);
 		params.push(cursorTime, cursorId);
 		p += 2;
 	}
@@ -579,6 +577,7 @@ export const getMyInterestRequests = async (studentId, filters) => {
        ir.message,
        ir.created_at,
        ir.updated_at,
+       ${cursorText("ir.created_at")} AS cursor_time,
        l.title          AS listing_title,
        l.city           AS listing_city,
        l.listing_type   AS listing_type,
@@ -593,16 +592,7 @@ export const getMyInterestRequests = async (studentId, filters) => {
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].request_id,
-			}
-		:	null;
+	const { items, nextCursor } = buildPage(rows, limit, { idKey: "request_id" });
 
 	return {
 		items: items.map((row) => ({
