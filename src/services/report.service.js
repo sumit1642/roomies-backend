@@ -1,6 +1,7 @@
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { cursorText, clampLimit, buildPage } from "../db/utils/pagination.js";
 
 export const submitReport = async (reporterId, ratingId, { reason, explanation }) => {
 	const { rows } = await pool.query(
@@ -41,7 +42,7 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 	if (hasPartialCursor) {
 		throw new AppError("cursorTime and cursorId must be provided together", 400);
 	}
-	const safeLimit = Math.min(100, Math.max(1, Number(limit) || 1));
+	const safeLimit = clampLimit(limit, { fallback: 1 });
 
 	const params = [safeLimit + 1];
 	let cursorClause = "";
@@ -76,7 +77,7 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
        -- it across pages. to_char with US preserves all 6 fractional digits
        -- Postgres stores for TIMESTAMPTZ, round-tripped as plain text so no
        -- client-side Date parsing (and its precision loss) ever happens.
-       to_char(rr.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at,
+       ${cursorText("rr.created_at")} AS cursor_created_at,
 
        r.overall_score,
        r.cleanliness_score,
@@ -161,16 +162,10 @@ export const getReportQueue = async ({ cursorTime, cursorId, limit = 20 }) => {
 		params,
 	);
 
-	const hasNextPage = rows.length > safeLimit;
-	const items = hasNextPage ? rows.slice(0, safeLimit) : rows;
-
-	const nextCursor =
-		hasNextPage && items.length > 0 ?
-			{
-				cursorTime: items[items.length - 1].cursor_created_at,
-				cursorId: items[items.length - 1].report_id,
-			}
-		:	null;
+	const { items, nextCursor } = buildPage(rows, safeLimit, {
+		timeKey: "cursor_created_at",
+		idKey: "report_id",
+	});
 
 	return {
 		items: items.map((row) => ({
@@ -307,7 +302,7 @@ export const resolveReport = async (adminId, reportId, { resolution, adminNotes 
 };
 
 export const getReportHistory = async ({ resolution, cursorTime, cursorId, limit = 20 }) => {
-	const safeLimit = Math.min(100, Math.max(1, Number(limit) || 20));
+	const safeLimit = clampLimit(limit);
 
 	const clauses = [`rr.status != 'open'`, `rr.deleted_at IS NULL`];
 	const params = [];
@@ -344,7 +339,7 @@ export const getReportHistory = async ({ resolution, cursorTime, cursorId, limit
        rr.created_at                           AS submitted_at,
        rr.reviewed_at,
        rr.reviewed_by,
-       to_char(rr.reviewed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_reviewed_at,
+       ${cursorText("rr.reviewed_at")} AS cursor_reviewed_at,
  
        r.overall_score,
        r.review_text                           AS rating_comment,
@@ -427,16 +422,10 @@ export const getReportHistory = async ({ resolution, cursorTime, cursorId, limit
 		params,
 	);
 
-	const hasNextPage = rows.length > safeLimit;
-	const items = hasNextPage ? rows.slice(0, safeLimit) : rows;
-
-	const nextCursor =
-		hasNextPage && items.length > 0 ?
-			{
-				cursorTime: items[items.length - 1].cursor_reviewed_at,
-				cursorId: items[items.length - 1].report_id,
-			}
-		:	null;
+	const { items, nextCursor } = buildPage(rows, safeLimit, {
+		timeKey: "cursor_reviewed_at",
+		idKey: "report_id",
+	});
 
 	return {
 		items: items.map((row) => ({
