@@ -1,7 +1,9 @@
+// src/services/rating.service.js
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { enqueueNotification } from "../workers/notificationQueue.js";
+import { cursorText, clampLimit, buildPage } from "../db/utils/pagination.js";
 
 export const submitRating = async (reviewerId, data) => {
 	const {
@@ -226,6 +228,9 @@ export const getRatingsForConnection = async (callerId, connectionId) => {
 	return { myRatings, theirRatings };
 };
 
+// Builds the keyset WHERE fragment shared by all three list endpoints below.
+// Cursor time is cast explicitly so a malformed value fails fast with a clear
+// type-cast error instead of being coerced silently.
 const buildCursorClause = (cursorTime, cursorId, paramIndex) => {
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (!hasCursor) {
@@ -233,26 +238,15 @@ const buildCursorClause = (cursorTime, cursorId, paramIndex) => {
 	}
 
 	return {
-		clause: `(r.created_at < $${paramIndex} OR (r.created_at = $${paramIndex} AND r.rating_id > $${paramIndex + 1}::uuid))`,
+		clause: `(r.created_at < $${paramIndex}::timestamptz OR (r.created_at = $${paramIndex}::timestamptz AND r.rating_id > $${paramIndex + 1}::uuid))`,
 		params: [cursorTime, cursorId],
 		nextIndex: paramIndex + 2,
 	};
 };
 
-const buildNextCursor = (fetchedRows, limit) => {
-	if (fetchedRows.length <= limit) {
-		return null;
-	}
-
-	const lastVisibleRow = fetchedRows[limit - 1];
-	return {
-		cursorTime: lastVisibleRow.created_at.toISOString(),
-		cursorId: lastVisibleRow.rating_id,
-	};
-};
-
 export const getPublicRatings = async (userId, filters) => {
-	const { cursorTime, cursorId, limit = 20 } = filters;
+	const { cursorTime, cursorId, limit: rawLimit = 20 } = filters;
+	const limit = clampLimit(rawLimit);
 
 	const clauses = [
 		`r.reviewee_id   = $1`,
@@ -287,6 +281,7 @@ export const getPublicRatings = async (userId, filters) => {
        r.value_score,
        r.review_text        AS comment,
        r.created_at,
+       ${cursorText("r.created_at")} AS cursor_time,
        COALESCE(sp.full_name, pop.owner_full_name, 'Anonymous Reviewer') AS reviewer_name,
        sp.profile_photo_url AS reviewer_photo_url
      FROM ratings r
@@ -305,8 +300,7 @@ export const getPublicRatings = async (userId, filters) => {
 		params,
 	);
 
-	const items = rows.slice(0, limit);
-	const nextCursor = buildNextCursor(rows, limit);
+	const { items, nextCursor } = buildPage(rows, limit, { idKey: "rating_id" });
 
 	return {
 		items: items.map((row) => ({
@@ -328,7 +322,8 @@ export const getPublicRatings = async (userId, filters) => {
 };
 
 export const getMyGivenRatings = async (reviewerId, filters) => {
-	const { cursorTime, cursorId, limit = 20 } = filters;
+	const { cursorTime, cursorId, limit: rawLimit = 20 } = filters;
+	const limit = clampLimit(rawLimit);
 
 	const clauses = [`r.reviewer_id = $1`, `r.deleted_at  IS NULL`];
 	const params = [reviewerId];
@@ -362,6 +357,7 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
        r.review_text AS comment,
        r.is_visible,
        r.created_at,
+       ${cursorText("r.created_at")} AS cursor_time,
 
        CASE
          WHEN r.reviewee_type = 'user'
@@ -403,8 +399,7 @@ export const getMyGivenRatings = async (reviewerId, filters) => {
 		params,
 	);
 
-	const items = rows.slice(0, limit);
-	const nextCursor = buildNextCursor(rows, limit);
+	const { items, nextCursor } = buildPage(rows, limit, { idKey: "rating_id" });
 
 	return {
 		items: items.map((row) => ({
@@ -437,7 +432,8 @@ export const getPublicPropertyRatings = async (propertyId, filters) => {
 	);
 	if (!propRows.length) throw new AppError("Property not found", 404);
 
-	const { cursorTime, cursorId, limit = 20 } = filters;
+	const { cursorTime, cursorId, limit: rawLimit = 20 } = filters;
+	const limit = clampLimit(rawLimit);
 
 	const clauses = [
 		`r.reviewee_id   = $1`,
@@ -472,6 +468,7 @@ export const getPublicPropertyRatings = async (propertyId, filters) => {
        r.value_score,
        r.review_text        AS comment,
        r.created_at,
+       ${cursorText("r.created_at")} AS cursor_time,
        COALESCE(sp.full_name, pop.owner_full_name, 'Anonymous Reviewer') AS reviewer_name,
        sp.profile_photo_url AS reviewer_photo_url
      FROM ratings r
@@ -490,8 +487,7 @@ export const getPublicPropertyRatings = async (propertyId, filters) => {
 		params,
 	);
 
-	const items = rows.slice(0, limit);
-	const nextCursor = buildNextCursor(rows, limit);
+	const { items, nextCursor } = buildPage(rows, limit, { idKey: "rating_id" });
 
 	return {
 		items: items.map((row) => ({

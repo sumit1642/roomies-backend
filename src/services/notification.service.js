@@ -1,12 +1,14 @@
+// src/services/notification.service.js
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { cursorText, clampLimit, buildPage } from "../db/utils/pagination.js";
 
 const UUID_V1_TO_V5_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export const getFeed = async (userId, filters) => {
 	const { isRead, cursorTime, cursorId, limit: rawLimit = 20 } = filters;
-	const limit = Math.min(Math.max(1, rawLimit), 100);
+	const limit = clampLimit(rawLimit);
 
 	const clauses = [`n.recipient_id = $1`, `n.deleted_at IS NULL`];
 	const params = [userId];
@@ -20,7 +22,9 @@ export const getFeed = async (userId, filters) => {
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (hasCursor) {
-		clauses.push(`(n.created_at < $${p} OR (n.created_at = $${p} AND n.notification_id > $${p + 1}::uuid))`);
+		clauses.push(
+			`(n.created_at < $${p}::timestamptz OR (n.created_at = $${p}::timestamptz AND n.notification_id > $${p + 1}::uuid))`,
+		);
 		params.push(cursorTime, cursorId);
 		p += 2;
 	}
@@ -37,7 +41,8 @@ export const getFeed = async (userId, filters) => {
        n.entity_id,
        n.message,
        n.is_read,
-       n.created_at
+       n.created_at,
+       ${cursorText("n.created_at")} AS cursor_time
      FROM notifications n
      WHERE ${clauses.join(" AND ")}
      ORDER BY n.created_at DESC, n.notification_id ASC
@@ -45,16 +50,7 @@ export const getFeed = async (userId, filters) => {
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].notification_id,
-			}
-		:	null;
+	const { items, nextCursor } = buildPage(rows, limit, { idKey: "notification_id" });
 
 	return {
 		items: items.map((row) => ({

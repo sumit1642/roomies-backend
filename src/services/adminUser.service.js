@@ -9,6 +9,7 @@
 import { pool } from "../db/client.js";
 import { logger } from "../logger/index.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { cursorText, clampLimit, buildPage } from "../db/utils/pagination.js";
 
 // ─── getUserDetail ────────────────────────────────────────────────────────
 //
@@ -118,7 +119,7 @@ export const getUserDetail = async (userId) => {
 // LIKE-metacharacter escaping used there.
 export const listUsers = async (filters) => {
 	const { role, accountStatus, email, cursorTime, cursorId, limit: rawLimit = 20 } = filters;
-	const limit = Math.min(Math.max(1, rawLimit), 100);
+	const limit = clampLimit(rawLimit);
 
 	const clauses = [`u.deleted_at IS NULL`];
 	const params = [];
@@ -147,7 +148,9 @@ export const listUsers = async (filters) => {
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (hasCursor) {
-		clauses.push(`(u.created_at < $${p} OR (u.created_at = $${p} AND u.user_id > $${p + 1}::uuid))`);
+		clauses.push(
+			`(u.created_at < $${p}::timestamptz OR (u.created_at = $${p}::timestamptz AND u.user_id > $${p + 1}::uuid))`,
+		);
 		params.push(cursorTime, cursorId);
 		p += 2;
 	}
@@ -163,6 +166,7 @@ export const listUsers = async (filters) => {
        u.account_status,
        u.is_email_verified,
        u.created_at,
+       ${cursorText("u.created_at")} AS cursor_time,
        COALESCE(
          (
            SELECT ARRAY_AGG(r.role_name ORDER BY r.role_name)
@@ -177,16 +181,7 @@ export const listUsers = async (filters) => {
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].user_id,
-			}
-		:	null;
+	const { items, nextCursor } = buildPage(rows, limit, { idKey: "user_id" });
 
 	return {
 		items: items.map((row) => {
