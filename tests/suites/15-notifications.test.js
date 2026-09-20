@@ -1,30 +1,4 @@
 // tests/suites/15-notifications.test.js
-//
-// Covers: feed (isRead filter, cursor pagination), unread-count, mark-read
-// ({ all: true } XOR { notificationIds: [...] }).
-//
-// Notifications are never written directly by request handlers — every row
-// is a side effect of enqueueNotification() pushing a BullMQ job onto the
-// "notification-delivery" queue (src/workers/notificationQueue.js), which
-// notificationWorker.js consumes asynchronously and inserts with
-// idempotency_key = job.id, ON CONFLICT DO NOTHING (src/workers/notificationWorker.js).
-// Since src/server.js never runs in tests, that worker never starts unless a
-// suite starts it itself — mirrors the pattern already established in
-// 01-auth-otp-integration.test.js (real email worker) and
-// 05-verification-email.test.js (drainOutbox + real email worker), just
-// pointed at the notification queue instead of the email queue.
-//
-// Strategy: ONE real end-to-end test below drives an actual interest-request
-// flow, starts the real notification worker, and waits on a QueueEvents
-// "completed" event to prove the full enqueue -> worker -> INSERT pipeline
-// works and produces the exact NOTIFICATION_MESSAGES text. Every other test
-// in this file (feed filters, pagination, mark-read, unread-count) seeds
-// notification rows directly via SQL instead of re-driving the pipeline —
-// once the pipeline itself is proven, re-proving it for every read-endpoint
-// assertion would only add flake risk and runtime, not coverage. This
-// mirrors 09-listings-photos.test.js's stance on the media worker: the real
-// pipeline is exercised once, read-endpoint behavior is tested against known
-// DB state afterward.
 
 import { QueueEvents } from "bullmq";
 import request from "supertest";
@@ -285,6 +259,34 @@ describe("GET /notifications", () => {
 	test("requires authentication", async () => {
 		const res = await request(app).get("/api/v1/notifications");
 		expect(res.status).toBe(401);
+	});
+
+	test("cursor pagination does not duplicate or skip rows that share the same created_at", async () => {
+		const { agent, user } = await registerStudent({ email: uniqueEmail("feed-samets") });
+
+		// Three rows with the IDENTICAL timestamp (including microseconds), so
+		// ordering falls entirely to the notification_id tie-break. With the old
+		// JS-Date cursor this was the case that could return a boundary row twice.
+		const sharedTs = "2026-01-01T00:00:00.123456Z";
+		const seeded = [];
+		for (let i = 0; i < 3; i++) {
+			seeded.push(await seedNotification(user.userId, { createdAt: sharedTs }));
+		}
+		const seededIds = seeded.map((r) => r.notification_id).sort();
+
+		const collected = [];
+		let cursor;
+		for (let guard = 0; guard < 5; guard++) {
+			const query = { limit: 2, ...(cursor ?? {}) };
+			const page = await agent.get("/api/v1/notifications").query(query);
+			expect(page.status).toBe(200);
+			collected.push(...page.body.data.items.map((i) => i.notificationId));
+			if (!page.body.data.nextCursor) break;
+			cursor = page.body.data.nextCursor;
+		}
+
+		expect(collected.sort()).toEqual(seededIds);
+		expect(cursor.cursorTime).toMatch(/\.\d{6}Z$/);
 	});
 });
 
