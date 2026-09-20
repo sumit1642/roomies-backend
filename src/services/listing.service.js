@@ -8,6 +8,7 @@ import { expirePendingRequestsForListing } from "./interest.service.js";
 import { EXPIRED_LISTING_MESSAGE, UNAVAILABLE_LISTING_MESSAGE } from "./listingLifecycle.js";
 import { dedupePreferencesByKey } from "../config/preferences.js";
 import { getPincode } from "./pincode.service.js";
+import { cursorText, clampLimit, buildPage } from "../db/utils/pagination.js";
 
 const PROPERTY_OWNED_LOCATION_FIELDS = new Set([
 	"addressLine",
@@ -369,7 +370,7 @@ export const searchListings = async (userId, filters) => {
 		cursorTime,
 		cursorScore,
 		cursorId,
-		limit = 20,
+		limit: rawLimit = 20,
 	} = filters;
 
 	// lat/lng may come directly from the client (GPS, native geolocation) or
@@ -379,6 +380,7 @@ export const searchListings = async (userId, filters) => {
 	// resolution block below. lat/lng wins over pincode when both are
 	// present — GPS is strictly more precise than a pincode centroid.
 	let { lat, lng } = filters;
+	const limit = clampLimit(rawLimit);
 
 	if ((lat === undefined || lng === undefined) && filters.pincode !== undefined) {
 		try {
@@ -476,7 +478,9 @@ export const searchListings = async (userId, filters) => {
 
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	if (hasCursor && sortBy === "recent") {
-		clauses.push(`(l.created_at < $${p} OR (l.created_at = $${p} AND l.listing_id > $${p + 1}::uuid))`);
+		clauses.push(
+			`(l.created_at < $${p}::timestamptz OR (l.created_at = $${p}::timestamptz AND l.listing_id > $${p + 1}::uuid))`,
+		);
 		params.push(cursorTime, cursorId);
 		p += 2;
 	}
@@ -517,6 +521,7 @@ export const searchListings = async (userId, filters) => {
       l.available_from,
       l.status,
       l.created_at,
+      ${cursorText("l.created_at")} AS cursor_time,
       COALESCE(l.latitude,  p.latitude)  AS latitude,
       COALESCE(l.longitude, p.longitude) AS longitude,
       COALESCE(p.property_name, NULL) AS property_name,
@@ -575,8 +580,8 @@ export const searchListings = async (userId, filters) => {
 		params,
 	);
 
+	const { items, nextCursor: recentNextCursor } = buildPage(rows, limit, { idKey: "listing_id" });
 	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
 
 	const enrichedItems = items.map((row) => ({
 		...row,
@@ -593,6 +598,7 @@ export const searchListings = async (userId, filters) => {
 		user_has_preferences: undefined,
 		ri_p50: undefined,
 		ri_resolution: undefined,
+		cursor_time: undefined,
 	}));
 
 	if (sortBy === "compatibility") {
@@ -607,15 +613,7 @@ export const searchListings = async (userId, filters) => {
 		return { items: enrichedItems, nextCursor };
 	}
 
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].created_at.toISOString(),
-				cursorId: items[items.length - 1].listing_id,
-			}
-		:	null;
-
-	return { items: enrichedItems, nextCursor };
+	return { items: enrichedItems, nextCursor: recentNextCursor };
 };
 
 export const updateListing = async (posterId, listingId, body) => {
@@ -993,14 +991,15 @@ export const unsaveListing = async (userId, listingId) => {
 	return { listingId, saved: false };
 };
 
-export const getSavedListings = async (userId, { cursorTime, cursorId, limit = 20 }) => {
+export const getSavedListings = async (userId, { cursorTime, cursorId, limit: rawLimit = 20 }) => {
+	const limit = clampLimit(rawLimit);
 	const hasCursor = cursorTime !== undefined && cursorId !== undefined;
 	const params = [userId, limit + 1];
 	let cursorClause = "";
 
 	if (hasCursor) {
 		params.push(cursorTime, cursorId);
-		cursorClause = `AND (sl.saved_at < $3 OR (sl.saved_at = $3 AND sl.listing_id > $4::uuid))`;
+		cursorClause = `AND (sl.saved_at < $3::timestamptz OR (sl.saved_at = $3::timestamptz AND sl.listing_id > $4::uuid))`;
 	}
 
 	const { rows } = await pool.query(
@@ -1017,6 +1016,7 @@ export const getSavedListings = async (userId, { cursorTime, cursorId, limit = 2
       l.available_from,
       l.status,
       sl.saved_at,
+      ${cursorText("sl.saved_at")} AS cursor_time,
       COALESCE(p.property_name, NULL)     AS property_name,
       COALESCE(p.average_rating, u.average_rating) AS average_rating,
       (
@@ -1043,8 +1043,7 @@ export const getSavedListings = async (userId, { cursorTime, cursorId, limit = 2
 		params,
 	);
 
-	const hasNextPage = rows.length > limit;
-	const items = hasNextPage ? rows.slice(0, limit) : rows;
+	const { items, nextCursor } = buildPage(rows, limit, { timeKey: "cursor_time", idKey: "listing_id" });
 
 	const mappedItems = items.map((row) => ({
 		...row,
@@ -1052,15 +1051,8 @@ export const getSavedListings = async (userId, { cursorTime, cursorId, limit = 2
 		depositAmount: row.deposit_amount / 100,
 		rent_per_month: undefined,
 		deposit_amount: undefined,
+		cursor_time: undefined,
 	}));
-
-	const nextCursor =
-		hasNextPage ?
-			{
-				cursorTime: items[items.length - 1].saved_at.toISOString(),
-				cursorId: items[items.length - 1].listing_id,
-			}
-		:	null;
 
 	return { items: mappedItems, nextCursor };
 };
