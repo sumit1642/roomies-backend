@@ -54,6 +54,21 @@ const CONCURRENT_SUFFIX = ".concurrent.sql";
 // Matching down-migration suffix for rollback support (see --rollback below).
 const DOWN_SUFFIX = ".down.sql";
 
+// Serialises every schema writer in this repository. In particular, two
+// `db:up` commands must not both decide that the same migration is pending,
+// and `db:down` must not remove the schema while a migration is running.
+// Session-level locks intentionally span non-transactional concurrent-index
+// migrations too; transaction-level advisory locks would be released before
+// those migrations finish.
+const MIGRATION_LOCK_NAMESPACE = 1_947_234_821;
+const MIGRATION_LOCK_KEY = 1;
+
+const acquireMigrationLock = (client) =>
+	client.query("SELECT pg_advisory_lock($1, $2)", [MIGRATION_LOCK_NAMESPACE, MIGRATION_LOCK_KEY]);
+
+const releaseMigrationLock = (client) =>
+	client.query("SELECT pg_advisory_unlock($1, $2)", [MIGRATION_LOCK_NAMESPACE, MIGRATION_LOCK_KEY]);
+
 const sha256 = (content) => crypto.createHash("sha256").update(content, "utf8").digest("hex");
 
 const pad = (str, width) => str.toString().padEnd(width);
@@ -177,6 +192,9 @@ const run = async () => {
 	try {
 		await client.connect();
 		console.log("✅  Connected to database");
+		console.log("⏳  Waiting for the database migration lock...");
+		await acquireMigrationLock(client);
+		console.log("✅  Database migration lock acquired");
 
 		await client.query(ENSURE_MIGRATIONS_TABLE);
 
@@ -353,6 +371,11 @@ const run = async () => {
 
 		console.log(`\n✅  ${pending.length} migration(s) applied successfully.\n`);
 	} finally {
+		// Advisory locks are also released when the connection closes. Releasing
+		// explicitly makes the hand-off to a waiting db:up/db:down immediate.
+		try {
+			await releaseMigrationLock(client);
+		} catch (_) {}
 		await client.end();
 	}
 };
